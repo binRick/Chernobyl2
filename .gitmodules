@@ -1,0 +1,3 @@
+[submodule "Chernobyl"]
+	path = Chernobyl
+	url = git@github.com:binRick/Chernobyl.git

@@ -1,0 +1,22 @@
+# Chernobyl 2 (the 3D sequel) build artifacts
+build/
+vendor/raylib-src/
+*.o
+*.dSYM
+
+# screenshot scratch (docs/screenshot.png is kept)
+chernobyl3d-shot.png
+chernobyl2-shot.png
+vm*.png
+inspect.png
+
+# the vendored raylib archive + the 38MB weapon model are large; keep the repo
+# lean. run.sh rebuilds raylib; drop the model in assets/ to run.
+# (comment these two lines out if you'd rather commit them)
+vendor/raylib/
+assets/*.glb
+chernobyl2-debug.log
+
+# local agent config + runtime files
+.claude/
+vm_tune.txt

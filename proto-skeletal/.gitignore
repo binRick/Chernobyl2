@@ -1,0 +1,6 @@
+build/
+dist-web/
+vendor/
+assets/
+*.o
+*.dSYM
