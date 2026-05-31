@@ -20,3 +20,4 @@ chernobyl2-debug.log
 # local agent config + runtime files
 .claude/
 vm_tune.txt
+tools/FBX2glTF
