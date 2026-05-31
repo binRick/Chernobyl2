@@ -136,7 +136,7 @@ typedef struct {
     const char     *label;
     const char     *tunePath;
 } Weapon;
-static Weapon g_weapons[3];
+static Weapon g_weapons[4];
 static int    g_curWeapon = 0;
 static int    g_numWeapons = 0;
 
@@ -210,7 +210,7 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
 typedef struct { Vector3 a, b; float life; } Tracer;
 typedef struct { Vector3 pos, vel; float life, life0, size; Color col; } Spark;
 #define MAX_TRACERS 32
-#define MAX_SPARKS  512
+#define MAX_SPARKS  1400
 static Tracer g_tracers[MAX_TRACERS];
 static Spark  g_sparks[MAX_SPARKS];
 
@@ -272,16 +272,16 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
 // the bullet's travel (dir) in a wide cone, plus heavier slow "gobs" every few
 // particles. Gravity + fade are handled by the shared spark integrator/draw.
 static void SpawnBlood(Vector3 p, Vector3 dir) {
-    for (int i=0;i<70;i++) for (int s=0;s<MAX_SPARKS;s++){
+    for (int i=0;i<200;i++) for (int s=0;s<MAX_SPARKS;s++){
         if (g_sparks[s].life>0) continue;
-        float spread=2.7f;
+        float spread=3.6f;
         Vector3 v={ dir.x*4.5f + GetRandomValue(-100,100)/100.0f*spread,
                     dir.y*4.5f + GetRandomValue(-100,100)/100.0f*spread + 1.7f,
                     dir.z*4.5f + GetRandomValue(-100,100)/100.0f*spread };
         int gob=(i%5==0);                                  // heavy gobs: slower, bigger, redder
         if (gob){ v.x*=0.45f; v.y=v.y*0.45f+0.4f; v.z*=0.45f; }
-        float lf = 0.55f + GetRandomValue(0,70)/100.0f;
-        float sz = gob ? (0.07f+GetRandomValue(0,5)/100.0f) : (0.022f+GetRandomValue(0,3)/100.0f);
+        float lf = 1.1f + GetRandomValue(0,120)/100.0f;
+        float sz = gob ? (0.10f+GetRandomValue(0,7)/100.0f) : (0.028f+GetRandomValue(0,4)/100.0f);
         unsigned char r=(unsigned char)(150+GetRandomValue(0,105)); // dark maroon -> arterial red
         unsigned char g=(unsigned char)GetRandomValue(0,28);
         unsigned char b=(unsigned char)GetRandomValue(0,18);
@@ -484,7 +484,7 @@ static void Update(void) {
     // overlay + inspect + reset
     if (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB)) g_devOverlay=!g_devOverlay;
     if (IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
-    if (IsKeyPressed(KEY_N)){                          // N: toggle empty-arena tuning mode
+    if (IsKeyPressed(KEY_N)){                          // N: toggle orient mode (no enemies, weapon-aim tuning)
         g_noEnemies=!g_noEnemies;
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
         if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);  // bring the wave back
@@ -493,6 +493,7 @@ static void Update(void) {
     if (IsKeyPressed(KEY_ONE)) SwitchWeapon(0);
     if (IsKeyPressed(KEY_TWO)) SwitchWeapon(1);
     if (IsKeyPressed(KEY_THREE)) SwitchWeapon(2);
+    if (IsKeyPressed(KEY_FOUR)) SwitchWeapon(3);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; }
     if (IsKeyPressed(KEY_F5)){ StashActiveTuning(); SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch); DebugLog("vmsave","\"slot\":%d,\"saved\":true",g_curWeapon); }
 
@@ -507,11 +508,28 @@ static void Update(void) {
     if (IsKeyPressed(KEY_P))
         DebugLog("vmxform","\"off\":[%.3f,%.3f,%.3f],\"scale\":%.4f,\"yaw\":%.1f,\"pitch\":%.1f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch);
+    if (g_noEnemies){   // orient mode: log the selected weapon + orientation whenever it changes
+        static float lo[6]={1e9f,0,0,0,0,0};
+        float cur[6]={g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch};
+        int changed=0; for(int k=0;k<6;k++) if(fabsf(cur[k]-lo[k])>1e-4f) changed=1;
+        if (changed){ for(int k=0;k<6;k++) lo[k]=cur[k];
+            DebugLog("orient","\"weapon\":\"%s\",\"off\":[%.3f,%.3f,%.3f],\"scale\":%.5f,\"yaw\":%.1f,\"pitch\":%.1f",
+                     g_weapons[g_curWeapon].label,g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch);
+        }
+    }
 
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0) g_tracers[i].life-=dt;
     for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
-        g_sparks[i].life-=dt; g_sparks[i].vel.y-=12.0f*dt;
-        g_sparks[i].pos=Vector3Add(g_sparks[i].pos,Vector3Scale(g_sparks[i].vel,dt));
+        Spark *sp=&g_sparks[i]; sp->life-=dt;
+        int resting=(sp->pos.y<=0.02f && sp->vel.x==0 && sp->vel.z==0 && sp->vel.y==0);
+        if (!resting){
+            sp->vel.y-=12.0f*dt;
+            sp->pos=Vector3Add(sp->pos,Vector3Scale(sp->vel,dt));
+            if (sp->pos.y<=0.0f){            // hit the floor -> splat into a resting puddle
+                sp->pos.y=0.015f; sp->vel=(Vector3){0,0,0};
+                if (sp->life<2.8f) sp->life=2.8f; sp->life0=fmaxf(sp->life0,sp->life);
+            }
+        }
     }
 }
 
@@ -623,7 +641,15 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1/2/3=weapon N=enemies V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1/2/3/4=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        if (g_noEnemies){   // orient mode panel
+            DrawRectangle(4,58,378,92,(Color){0,0,0,160});
+            DrawText("ORIENT MODE  (N = back to play)",10,62,18,YELLOW);
+            DrawText(TextFormat("weapon: %s",g_weapons[g_curWeapon].label),10,86,16,RAYWHITE);
+            DrawText(TextFormat("off [%.2f %.2f %.2f]  scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),10,106,14,RAYWHITE);
+            DrawText(TextFormat("yaw %.1f  pitch %.1f",g_vmYaw,g_vmPitch),10,124,14,RAYWHITE);
+            DrawText("IJKL/UO move  -/= scale  [ ] yaw  ; \047 pitch  F5=save",10,140,12,GRAY);
+        }
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
         DrawText("IJKL/UO move  -/= scale  [/] yaw  ;/' pitch  P log",8,60,12,GRAY);
@@ -714,7 +740,9 @@ int main(int argc, char **argv) {
                (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
     LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
-    g_numWeapons=3;
+    LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
+               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+    g_numWeapons=4;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
