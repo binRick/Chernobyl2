@@ -44,6 +44,7 @@
 static int   g_debug     = 0;
 static FILE *g_dbg       = NULL;
 static int   g_maxFrames = 0;     // --frames N : timed run, then quit
+static int   g_noEnemies = 0;     // --no-enemies / N key : empty arena for weapon tuning
 static int   g_shotFrame = 0;     // --shot N : screenshot at frame N (0 = off)
 
 static void DebugLog(const char *ev, const char *fmt, ...) {
@@ -135,7 +136,7 @@ typedef struct {
     const char     *label;
     const char     *tunePath;
 } Weapon;
-static Weapon g_weapons[2];
+static Weapon g_weapons[3];
 static int    g_curWeapon = 0;
 static int    g_numWeapons = 0;
 
@@ -383,7 +384,7 @@ static void UpdateEnemies(float dt){
                 if (nf>0){ e->animT+=dt*60.0f; if (e->animT>nf-1) e->animT=(float)(nf-1); }
             }
             e->deathT+=dt;
-            if (e->deathT>1.8f) SpawnEnemy(i);
+            if (!g_noEnemies && e->deathT>1.8f) SpawnEnemy(i);
         }
     }
     for (int a=0;a<MAX_ENEMIES;a++){            // keep enemies from overlapping each other
@@ -483,8 +484,15 @@ static void Update(void) {
     // overlay + inspect + reset
     if (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB)) g_devOverlay=!g_devOverlay;
     if (IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
+    if (IsKeyPressed(KEY_N)){                          // N: toggle empty-arena tuning mode
+        g_noEnemies=!g_noEnemies;
+        for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
+        if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);  // bring the wave back
+        DebugLog("mode","\"noEnemies\":%s", g_noEnemies?"true":"false");
+    }
     if (IsKeyPressed(KEY_ONE)) SwitchWeapon(0);
     if (IsKeyPressed(KEY_TWO)) SwitchWeapon(1);
+    if (IsKeyPressed(KEY_THREE)) SwitchWeapon(2);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; }
     if (IsKeyPressed(KEY_F5)){ StashActiveTuning(); SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch); DebugLog("vmsave","\"slot\":%d,\"saved\":true",g_curWeapon); }
 
@@ -615,7 +623,7 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1/2=weapon V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1/2/3=weapon N=enemies V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
         DrawText("IJKL/UO move  -/= scale  [/] yaw  ;/' pitch  P log",8,60,12,GRAY);
@@ -654,6 +662,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i],"--debug")) g_debug=1;
         else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
     }
     // Send the JSON event stream straight to a log file (not stdout/stderr, so
     // it stays clean of raylib's own warnings). Fresh file each run.
@@ -703,7 +712,9 @@ int main(int argc, char **argv) {
                VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0);
     LoadWeapon(1, "assets/shotgun.glb", "../assets/shotgun.glb", "Shotgun", "vm_tune_shotgun.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
-    g_numWeapons=2;
+    LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
+               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+    g_numWeapons=3;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
@@ -727,7 +738,7 @@ int main(int argc, char **argv) {
         DebugLog("enemy","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f]",
                  g_enemy.meshCount, g_enemy.skeleton.boneCount, g_enemyAnimN,
                  eb.max.x-eb.min.x, eb.max.y-eb.min.y, eb.max.z-eb.min.z);
-        for (int i=0;i<5;i++) SpawnEnemy(i);            // start with 5 enemies
+        if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);   // start with 5 enemies (none in --no-enemies mode)
     } else DebugLog("enemy","\"error\":\"assets/enemy.glb not found\"");
 
 #if defined(__EMSCRIPTEN__)
