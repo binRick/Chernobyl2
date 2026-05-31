@@ -498,14 +498,17 @@ static void Update(void) {
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; }
     if (IsKeyPressed(KEY_F5)){ StashActiveTuning(); SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch); DebugLog("vmsave","\"slot\":%d,\"saved\":true",g_curWeapon); }
 
-    // live viewmodel tuning
-    float ns=dt*0.5f;
+    // live viewmodel tuning (faster in orient mode so a mispositioned weapon is
+    // easy to sweep back into frame)
+    float ns=dt*(g_noEnemies?3.0f:0.5f);
+    float rs=dt*(g_noEnemies?120.0f:60.0f);
+    float ss=g_noEnemies?3.0f:1.0f;
     if (IsKeyDown(KEY_I)) g_vmOff.y+=ns;  if (IsKeyDown(KEY_K)) g_vmOff.y-=ns;
     if (IsKeyDown(KEY_L)) g_vmOff.x+=ns;  if (IsKeyDown(KEY_J)) g_vmOff.x-=ns;
     if (IsKeyDown(KEY_O)) g_vmOff.z+=ns;  if (IsKeyDown(KEY_U)) g_vmOff.z-=ns;
-    if (IsKeyDown(KEY_EQUAL)) g_vmScale*=(1.0f+dt);  if (IsKeyDown(KEY_MINUS)) g_vmScale*=(1.0f-dt);
-    if (IsKeyDown(KEY_RIGHT_BRACKET)) g_vmYaw+=dt*60.0f;  if (IsKeyDown(KEY_LEFT_BRACKET)) g_vmYaw-=dt*60.0f;
-    if (IsKeyDown(KEY_APOSTROPHE)) g_vmPitch+=dt*60.0f;   if (IsKeyDown(KEY_SEMICOLON)) g_vmPitch-=dt*60.0f;
+    if (IsKeyDown(KEY_EQUAL)) g_vmScale*=(1.0f+dt*ss);  if (IsKeyDown(KEY_MINUS)) g_vmScale*=(1.0f-dt*ss);
+    if (IsKeyDown(KEY_RIGHT_BRACKET)) g_vmYaw+=rs;  if (IsKeyDown(KEY_LEFT_BRACKET)) g_vmYaw-=rs;
+    if (IsKeyDown(KEY_APOSTROPHE)) g_vmPitch+=rs;   if (IsKeyDown(KEY_SEMICOLON)) g_vmPitch-=rs;
     if (IsKeyPressed(KEY_P))
         DebugLog("vmxform","\"off\":[%.3f,%.3f,%.3f],\"scale\":%.4f,\"yaw\":%.1f,\"pitch\":%.1f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch);
@@ -602,7 +605,9 @@ static void DrawInspect(void){
 }
 
 static void DrawViewmodel(void){
-    if (!g_hasGun || g_inspect) return;
+    // In orient mode the live first-person viewmodel must always show so tuning
+    // is visible; inspect (which ignores the transform) is suppressed there.
+    if (!g_hasGun || (g_inspect && !g_noEnemies)) return;
     PoseGun();
     float bobX=sinf(g_bob)*0.012f, bobY=fabsf(cosf(g_bob))*0.010f;
     // recoil: muzzle kicks UP (pitch) and the gun shoves slightly up+back, then
@@ -676,7 +681,7 @@ static void Frame(void) {
             DrawWorld();
             DrawEnemies();
         EndMode3D();
-        if (g_inspect) DrawInspect();
+        if (g_inspect && !g_noEnemies) DrawInspect();
         DrawViewmodel();
         DrawHUD();
     EndDrawing();
