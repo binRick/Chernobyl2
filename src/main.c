@@ -671,14 +671,20 @@ static void DrawHUD(void) {
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
         DrawText(TextFormat("%s  [%s]  1-6=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
-            DrawRectangle(6,96,560,196,(Color){0,0,0,205});
-            DrawRectangleLines(6,96,560,196,(Color){255,210,60,255});
+            DrawRectangle(6,96,600,330,(Color){0,0,0,215});
+            DrawRectangleLines(6,96,600,330,(Color){255,210,60,255});
             TextSh("ORIENT MODE  (N = back to play)",18,104,28,YELLOW);
             TextSh(TextFormat("weapon:  %s",g_weapons[g_curWeapon].label),18,142,24,(Color){120,230,255,255});
-            TextSh(TextFormat("off  [%.2f %.2f %.2f]   scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),18,176,20,RAYWHITE);
-            TextSh(TextFormat("yaw  %.1f      pitch  %.1f",g_vmYaw,g_vmPitch),18,202,20,RAYWHITE);
-            TextSh("IJKL/UO move   -/= scale   [ ] yaw   ; \047 pitch",18,234,18,(Color){210,210,210,255});
-            TextSh("0 = reset      F5 = save this weapon",18,258,18,(Color){210,210,210,255});
+            TextSh(TextFormat("off [%.2f %.2f %.2f]  scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),18,176,20,RAYWHITE);
+            TextSh(TextFormat("yaw %.1f   pitch %.1f",g_vmYaw,g_vmPitch),18,202,20,RAYWHITE);
+            Color kc=(Color){235,235,140,255};
+            TextSh("J / L      move left / right",18,236,20,kc);
+            TextSh("K / I      move down / up",18,262,20,kc);
+            TextSh("U / O      move back / forward",18,288,20,kc);
+            TextSh("- / =      scale  smaller / bigger",18,314,20,kc);
+            TextSh("[ / ]      yaw    left / right",18,340,20,kc);
+            TextSh("; / '      pitch  down / up",18,366,20,kc);
+            TextSh("0 reset      F5 save",18,396,20,(Color){170,255,170,255});
         }
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
