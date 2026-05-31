@@ -153,7 +153,7 @@ static Spark  g_sparks[MAX_SPARKS];
 // each to face the player. ENEMY_YAW_OFFSET flips facing if they moonwalk.
 #define MAX_ENEMIES        12
 #define ENEMY_SCALE        1.0000f      // FBX2glTF export is already upright meter-scale (~1.86m)
-#define ENEMY_SPEED        1.8f
+#define ENEMY_SPEED        2.6f
 #define ENEMY_HP           100.0f
 #define ENEMY_DMG_PER_SHOT 34.0f      // ~3 shots to kill
 #define ENEMY_RADIUS       0.5f
@@ -283,16 +283,17 @@ static void UpdateEnemies(float dt){
             if (e->clip==g_eAttack && e->hitT<=0) g_playerHp-=ENEMY_TOUCH_DMG*dt;
             if (g_enemyAnimN>0){                               // advance current clip (looping)
                 int nf=ANIM_FRAMES(g_enemyAnim[e->clip]);
-                e->animT+=dt*30.0f;
+                float spd=(e->clip==g_eAttack)?90.0f:30.0f;    // attack plays much faster
+                e->animT+=dt*spd;
                 if (nf>0 && e->animT>=nf) e->animT-=nf;
             }
         } else if (e->state==2){                              // dying: play death once, then respawn
             if (g_enemyAnimN>0){
                 int nf=ANIM_FRAMES(g_enemyAnim[g_eDeath]);
-                if (nf>0){ e->animT+=dt*30.0f; if (e->animT>nf-1) e->animT=(float)(nf-1); }
+                if (nf>0){ e->animT+=dt*60.0f; if (e->animT>nf-1) e->animT=(float)(nf-1); }
             }
             e->deathT+=dt;
-            if (e->deathT>2.6f) SpawnEnemy(i);
+            if (e->deathT>1.8f) SpawnEnemy(i);
         }
     }
     if (g_playerHp<0) g_playerHp=0;
@@ -418,15 +419,13 @@ static void DrawEnemies(void){
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
         float sink=0.0f;
         if (e->state==2){                                     // dying: play death clip, sink late
-            float late=e->deathT-2.0f; if (late>0) sink=-late*1.6f;
+            float late=e->deathT-1.2f; if (late>0) sink=-late*2.7f;
             if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], e->animT);
         } else {
             if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->clip], e->animT);
         }
-        Color tint = (e->state==2) ? (Color){150,90,90,255}
-                   : (e->hitT>0)   ? (Color){255,170,170,255} : WHITE;
         DrawModelEx(g_enemy, (Vector3){e->pos.x, sink, e->pos.z}, (Vector3){0,1,0}, yaw,
-                    (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, tint);
+                    (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
         if (e->state==1 && e->hp<ENEMY_HP){                   // HP bar above damaged enemies
             Vector3 hp={e->pos.x, ENEMY_HEIGHT+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/ENEMY_HP), 0.08f, 0.02f, (Color){230,60,60,255});
