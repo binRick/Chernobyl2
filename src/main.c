@@ -140,7 +140,7 @@ static void LoadVmTune(void){
 
 // ---- Tracers + impact sparks ------------------------------------------------
 typedef struct { Vector3 a, b; float life; } Tracer;
-typedef struct { Vector3 pos, vel; float life; Color col; } Spark;
+typedef struct { Vector3 pos, vel; float life, life0, size; Color col; } Spark;
 #define MAX_TRACERS 32
 #define MAX_SPARKS  256
 static Tracer g_tracers[MAX_TRACERS];
@@ -153,7 +153,7 @@ static Spark  g_sparks[MAX_SPARKS];
 // each to face the player. ENEMY_YAW_OFFSET flips facing if they moonwalk.
 #define MAX_ENEMIES        12
 #define ENEMY_SCALE        1.0000f      // FBX2glTF export is already upright meter-scale (~1.86m)
-#define ENEMY_SPEED        2.6f
+#define ENEMY_SPEED        3.4f
 #define ENEMY_HP           100.0f
 #define ENEMY_DMG_PER_SHOT 34.0f      // ~3 shots to kill
 #define ENEMY_RADIUS       0.5f
@@ -194,7 +194,8 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
         if (g_sparks[s].life>0) continue;
         Vector3 v={ n.x+GetRandomValue(-100,100)/100.0f, n.y+GetRandomValue(-20,120)/100.0f, n.z+GetRandomValue(-100,100)/100.0f };
         v=Vector3Scale(Vector3Normalize(v), 3.0f+GetRandomValue(0,300)/100.0f);
-        g_sparks[s]=(Spark){ p, v, 0.4f+GetRandomValue(0,30)/100.0f, (Color){255,(unsigned char)(200+GetRandomValue(0,55)),60,255} };
+        float lf=0.4f+GetRandomValue(0,30)/100.0f;
+        g_sparks[s]=(Spark){ p, v, lf, lf, 0.04f, (Color){255,(unsigned char)(200+GetRandomValue(0,55)),60,255} };
         break;
     }
 }
@@ -250,7 +251,7 @@ static void Fire(Camera3D cam) {
     int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep);
     if (ei>=0){
         end=ep;
-        SpawnImpact(ep,(Vector3){0,1,0});                 // blood-ish spray
+        SpawnBlood(ep,dir);                               // detailed blood spray
         g_enemies[ei].hp-=ENEMY_DMG_PER_SHOT;
         if (g_enemies[ei].hp<=0){ g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0; g_kills++; }
         else g_enemies[ei].hitT=0.45f;   // non-fatal hit -> flinch
@@ -404,8 +405,13 @@ static void DrawWorld(void) {
         DrawModelEx(g_crate,g_crates[c].pos,(Vector3){0,1,0},0,g_crates[c].size,g_crates[c].col);
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0)
         DrawLine3D(g_tracers[i].a,g_tracers[i].b,(Color){255,240,150,255});
-    for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0)
-        DrawCube(g_sparks[i].pos,0.04f,0.04f,0.04f,g_sparks[i].col);
+    for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
+        Spark *sp=&g_sparks[i];
+        float k=(sp->life0>0)?sp->life/sp->life0:1.0f;     // 1 at birth -> 0 at death
+        float sz=sp->size*(0.45f+0.55f*k);                 // droplets shrink as they fade
+        Color c=sp->col; c.a=(unsigned char)(k*255.0f);    // and fade out
+        DrawCube(sp->pos, sz,sz,sz, c);
+    }
 }
 
 // Draw all alive/dying enemies. The shared model is posed to each enemy's own
