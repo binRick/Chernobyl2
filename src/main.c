@@ -97,6 +97,7 @@ static float           g_fireCd = 0.0f;
 static float           g_recoil = 0.0f;         // 0..1 recoil kick on fire (decays); drives muzzle-up
 static Camera3D        g_vmCam;
 static int             g_inspect = 0;           // V: gun floats in the world
+static float           g_savedMsg = 0.0f;       // >0: flash a "SAVED" confirmation
 static Vector3         g_gunCentroid = { 0, 0, 0 };  // bind-pose centroid, measured ONCE at load
 static float           g_gunFitScale = 1.0f;         // inspect-view fit scale, measured ONCE at load
 
@@ -510,7 +511,17 @@ static void Update(void) {
     if (IsKeyPressed(KEY_FIVE)) SwitchWeapon(4);
     if (IsKeyPressed(KEY_SIX)) SwitchWeapon(5);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; }
-    if (IsKeyPressed(KEY_F5)){ StashActiveTuning(); SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch); DebugLog("vmsave","\"slot\":%d,\"saved\":true",g_curWeapon); }
+    // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
+    // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
+    // an on-screen confirmation so you KNOW it wrote.
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_F5)){
+        StashActiveTuning();
+        SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch);
+        g_savedMsg=2.0f;   // seconds to show "SAVED"
+        DebugLog("vmsave","\"slot\":%d,\"label\":\"%s\",\"path\":\"%s\",\"saved\":true",
+                 g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].tunePath);
+    }
+    if (g_savedMsg>0) g_savedMsg-=GetFrameTime();
 
     // live viewmodel tuning (faster in orient mode so a mispositioned weapon is
     // easy to sweep back into frame)
@@ -671,8 +682,8 @@ static void DrawHUD(void) {
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
         DrawText(TextFormat("%s  [%s]  1-6=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
-            DrawRectangle(6,96,600,330,(Color){0,0,0,215});
-            DrawRectangleLines(6,96,600,330,(Color){255,210,60,255});
+            DrawRectangle(6,96,600,360,(Color){0,0,0,215});
+            DrawRectangleLines(6,96,600,360,(Color){255,210,60,255});
             TextSh("ORIENT MODE  (N = back to play)",18,104,28,YELLOW);
             TextSh(TextFormat("weapon:  %s",g_weapons[g_curWeapon].label),18,142,24,(Color){120,230,255,255});
             TextSh(TextFormat("off [%.2f %.2f %.2f]  scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),18,176,20,RAYWHITE);
@@ -684,7 +695,8 @@ static void DrawHUD(void) {
             TextSh("- / =      scale  smaller / bigger",18,314,20,kc);
             TextSh("[ / ]      yaw    left / right",18,340,20,kc);
             TextSh("; / '      pitch  down / up",18,366,20,kc);
-            TextSh("0 reset      F5 save",18,396,20,(Color){170,255,170,255});
+            TextSh("0 reset      ENTER save  (or F5)",18,396,20,(Color){170,255,170,255});
+            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].tunePath),18,422,20,(Color){90,255,90,255});
         }
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
