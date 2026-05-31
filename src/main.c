@@ -120,29 +120,96 @@ static float   g_vmPitch = VM_PITCH0;
 // Persist the live-tuned viewmodel transform across runs so the player's
 // dialed-in framing survives a rebuild. Saved to ./vm_tune.txt on quit, loaded
 // at startup. 7 floats: offX offY offZ scale yaw pitch (one line).
-static const char *VM_TUNE_PATH = "vm_tune.txt";
-static void SaveVmTune(void){
-    FILE *f=fopen(VM_TUNE_PATH,"w");
-    if(!f) return;
-    fprintf(f,"%.5f %.5f %.5f %.6f %.2f %.2f\n",
-            g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch);
+// A weapon slot owns its model+clips+tuning; the hot-path render/fire code reads
+// the active working-set globals above, which SwitchWeapon swaps in/out. Keys
+// 1/2 select. Each weapon persists its own framing to its own tune file.
+typedef struct {
+    Model           model;
+    ModelAnimation *anim;
+    int             animN, has;
+    int             aIdle, aShoot, aReload;
+    Vector3         centroid;
+    float           fitScale;
+    Vector3         off;  float scale, yaw, pitch;     // live, persisted
+    Vector3         off0; float scale0, yaw0, pitch0;  // defaults for 0=reset
+    const char     *label;
+    const char     *tunePath;
+} Weapon;
+static Weapon g_weapons[2];
+static int    g_curWeapon = 0;
+static int    g_numWeapons = 0;
+
+static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch){
+    FILE *f=fopen(path,"w"); if(!f) return;
+    fprintf(f,"%.5f %.5f %.5f %.6f %.2f %.2f\n", off.x,off.y,off.z,scale,yaw,pitch);
     fclose(f);
 }
-static void LoadVmTune(void){
-    FILE *f=fopen(VM_TUNE_PATH,"r");
-    if(!f){ f=fopen("../vm_tune.txt","r"); if(!f) return; }
+static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, float *pitch){
+    FILE *f=fopen(path,"r"); if(!f) return 0;
     float ox,oy,oz,sc,yw,pt;
-    if(fscanf(f,"%f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt)==6){
-        g_vmOff=(Vector3){ox,oy,oz}; g_vmScale=sc; g_vmYaw=yw; g_vmPitch=pt;
-    }
+    int ok=(fscanf(f,"%f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt)==6);
     fclose(f);
+    if(ok){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; }
+    return ok;
+}
+// Copy the live working-set tuning back into the current slot (call before a switch/quit).
+static void StashActiveTuning(void){
+    if (g_numWeapons<=0) return;
+    Weapon *w=&g_weapons[g_curWeapon];
+    w->off=g_vmOff; w->scale=g_vmScale; w->yaw=g_vmYaw; w->pitch=g_vmPitch;
+}
+// Make slot n the live weapon: copy its model/clips/tuning into the globals.
+static void ActivateWeapon(int n){
+    g_curWeapon=n;
+    Weapon *w=&g_weapons[n];
+    g_gun=w->model; g_gunAnim=w->anim; g_gunAnimN=w->animN; g_hasGun=w->has;
+    g_aIdle=w->aIdle; g_aShoot=w->aShoot; g_aReload=w->aReload;
+    g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
+    g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch;
+    g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
+}
+static void SwitchWeapon(int n){
+    if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
+    StashActiveTuning();
+    ActivateWeapon(n);
+    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\"", n, g_weapons[n].label);
+}
+// Load a glb into slot, resolve idle/shoot/reload clips by name, load saved tuning.
+static void LoadWeapon(int slot, const char *path, const char *alt,
+                       const char *label, const char *tunePath,
+                       Vector3 off0, float scale0, float yaw0, float pitch0){
+    Weapon *w=&g_weapons[slot];
+    w->label=label; w->tunePath=tunePath;
+    w->off0=off0; w->scale0=scale0; w->yaw0=yaw0; w->pitch0=pitch0;
+    w->off=off0; w->scale=scale0; w->yaw=yaw0; w->pitch=pitch0;
+    w->aIdle=0; w->aShoot=1; w->aReload=2; w->has=0; w->anim=NULL; w->animN=0;
+    const char *fp=path; if(!FileExists(fp)) fp=alt;
+    if(!FileExists(fp)){ DebugLog("weapon","\"slot\":%d,\"error\":\"missing\"",slot); return; }
+    w->model=LoadModel(fp);
+    w->anim=LoadModelAnimations(fp,&w->animN);
+    w->has=(w->model.meshCount>0);
+    BoundingBox sb=GetModelBoundingBox(w->model);
+    w->centroid=(Vector3){(sb.min.x+sb.max.x)*0.5f,(sb.min.y+sb.max.y)*0.5f,(sb.min.z+sb.max.z)*0.5f};
+    float md=fmaxf(sb.max.x-sb.min.x,fmaxf(sb.max.y-sb.min.y,sb.max.z-sb.min.z));
+    w->fitScale=(md>0.001f)?1.5f/md:1.0f;
+    for (int i=0;i<w->animN;i++){
+        const char *nm=w->anim[i].name; char low[64]; int j=0;
+        for (; nm[j] && j<63; j++){ char c=nm[j]; if(c>='A'&&c<='Z') c+=32; low[j]=c; }
+        low[j]=0;
+        if (strstr(low,"idle")||strstr(low,"take")||strstr(low,"draw")||strstr(low,"weild")||strstr(low,"wield")) w->aIdle=i;
+        else if (strstr(low,"shoot")||strstr(low,"fire")) w->aShoot=i;
+        else if (strstr(low,"reload")) w->aReload=i;
+    }
+    LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch);
+    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d",
+             slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload);
 }
 
 // ---- Tracers + impact sparks ------------------------------------------------
 typedef struct { Vector3 a, b; float life; } Tracer;
 typedef struct { Vector3 pos, vel; float life, life0, size; Color col; } Spark;
 #define MAX_TRACERS 32
-#define MAX_SPARKS  256
+#define MAX_SPARKS  512
 static Tracer g_tracers[MAX_TRACERS];
 static Spark  g_sparks[MAX_SPARKS];
 
@@ -204,7 +271,7 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
 // the bullet's travel (dir) in a wide cone, plus heavier slow "gobs" every few
 // particles. Gravity + fade are handled by the shared spark integrator/draw.
 static void SpawnBlood(Vector3 p, Vector3 dir) {
-    for (int i=0;i<34;i++) for (int s=0;s<MAX_SPARKS;s++){
+    for (int i=0;i<70;i++) for (int s=0;s<MAX_SPARKS;s++){
         if (g_sparks[s].life>0) continue;
         float spread=2.7f;
         Vector3 v={ dir.x*4.5f + GetRandomValue(-100,100)/100.0f*spread,
@@ -319,6 +386,20 @@ static void UpdateEnemies(float dt){
             if (e->deathT>1.8f) SpawnEnemy(i);
         }
     }
+    for (int a=0;a<MAX_ENEMIES;a++){            // keep enemies from overlapping each other
+        if (g_enemies[a].state!=1) continue;
+        for (int b=a+1;b<MAX_ENEMIES;b++){
+            if (g_enemies[b].state!=1) continue;
+            float dx=g_enemies[b].pos.x-g_enemies[a].pos.x;
+            float dz=g_enemies[b].pos.z-g_enemies[a].pos.z;
+            float d=sqrtf(dx*dx+dz*dz), mind=ENEMY_RADIUS*2.0f;
+            if (d<mind && d>1e-4f){
+                float push=(mind-d)*0.5f/d;
+                g_enemies[a].pos.x-=dx*push; g_enemies[a].pos.z-=dz*push;
+                g_enemies[b].pos.x+=dx*push; g_enemies[b].pos.z+=dz*push;
+            }
+        }
+    }
     if (g_playerHp<0) g_playerHp=0;
 }
 
@@ -331,6 +412,13 @@ static void Collide(void) {
         float dx=g_pos.x-b.x, dz=g_pos.z-b.z;
         float ox=hs.x+r-fabsf(dx), oz=hs.z+r-fabsf(dz);
         if (ox>0&&oz>0){ if(ox<oz) g_pos.x+=(dx>0?ox:-ox); else g_pos.z+=(dz>0?oz:-oz); }
+    }
+    for (int e=0;e<MAX_ENEMIES;e++){            // don't let the player walk through enemies
+        if (g_enemies[e].state!=1) continue;
+        float dx=g_pos.x-g_enemies[e].pos.x, dz=g_pos.z-g_enemies[e].pos.z;
+        float d=sqrtf(dx*dx+dz*dz), mind=r+ENEMY_RADIUS;
+        if (d>1e-4f){ if (d<mind){ float push=(mind-d)/d; g_pos.x+=dx*push; g_pos.z+=dz*push; } }
+        else g_pos.x+=mind;                      // exactly coincident: nudge out
     }
 }
 
@@ -395,8 +483,10 @@ static void Update(void) {
     // overlay + inspect + reset
     if (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB)) g_devOverlay=!g_devOverlay;
     if (IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
-    if (IsKeyPressed(KEY_ZERO)){ g_vmOff=VM_OFF0; g_vmScale=VM_SCALE0; g_vmYaw=VM_YAW0; g_vmPitch=VM_PITCH0; }
-    if (IsKeyPressed(KEY_F5)){ SaveVmTune(); DebugLog("vmsave","\"saved\":true"); }  // F5: save tuning now
+    if (IsKeyPressed(KEY_ONE)) SwitchWeapon(0);
+    if (IsKeyPressed(KEY_TWO)) SwitchWeapon(1);
+    if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; }
+    if (IsKeyPressed(KEY_F5)){ StashActiveTuning(); SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch); DebugLog("vmsave","\"slot\":%d,\"saved\":true",g_curWeapon); }
 
     // live viewmodel tuning
     float ns=dt*0.5f;
@@ -432,7 +522,7 @@ static void DrawWorld(void) {
         float k=(sp->life0>0)?sp->life/sp->life0:1.0f;     // 1 at birth -> 0 at death
         float sz=sp->size*(0.45f+0.55f*k);                 // droplets shrink as they fade
         Color c=sp->col; c.a=(unsigned char)(k*255.0f);    // and fade out
-        DrawCube(sp->pos, sz,sz,sz, c);
+        DrawSphereEx(sp->pos, sz*0.6f, 6, 6, c);
     }
 }
 
@@ -525,7 +615,7 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  V=inspect 0=reset",g_inspect?"[INSPECT]":"[FP - holding gun]"),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1/2=weapon V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
         DrawText("IJKL/UO move  -/= scale  [/] yaw  ;/' pitch  P log",8,60,12,GRAY);
@@ -588,7 +678,6 @@ int main(int argc, char **argv) {
 
     SetTargetFPS(60);
     DisableCursor();
-    LoadVmTune();   // restore live-tuned viewmodel transform if vm_tune.txt exists
 
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);
     g_wallTex =MakeChecker(256,(Color){80,72,64,255},(Color){64,58,52,255},8);
@@ -610,31 +699,12 @@ int main(int argc, char **argv) {
     g_cam  =(Camera3D){ g_pos, Vector3Add(g_pos,(Vector3){0,0,-1}), (Vector3){0,1,0}, 70.0f, CAMERA_PERSPECTIVE };
     g_vmCam=(Camera3D){ (Vector3){0,0,0}, (Vector3){0,0,-1}, (Vector3){0,1,0}, 55.0f, CAMERA_PERSPECTIVE };
 
-    if (FileExists(gunPath)){
-        g_gun=LoadModel(gunPath);
-        g_gunAnim=LoadModelAnimations(gunPath,&g_gunAnimN);
-        g_hasGun=(g_gun.meshCount>0);
-        BoundingBox sb=GetModelBoundingBox(g_gun);
-        g_gunCentroid=(Vector3){(sb.min.x+sb.max.x)*0.5f,(sb.min.y+sb.max.y)*0.5f,(sb.min.z+sb.max.z)*0.5f};
-        float md=fmaxf(sb.max.x-sb.min.x,fmaxf(sb.max.y-sb.min.y,sb.max.z-sb.min.z));
-        g_gunFitScale=(md>0.001f)?1.5f/md:1.0f;   // fixed inspect-view fit
-        // Resolve clip indices BY NAME (case-insensitive substring) so idle/
-        // shoot/reload are correct regardless of load order. Fall back to the
-        // positional defaults already in g_aIdle/g_aShoot/g_aReload.
-        for (int i=0;i<g_gunAnimN;i++){
-            const char *nm=g_gunAnim[i].name; char low[64]; int j=0;
-            for (; nm[j] && j<63; j++){ char c=nm[j]; if(c>='A'&&c<='Z') c+=32; low[j]=c; }
-            low[j]=0;
-            if (strstr(low,"idle")||strstr(low,"take")||strstr(low,"draw")) g_aIdle=i;
-            else if (strstr(low,"shoot")||strstr(low,"fire")) g_aShoot=i;
-            else if (strstr(low,"reload")) g_aReload=i;
-        }
-        g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f;   // park in idle
-        DebugLog("gun","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f],\"idle\":%d,\"shoot\":%d,\"reload\":%d",
-                 g_gun.meshCount, g_gun.skeleton.boneCount, g_gunAnimN,
-                 sb.max.x-sb.min.x, sb.max.y-sb.min.y, sb.max.z-sb.min.z,
-                 g_aIdle, g_aShoot, g_aReload);
-    } else DebugLog("gun","\"error\":\"assets/rifle.glb not found\"");
+    LoadWeapon(0, "assets/rifle.glb", "../assets/rifle.glb", "M16A3 Rifle", "vm_tune.txt",
+               VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0);
+    LoadWeapon(1, "assets/shotgun.glb", "../assets/shotgun.glb", "Shotgun", "vm_tune_shotgun.txt",
+               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+    g_numWeapons=2;
+    ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
@@ -667,9 +737,13 @@ int main(int argc, char **argv) {
     while (!WindowShouldClose()){ Frame(); if (g_maxFrames>0 && ++fc>=g_maxFrames) break; }
 #endif
 
-    SaveVmTune();   // persist viewmodel tuning so it survives the next launch
+    StashActiveTuning();
+    for (int i=0;i<g_numWeapons;i++) SaveTune(g_weapons[i].tunePath,g_weapons[i].off,g_weapons[i].scale,g_weapons[i].yaw,g_weapons[i].pitch);
     DebugLog("shutdown","\"ok\":true");
-    if (g_hasGun){ if (g_gunAnim) UnloadModelAnimations(g_gunAnim,g_gunAnimN); UnloadModel(g_gun); }
+    for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].has){
+        if (g_weapons[i].anim) UnloadModelAnimations(g_weapons[i].anim,g_weapons[i].animN);
+        UnloadModel(g_weapons[i].model);
+    }
     if (g_hasEnemy){ if (g_enemyAnim) UnloadModelAnimations(g_enemyAnim,g_enemyAnimN); UnloadModel(g_enemy); }
     UnloadModel(g_floor); UnloadModel(g_wall); UnloadModel(g_crate);
     UnloadTexture(g_floorTex); UnloadTexture(g_wallTex); UnloadTexture(g_crateTex);
