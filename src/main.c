@@ -623,6 +623,14 @@ static void DrawViewmodel(void){
     g_gun.transform=MatrixIdentity();
 }
 
+// Drop-shadowed text: a near-black copy offset down-right, then the bright text
+// on top. The raylib default font is a small bitmap that turns muddy against the
+// 3D scene; the shadow gives every glyph a hard edge so it stays readable.
+static void TextSh(const char *t, int x, int y, int sz, Color c){
+    DrawText(t, x+2, y+2, sz, (Color){0,0,0,200});
+    DrawText(t, x,   y,   sz, c);
+}
+
 static void DrawHUD(void) {
     int W=GetScreenWidth(), H=GetScreenHeight();
     Color cc={0,255,120,220};
