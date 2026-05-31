@@ -139,7 +139,7 @@ typedef struct {
     const char     *label;
     const char     *tunePath;
 } Weapon;
-static Weapon g_weapons[6];
+static Weapon g_weapons[5];
 static int    g_curWeapon = 0;
 static int    g_numWeapons = 0;
 
@@ -512,7 +512,6 @@ static void Update(void) {
     if (IsKeyPressed(KEY_THREE)) SwitchWeapon(2);
     if (IsKeyPressed(KEY_FOUR)) SwitchWeapon(3);
     if (IsKeyPressed(KEY_FIVE)) SwitchWeapon(4);
-    if (IsKeyPressed(KEY_SIX)) SwitchWeapon(5);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
     // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
     // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
@@ -684,7 +683,7 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1-6=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1-5=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
             DrawRectangle(6,96,600,392,(Color){0,0,0,215});
             DrawRectangleLines(6,96,600,392,(Color){255,210,60,255});
@@ -797,9 +796,7 @@ int main(int argc, char **argv) {
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     LoadWeapon(4, "assets/sawnoff.glb", "../assets/sawnoff.glb", "Sawnoff", "vm_tune_sawnoff.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
-    LoadWeapon(5, "assets/knife.glb", "../assets/knife.glb", "Knife", "vm_tune_knife.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
-    g_numWeapons=6;
+    g_numWeapons=5;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
