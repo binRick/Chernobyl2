@@ -193,6 +193,11 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     w->centroid=(Vector3){(sb.min.x+sb.max.x)*0.5f,(sb.min.y+sb.max.y)*0.5f,(sb.min.z+sb.max.z)*0.5f};
     float md=fmaxf(sb.max.x-sb.min.x,fmaxf(sb.max.y-sb.min.y,sb.max.z-sb.min.z));
     w->fitScale=(md>0.001f)?1.5f/md:1.0f;
+    // Auto default scale: a passed scale0<=0 means "size me from the bounding box"
+    // so every weapon starts roughly rifle-sized + on-screen regardless of the
+    // rig's native units (otherwise the rifle's fixed scale makes other weapons
+    // microscopic/huge/off-frame). Tunes still override via the saved file.
+    if (scale0<=0.0f){ float as=(md>0.001f)?1.1f/md:0.0004f; w->scale0=as; w->scale=as; }
     for (int i=0;i<w->animN;i++){
         const char *nm=w->anim[i].name; char low[64]; int j=0;
         for (; nm[j] && j<63; j++){ char c=nm[j]; if(c>='A'&&c<='Z') c+=32; low[j]=c; }
@@ -754,15 +759,15 @@ int main(int argc, char **argv) {
     LoadWeapon(0, "assets/rifle.glb", "../assets/rifle.glb", "M16A3 Rifle", "vm_tune.txt",
                VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0);
     LoadWeapon(1, "assets/shotgun.glb", "../assets/shotgun.glb", "Shotgun", "vm_tune_shotgun.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     LoadWeapon(4, "assets/sawnoff.glb", "../assets/sawnoff.glb", "Sawnoff", "vm_tune_sawnoff.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     LoadWeapon(5, "assets/knife.glb", "../assets/knife.glb", "Knife", "vm_tune_knife.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, 0.00020f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     g_numWeapons=6;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
