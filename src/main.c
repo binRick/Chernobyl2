@@ -160,11 +160,13 @@ static Spark  g_sparks[MAX_SPARKS];
 #define ENEMY_HEIGHT       1.85f
 #define ENEMY_YAW_OFFSET   0.0f       // tune if they face the wrong way
 #define ENEMY_TOUCH_DMG    18.0f      // player hp/sec when an enemy is in melee
-typedef struct { Vector3 pos; float hp; int state; float animT; float deathT; } Enemy; // state: 0 dead,1 alive,2 dying
+#define ENEMY_ATTACK_RANGE  1.8f       // enters attack/melee within this range
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; } Enemy; // state: 0 dead,1 alive,2 dying
 static Enemy           g_enemies[MAX_ENEMIES];
 static Model           g_enemy;
 static ModelAnimation *g_enemyAnim = NULL;
 static int             g_enemyAnimN = 0;
+static int g_eWalk=0, g_eIdle=0, g_eRun=0, g_eHit=0, g_eAttack=0, g_eDeath=0; // clips resolved by name at load
 static int             g_hasEnemy = 0;
 static int             g_kills = 0;
 static float           g_playerHp = 100.0f;
@@ -176,6 +178,7 @@ static void SpawnEnemy(int i){
     g_enemies[i].pos=(Vector3){ cosf(ang)*dist, 0, sinf(ang)*dist };
     g_enemies[i].hp=ENEMY_HP; g_enemies[i].state=1;
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
+    g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun;
 }
 
 static Texture2D MakeChecker(int sz, Color a, Color b, int cells) {
@@ -249,7 +252,8 @@ static void Fire(Camera3D cam) {
         end=ep;
         SpawnImpact(ep,(Vector3){0,1,0});                 // blood-ish spray
         g_enemies[ei].hp-=ENEMY_DMG_PER_SHOT;
-        if (g_enemies[ei].hp<=0){ g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_kills++; }
+        if (g_enemies[ei].hp<=0){ g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0; g_kills++; }
+        else g_enemies[ei].hitT=0.45f;   // non-fatal hit -> flinch
     } else if (worldHit){
         SpawnImpact(hit,nrm);
     }
@@ -263,28 +267,35 @@ static void Fire(Camera3D cam) {
 // Walk alive enemies toward the player; advance death timers; melee on contact.
 static void UpdateEnemies(float dt){
     if (!g_hasEnemy) return;
-    int anyAlive=0;
     for (int i=0;i<MAX_ENEMIES;i++){
         Enemy *e=&g_enemies[i];
         if (e->state==1){
-            anyAlive=1;
             float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;
             float d=sqrtf(dx*dx+dz*dz);
-            if (d>1.0f){                                   // walk in until melee range
+            if (e->hitT>0) e->hitT-=dt;
+            // clip priority: flinch > attack (in melee range) > run (chasing)
+            int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : g_eRun);
+            if (want!=e->clip){ e->clip=want; e->animT=0; }
+            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE){           // chase unless flinching/in melee
                 e->pos.x+=dx/d*ENEMY_SPEED*dt;
                 e->pos.z+=dz/d*ENEMY_SPEED*dt;
-            } else {                                       // in contact: drain player hp
-                g_playerHp-=ENEMY_TOUCH_DMG*dt;
             }
-            e->animT+=dt*30.0f;                            // loop the walk clip
-            if (g_enemyAnimN>0){ int nf=ANIM_FRAMES(g_enemyAnim[0]); if(nf>0 && e->animT>=nf) e->animT-=nf; }
-        } else if (e->state==2){
-            e->deathT+=dt;                                 // dying: sink, then remove + respawn
-            if (e->deathT>1.4f) SpawnEnemy(i);
+            if (e->clip==g_eAttack && e->hitT<=0) g_playerHp-=ENEMY_TOUCH_DMG*dt;
+            if (g_enemyAnimN>0){                               // advance current clip (looping)
+                int nf=ANIM_FRAMES(g_enemyAnim[e->clip]);
+                e->animT+=dt*30.0f;
+                if (nf>0 && e->animT>=nf) e->animT-=nf;
+            }
+        } else if (e->state==2){                              // dying: play death once, then respawn
+            if (g_enemyAnimN>0){
+                int nf=ANIM_FRAMES(g_enemyAnim[g_eDeath]);
+                if (nf>0){ e->animT+=dt*30.0f; if (e->animT>nf-1) e->animT=(float)(nf-1); }
+            }
+            e->deathT+=dt;
+            if (e->deathT>2.6f) SpawnEnemy(i);
         }
     }
     if (g_playerHp<0) g_playerHp=0;
-    (void)anyAlive;
 }
 
 static void Collide(void) {
@@ -403,28 +414,26 @@ static void DrawEnemies(void){
     for (int i=0;i<MAX_ENEMIES;i++){
         Enemy *e=&g_enemies[i];
         if (e->state==0) continue;
-        // face the player (yaw about +Y); dying enemies keep their last facing
-        float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;
+        float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;       // face the player (yaw about +Y)
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
         float sink=0.0f;
-        if (e->state==2){                          // dying: tip over + sink into floor
-            if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[0], (float)(ANIM_FRAMES(g_enemyAnim[0])-1));
-            sink = -e->deathT*1.2f;
+        if (e->state==2){                                     // dying: play death clip, sink late
+            float late=e->deathT-2.0f; if (late>0) sink=-late*1.6f;
+            if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], e->animT);
         } else {
-            if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[0], e->animT);
+            if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->clip], e->animT);
         }
-        Color tint = (e->state==2) ? (Color){180,140,140,255} : WHITE;
+        Color tint = (e->state==2) ? (Color){150,90,90,255}
+                   : (e->hitT>0)   ? (Color){255,170,170,255} : WHITE;
         DrawModelEx(g_enemy, (Vector3){e->pos.x, sink, e->pos.z}, (Vector3){0,1,0}, yaw,
                     (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, tint);
-        // HP bar above living, damaged enemies
-        if (e->state==1 && e->hp<ENEMY_HP){
+        if (e->state==1 && e->hp<ENEMY_HP){                   // HP bar above damaged enemies
             Vector3 hp={e->pos.x, ENEMY_HEIGHT+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/ENEMY_HP), 0.08f, 0.02f, (Color){230,60,60,255});
         }
     }
 }
 
-// apply current animation pose to g_gun (shared by inspect + viewmodel)
 static void PoseGun(void){
     if (g_gunAnimN>0 && g_curAnim<g_gunAnimN) ANIM_APPLY(g_gun, g_gunAnim[g_curAnim], g_animT);
 }
@@ -606,6 +615,16 @@ int main(int argc, char **argv) {
     if (FileExists(enemyPath)){
         g_enemy=LoadModel(enemyPath);
         g_enemyAnim=LoadModelAnimations(enemyPath,&g_enemyAnimN);
+        for (int ci=0; ci<g_enemyAnimN; ci++){
+            const char *nm=g_enemyAnim[ci].name;
+            if      (strstr(nm,"walk"))   g_eWalk=ci;
+            else if (strstr(nm,"idle"))   g_eIdle=ci;
+            else if (strstr(nm,"run"))    g_eRun=ci;
+            else if (strstr(nm,"hit"))    g_eHit=ci;
+            else if (strstr(nm,"attack")) g_eAttack=ci;
+            else if (strstr(nm,"death"))  g_eDeath=ci;
+        }
+        TraceLog(LOG_INFO,"enemy clips walk=%d idle=%d run=%d hit=%d attack=%d death=%d",g_eWalk,g_eIdle,g_eRun,g_eHit,g_eAttack,g_eDeath);
         g_hasEnemy=(g_enemy.meshCount>0);
         BoundingBox eb=GetModelBoundingBox(g_enemy);
         DebugLog("enemy","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f]",
