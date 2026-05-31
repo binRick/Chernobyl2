@@ -21,3 +21,4 @@ chernobyl2-debug.log
 .claude/
 vm_tune.txt
 tools/FBX2glTF
+tools/node_modules
