@@ -501,6 +501,7 @@ static void Update(void) {
     if (IsKeyPressed(KEY_N)){                          // N: toggle orient mode (no enemies, weapon-aim tuning)
         g_noEnemies=!g_noEnemies;
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
+        g_playerHp=100.0f;                             // full health (clears a leftover YOU DIED)
         if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);  // bring the wave back
         DebugLog("mode","\"noEnemies\":%s", g_noEnemies?"true":"false");
     }
@@ -672,7 +673,7 @@ static void DrawHUD(void) {
     DrawRectangle(20, H-44, 224, 24, (Color){0,0,0,150});
     DrawRectangle(22, H-42, (int)(220*g_playerHp/100.0f), 20, (Color){200,40,40,255});
     DrawText(TextFormat("HP %d", (int)g_playerHp), 28, H-40, 16, RAYWHITE);
-    if (g_playerHp<=0) DrawText("YOU DIED - press ESC", W/2-120, H/2+30, 24, (Color){255,80,80,255});
+    if (g_playerHp<=0 && !g_noEnemies) DrawText("YOU DIED - press ESC", W/2-120, H/2+30, 24, (Color){255,80,80,255});
     // Big unmistakable mode banner so "floating" can be diagnosed: INSPECT mode
     // intentionally floats the gun in front of you; press V to get back to FP.
     if (g_inspect)
@@ -787,7 +788,7 @@ int main(int argc, char **argv) {
     LoadWeapon(1, "assets/shotgun.glb", "../assets/shotgun.glb", "Shotgun", "vm_tune_shotgun.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
+               (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f);  // dialed in
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
     LoadWeapon(4, "assets/sawnoff.glb", "../assets/sawnoff.glb", "Sawnoff", "vm_tune_sawnoff.txt",
