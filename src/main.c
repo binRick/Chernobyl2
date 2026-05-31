@@ -643,13 +643,15 @@ static void DrawHUD(void) {
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
         DrawText(TextFormat("%s  [%s]  1-5=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
-        if (g_noEnemies){   // orient mode panel
-            DrawRectangle(4,58,378,92,(Color){0,0,0,160});
-            DrawText("ORIENT MODE  (N = back to play)",10,62,18,YELLOW);
-            DrawText(TextFormat("weapon: %s",g_weapons[g_curWeapon].label),10,86,16,RAYWHITE);
-            DrawText(TextFormat("off [%.2f %.2f %.2f]  scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),10,106,14,RAYWHITE);
-            DrawText(TextFormat("yaw %.1f  pitch %.1f",g_vmYaw,g_vmPitch),10,124,14,RAYWHITE);
-            DrawText("IJKL/UO move  -/= scale  [ ] yaw  ; \047 pitch  F5=save",10,140,12,GRAY);
+        if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
+            DrawRectangle(6,96,560,196,(Color){0,0,0,205});
+            DrawRectangleLines(6,96,560,196,(Color){255,210,60,255});
+            TextSh("ORIENT MODE  (N = back to play)",18,104,28,YELLOW);
+            TextSh(TextFormat("weapon:  %s",g_weapons[g_curWeapon].label),18,142,24,(Color){120,230,255,255});
+            TextSh(TextFormat("off  [%.2f %.2f %.2f]   scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),18,176,20,RAYWHITE);
+            TextSh(TextFormat("yaw  %.1f      pitch  %.1f",g_vmYaw,g_vmPitch),18,202,20,RAYWHITE);
+            TextSh("IJKL/UO move   -/= scale   [ ] yaw   ; \047 pitch",18,234,18,(Color){210,210,210,255});
+            TextSh("0 = reset      F5 = save this weapon",18,258,18,(Color){210,210,210,255});
         }
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
