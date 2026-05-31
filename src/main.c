@@ -114,10 +114,12 @@ static float           g_gunFitScale = 1.0f;         // inspect-view fit scale, 
 #define VM_SCALE0  0.0004f
 #define VM_YAW0    178.0f
 #define VM_PITCH0  -306.0f
+#define VM_ROLL0   0.0f
 static Vector3 g_vmOff   = { -2.45f, -5.55f, 1.68f };
 static float   g_vmScale = VM_SCALE0;
 static float   g_vmYaw   = VM_YAW0;
 static float   g_vmPitch = VM_PITCH0;
+static float   g_vmRoll  = VM_ROLL0;
 
 // Persist the live-tuned viewmodel transform across runs so the player's
 // dialed-in framing survives a rebuild. Saved to ./vm_tune.txt on quit, loaded
@@ -132,8 +134,8 @@ typedef struct {
     int             aIdle, aShoot, aReload;
     Vector3         centroid;
     float           fitScale;
-    Vector3         off;  float scale, yaw, pitch;     // live, persisted
-    Vector3         off0; float scale0, yaw0, pitch0;  // defaults for 0=reset
+    Vector3         off;  float scale, yaw, pitch, roll;     // live, persisted
+    Vector3         off0; float scale0, yaw0, pitch0, roll0; // defaults for 0=reset
     const char     *label;
     const char     *tunePath;
 } Weapon;
@@ -141,24 +143,24 @@ static Weapon g_weapons[6];
 static int    g_curWeapon = 0;
 static int    g_numWeapons = 0;
 
-static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch){
+static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll){
     FILE *f=fopen(path,"w"); if(!f) return;
-    fprintf(f,"%.5f %.5f %.5f %.6f %.2f %.2f\n", off.x,off.y,off.z,scale,yaw,pitch);
+    fprintf(f,"%.5f %.5f %.5f %.6f %.2f %.2f %.2f\n", off.x,off.y,off.z,scale,yaw,pitch,roll);
     fclose(f);
 }
-static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, float *pitch){
+static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll){
     FILE *f=fopen(path,"r"); if(!f) return 0;
-    float ox,oy,oz,sc,yw,pt;
-    int ok=(fscanf(f,"%f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt)==6);
+    float ox,oy,oz,sc,yw,pt,rl=0.0f;
+    int n=fscanf(f,"%f %f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt,&rl);
     fclose(f);
-    if(ok){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; }
-    return ok;
+    if(n>=6){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; *roll=(n>=7)?rl:0.0f; return 1; }
+    return 0;
 }
 // Copy the live working-set tuning back into the current slot (call before a switch/quit).
 static void StashActiveTuning(void){
     if (g_numWeapons<=0) return;
     Weapon *w=&g_weapons[g_curWeapon];
-    w->off=g_vmOff; w->scale=g_vmScale; w->yaw=g_vmYaw; w->pitch=g_vmPitch;
+    w->off=g_vmOff; w->scale=g_vmScale; w->yaw=g_vmYaw; w->pitch=g_vmPitch; w->roll=g_vmRoll;
 }
 // Make slot n the live weapon: copy its model/clips/tuning into the globals.
 static void ActivateWeapon(int n){
@@ -167,7 +169,7 @@ static void ActivateWeapon(int n){
     g_gun=w->model; g_gunAnim=w->anim; g_gunAnimN=w->animN; g_hasGun=w->has;
     g_aIdle=w->aIdle; g_aShoot=w->aShoot; g_aReload=w->aReload;
     g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
-    g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch;
+    g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch; g_vmRoll=w->roll;
     g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
 }
 static void SwitchWeapon(int n){
@@ -183,7 +185,7 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     Weapon *w=&g_weapons[slot];
     w->label=label; w->tunePath=tunePath;
     w->off0=off0; w->scale0=scale0; w->yaw0=yaw0; w->pitch0=pitch0;
-    w->off=off0; w->scale=scale0; w->yaw=yaw0; w->pitch=pitch0;
+    w->off=off0; w->scale=scale0; w->yaw=yaw0; w->pitch=pitch0; w->roll=0.0f; w->roll0=0.0f;
     w->aIdle=0; w->aShoot=1; w->aReload=2; w->has=0; w->anim=NULL; w->animN=0;
     const char *fp=path; if(!FileExists(fp)) fp=alt;
     if(!FileExists(fp)){ DebugLog("weapon","\"slot\":%d,\"error\":\"missing\"",slot); return; }
@@ -215,7 +217,7 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
         else if (strstr(low,"shoot")||strstr(low,"fire")) w->aShoot=i;
         else if (strstr(low,"reload")) w->aReload=i;
     }
-    LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch);
+    LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll);
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
              slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
 }
@@ -511,13 +513,13 @@ static void Update(void) {
     if (IsKeyPressed(KEY_FOUR)) SwitchWeapon(3);
     if (IsKeyPressed(KEY_FIVE)) SwitchWeapon(4);
     if (IsKeyPressed(KEY_SIX)) SwitchWeapon(5);
-    if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; }
+    if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
     // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
     // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
     // an on-screen confirmation so you KNOW it wrote.
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_F5)){
         StashActiveTuning();
-        SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch);
+        SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);
         g_savedMsg=2.0f;   // seconds to show "SAVED"
         DebugLog("vmsave","\"slot\":%d,\"label\":\"%s\",\"path\":\"%s\",\"saved\":true",
                  g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].tunePath);
@@ -535,16 +537,17 @@ static void Update(void) {
     if (IsKeyDown(KEY_EQUAL)) g_vmScale*=(1.0f+dt*ss);  if (IsKeyDown(KEY_MINUS)) g_vmScale*=(1.0f-dt*ss);
     if (IsKeyDown(KEY_RIGHT_BRACKET)) g_vmYaw+=rs;  if (IsKeyDown(KEY_LEFT_BRACKET)) g_vmYaw-=rs;
     if (IsKeyDown(KEY_APOSTROPHE)) g_vmPitch+=rs;   if (IsKeyDown(KEY_SEMICOLON)) g_vmPitch-=rs;
+    if (IsKeyDown(KEY_PERIOD)) g_vmRoll+=rs;        if (IsKeyDown(KEY_COMMA)) g_vmRoll-=rs;
     if (IsKeyPressed(KEY_P))
-        DebugLog("vmxform","\"off\":[%.3f,%.3f,%.3f],\"scale\":%.4f,\"yaw\":%.1f,\"pitch\":%.1f",
-                 g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch);
+        DebugLog("vmxform","\"off\":[%.3f,%.3f,%.3f],\"scale\":%.4f,\"yaw\":%.1f,\"pitch\":%.1f,\"roll\":%.1f",
+                 g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);
     if (g_noEnemies){   // orient mode: log the selected weapon + orientation whenever it changes
-        static float lo[6]={1e9f,0,0,0,0,0};
-        float cur[6]={g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch};
-        int changed=0; for(int k=0;k<6;k++) if(fabsf(cur[k]-lo[k])>1e-4f) changed=1;
-        if (changed){ for(int k=0;k<6;k++) lo[k]=cur[k];
-            DebugLog("orient","\"weapon\":\"%s\",\"off\":[%.3f,%.3f,%.3f],\"scale\":%.5f,\"yaw\":%.1f,\"pitch\":%.1f",
-                     g_weapons[g_curWeapon].label,g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch);
+        static float lo[7]={1e9f,0,0,0,0,0,0};
+        float cur[7]={g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll};
+        int changed=0; for(int k=0;k<7;k++) if(fabsf(cur[k]-lo[k])>1e-4f) changed=1;
+        if (changed){ for(int k=0;k<7;k++) lo[k]=cur[k];
+            DebugLog("orient","\"weapon\":\"%s\",\"off\":[%.3f,%.3f,%.3f],\"scale\":%.5f,\"yaw\":%.1f,\"pitch\":%.1f,\"roll\":%.1f",
+                     g_weapons[g_curWeapon].label,g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);
         }
     }
 
@@ -640,7 +643,7 @@ static void DrawViewmodel(void){
     // settles. r is the live kick amount (0..1) driven by Fire().
     float r=g_recoil;
     Vector3 target={ g_vmOff.x+bobX, g_vmOff.y+bobY+r*0.012f, g_vmOff.z+r*0.03f };
-    Matrix rot=MatrixMultiply(MatrixRotateX(DEG2RAD*(g_vmPitch - r*4.0f)), MatrixRotateY(DEG2RAD*g_vmYaw));
+    Matrix rot=MatrixMultiply(MatrixRotateZ(DEG2RAD*g_vmRoll), MatrixMultiply(MatrixRotateX(DEG2RAD*(g_vmPitch - r*4.0f)), MatrixRotateY(DEG2RAD*g_vmYaw)));
     // recenter: place the model's centroid AT target (model is far off-origin)
     Vector3 vpos=Vector3Subtract(target, Vector3Scale(Vector3Transform(g_gunCentroid,rot), g_vmScale));
     rlDrawRenderBatchActive();
@@ -683,12 +686,12 @@ static void DrawHUD(void) {
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
         DrawText(TextFormat("%s  [%s]  1-6=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
-            DrawRectangle(6,96,600,360,(Color){0,0,0,215});
-            DrawRectangleLines(6,96,600,360,(Color){255,210,60,255});
+            DrawRectangle(6,96,600,392,(Color){0,0,0,215});
+            DrawRectangleLines(6,96,600,392,(Color){255,210,60,255});
             TextSh("ORIENT MODE  (N = back to play)",18,104,28,YELLOW);
             TextSh(TextFormat("weapon:  %s",g_weapons[g_curWeapon].label),18,142,24,(Color){120,230,255,255});
             TextSh(TextFormat("off [%.2f %.2f %.2f]  scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),18,176,20,RAYWHITE);
-            TextSh(TextFormat("yaw %.1f   pitch %.1f",g_vmYaw,g_vmPitch),18,202,20,RAYWHITE);
+            TextSh(TextFormat("yaw %.1f  pitch %.1f  roll %.1f",g_vmYaw,g_vmPitch,g_vmRoll),18,202,20,RAYWHITE);
             Color kc=(Color){235,235,140,255};
             TextSh("J / L      move left / right",18,236,20,kc);
             TextSh("K / I      move down / up",18,262,20,kc);
@@ -696,8 +699,9 @@ static void DrawHUD(void) {
             TextSh("- / =      scale  smaller / bigger",18,314,20,kc);
             TextSh("[ / ]      yaw    left / right",18,340,20,kc);
             TextSh("; / '      pitch  down / up",18,366,20,kc);
-            TextSh("0 reset      ENTER save  (or F5)",18,396,20,(Color){170,255,170,255});
-            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].tunePath),18,422,20,(Color){90,255,90,255});
+            TextSh(", / .      roll   twist left / right",18,392,20,kc);
+            TextSh("0 reset      ENTER save  (or F5)",18,422,20,(Color){170,255,170,255});
+            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].tunePath),18,448,20,(Color){90,255,90,255});
         }
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
@@ -830,7 +834,7 @@ int main(int argc, char **argv) {
 #endif
 
     StashActiveTuning();
-    for (int i=0;i<g_numWeapons;i++) SaveTune(g_weapons[i].tunePath,g_weapons[i].off,g_weapons[i].scale,g_weapons[i].yaw,g_weapons[i].pitch);
+    for (int i=0;i<g_numWeapons;i++) SaveTune(g_weapons[i].tunePath,g_weapons[i].off,g_weapons[i].scale,g_weapons[i].yaw,g_weapons[i].pitch,g_weapons[i].roll);
     DebugLog("shutdown","\"ok\":true");
     for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].has){
         if (g_weapons[i].anim) UnloadModelAnimations(g_weapons[i].anim,g_weapons[i].animN);
