@@ -200,6 +200,28 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
     }
 }
 
+// Detailed blood burst: a spray of crimson droplets of varied size flung along
+// the bullet's travel (dir) in a wide cone, plus heavier slow "gobs" every few
+// particles. Gravity + fade are handled by the shared spark integrator/draw.
+static void SpawnBlood(Vector3 p, Vector3 dir) {
+    for (int i=0;i<34;i++) for (int s=0;s<MAX_SPARKS;s++){
+        if (g_sparks[s].life>0) continue;
+        float spread=2.7f;
+        Vector3 v={ dir.x*4.5f + GetRandomValue(-100,100)/100.0f*spread,
+                    dir.y*4.5f + GetRandomValue(-100,100)/100.0f*spread + 1.7f,
+                    dir.z*4.5f + GetRandomValue(-100,100)/100.0f*spread };
+        int gob=(i%5==0);                                  // heavy gobs: slower, bigger, redder
+        if (gob){ v.x*=0.45f; v.y=v.y*0.45f+0.4f; v.z*=0.45f; }
+        float lf = 0.55f + GetRandomValue(0,70)/100.0f;
+        float sz = gob ? (0.07f+GetRandomValue(0,5)/100.0f) : (0.022f+GetRandomValue(0,3)/100.0f);
+        unsigned char r=(unsigned char)(150+GetRandomValue(0,105)); // dark maroon -> arterial red
+        unsigned char g=(unsigned char)GetRandomValue(0,28);
+        unsigned char b=(unsigned char)GetRandomValue(0,18);
+        g_sparks[s]=(Spark){ p, v, lf, lf, sz, (Color){r,g,b,255} };
+        break;
+    }
+}
+
 static int RaycastWorld(Vector3 ro, Vector3 rd, Vector3 *hit, Vector3 *nrm) {
     float best=1e9f; int got=0;
     if (rd.y<-1e-4f){ float t=-ro.y/rd.y; if(t>0&&t<best){best=t;*hit=Vector3Add(ro,Vector3Scale(rd,t));*nrm=(Vector3){0,1,0};got=1;} }
