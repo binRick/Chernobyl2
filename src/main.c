@@ -193,11 +193,19 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     w->centroid=(Vector3){(sb.min.x+sb.max.x)*0.5f,(sb.min.y+sb.max.y)*0.5f,(sb.min.z+sb.max.z)*0.5f};
     float md=fmaxf(sb.max.x-sb.min.x,fmaxf(sb.max.y-sb.min.y,sb.max.z-sb.min.z));
     w->fitScale=(md>0.001f)?1.5f/md:1.0f;
-    // Auto default scale: a passed scale0<=0 means "size me from the bounding box"
-    // so every weapon starts roughly rifle-sized + on-screen regardless of the
-    // rig's native units (otherwise the rifle's fixed scale makes other weapons
-    // microscopic/huge/off-frame). Tunes still override via the saved file.
-    if (scale0<=0.0f){ float as=(md>0.001f)?1.1f/md:0.0004f; w->scale0=as; w->scale=as; }
+    // Auto framing: a passed scale0<=0 means "frame me from the bounding box".
+    // The recenter math lands the model's CENTROID exactly at off, so for an
+    // untuned weapon we must pick an off that's actually on-screen: dead ahead
+    // (negative Z in the vm camera), slightly down, with a scale that makes the
+    // model ~0.8 units (fits the lower third). The rifle's hand-tuned off
+    // (-2.45,-5.55,1.68) only works because it's huge; a correctly-small weapon
+    // parked there falls off-frame. A saved tune file still overrides all of it.
+    if (scale0<=0.0f){
+        float as=(md>0.001f)?0.8f/md:0.0004f;
+        w->scale0=as; w->scale=as;
+        w->off0=(Vector3){ 0.20f, -0.35f, -1.30f }; w->off=w->off0;
+        w->yaw0=yaw0; w->pitch0=pitch0;             // orientation still a guess; user rotates
+    }
     for (int i=0;i<w->animN;i++){
         const char *nm=w->anim[i].name; char low[64]; int j=0;
         for (; nm[j] && j<63; j++){ char c=nm[j]; if(c>='A'&&c<='Z') c+=32; low[j]=c; }
@@ -207,8 +215,8 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
         else if (strstr(low,"reload")) w->aReload=i;
     }
     LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch);
-    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d",
-             slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload);
+    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
+             slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
 }
 
 // ---- Tracers + impact sparks ------------------------------------------------
