@@ -789,7 +789,7 @@ int main(int argc, char **argv) {
     LoadWeapon(0, "assets/rifle.glb", "../assets/rifle.glb", "M16A3 Rifle", "vm_tune.txt",
                VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0, 0.0f);
     LoadWeapon(1, "assets/shotgun.glb", "../assets/shotgun.glb", "Shotgun", "vm_tune_shotgun.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 90.0f);  // barrel along model-Z; 90deg roll stands it up
+               (Vector3){ -0.00216f, -0.19537f, -0.58625f }, 0.000068f, 106.89f, -18.45f, 88.0f);  // dialed in
     LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
                (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f, 0.0f);  // dialed in
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
