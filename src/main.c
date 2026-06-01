@@ -90,6 +90,9 @@ static ModelAnimation *g_gunAnim = NULL;
 static int             g_gunAnimN = 0;
 static int             g_hasGun = 0;
 static int             g_aIdle=0, g_aShoot=1, g_aReload=2;  // idle = hold last frame of "Take"
+static int             g_reloadSeq[6], g_reloadSeqN=0;  // active weapon's multi-phase reload clips
+static int             g_reloadStep=-1;                 // -1 idle; >=0 index into g_reloadSeq
+static int             g_reloading=0;                   // a reload (single or sequence) is in progress
 static int             g_curAnim = 0;           // start in idle (Take, held at end)
 static float           g_animT = 0.0f;          // frame cursor
 static int             g_animOnce = 0;          // current clip is a one-shot (Reload)
@@ -132,6 +135,7 @@ typedef struct {
     ModelAnimation *anim;
     int             animN, has;
     int             aIdle, aShoot, aReload;
+    int             reloadSeq[6], reloadSeqN;   // multi-phase reload clips, in play order
     Vector3         centroid;
     float           fitScale;
     Vector3         off;  float scale, yaw, pitch, roll;     // live, persisted
@@ -168,6 +172,8 @@ static void ActivateWeapon(int n){
     Weapon *w=&g_weapons[n];
     g_gun=w->model; g_gunAnim=w->anim; g_gunAnimN=w->animN; g_hasGun=w->has;
     g_aIdle=w->aIdle; g_aShoot=w->aShoot; g_aReload=w->aReload;
+    g_reloadSeqN=w->reloadSeqN; for(int i=0;i<w->reloadSeqN;i++) g_reloadSeq[i]=w->reloadSeq[i];
+    g_reloadStep=-1; g_reloading=0;
     g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
     g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch; g_vmRoll=w->roll;
     g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
@@ -217,6 +223,21 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
         else if (strstr(low,"shoot")||strstr(low,"fire")) w->aShoot=i;
         else if (strstr(low,"reload")) w->aReload=i;
     }
+    // Multi-phase reload: if the rig has the named phases, play them in order
+    // (e.g. shotgun pump: prep -> load shell -> load last -> recover). Falls
+    // back to the single aReload clip when these aren't present.
+    w->reloadSeqN=0;
+    const char *phases[]={"priortoreload","reloadone","reloadlastone","postfire"};
+    for (int p=0;p<4 && w->reloadSeqN<6;p++){
+        for (int i=0;i<w->animN;i++){
+            const char *nm=w->anim[i].name; char low[64]; int j=0;
+            for (; nm[j] && j<63; j++){ char c=nm[j]; if(c>='A'&&c<='Z') c+=32; low[j]=c; }
+            low[j]=0;
+            if (strstr(low,phases[p])){ w->reloadSeq[w->reloadSeqN++]=i; break; }
+        }
+    }
+    if (w->aShoot>=w->animN)  w->aShoot=w->aIdle;    // unresolved -> valid clip
+    if (w->aReload>=w->animN) w->aReload=w->aIdle;   // (aReload==aIdle means "no reload clip")
     LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll);
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
              slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
@@ -322,9 +343,9 @@ static int RaycastWorld(Vector3 ro, Vector3 rd, Vector3 *hit, Vector3 *nrm) {
     return got;
 }
 
-// switch the weapon animation, restart its cursor
-static void SetAnim(int idx, int once){
-    if (idx==g_curAnim) return;
+// switch the weapon animation, restart its cursor. Retained for future weapon
+// actions even though the reload/fire paths now set clips directly.
+static void __attribute__((unused)) SetAnim(int idx, int once){
     g_curAnim=idx; g_animT=0.0f; g_animOnce=once;
 }
 
@@ -474,8 +495,16 @@ static void Update(void) {
     // shooting / reload
     if (g_fireCd>0) g_fireCd-=dt;
     if (g_recoil>0) g_recoil=fmaxf(0.0f, g_recoil - dt*7.0f);   // recoil settles in ~0.14s
-    if (IsKeyPressed(KEY_R)) SetAnim(g_aReload,1);
-    else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && g_curAnim!=g_aReload) Fire(g_cam);
+    if (IsKeyPressed(KEY_R) && !g_reloading){
+        if (g_reloadSeqN>0){                              // multi-phase reload
+            g_reloading=1; g_reloadStep=0;
+            g_curAnim=g_reloadSeq[0]; g_animOnce=1; g_animT=0.0f;
+        } else if (g_aReload!=g_aIdle && g_aReload<g_gunAnimN){  // single reload clip
+            g_reloading=1; g_reloadStep=-1;
+            g_curAnim=g_aReload; g_animOnce=1; g_animT=0.0f;
+        }                                                // else: weapon has no reload clip, do nothing
+    }
+    else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !g_reloading) Fire(g_cam);
 
     UpdateEnemies(dt);
 
@@ -484,15 +513,21 @@ static void Update(void) {
     // back to the held idle.
     if (g_gunAnimN>0 && g_curAnim<g_gunAnimN){
         int nf=ANIM_FRAMES(g_gunAnim[g_curAnim]);
-        if (nf>0){
-            if (g_curAnim==g_aIdle && !g_animOnce){
-                g_animT=(float)(nf-1);          // freeze on the drawn/ready frame
-            } else {
-                g_animT += dt*30.0f;
-                if (g_animT>=nf){
-                    if (g_animOnce){ g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; }
-                    else g_animT-=nf;
-                }
+        if (g_curAnim==g_aIdle && !g_animOnce){
+            g_animT = nf>0 ? (float)(nf-1) : 0.0f;   // freeze on the drawn/ready frame
+        } else {
+            g_animT += dt*30.0f;
+            // nf<=0 (empty/malformed clip) counts as instantly finished, so a
+            // zero-frame reload phase can't wedge g_reloading=1 forever.
+            if (nf<=0 || g_animT>=nf){
+                if (g_animOnce){
+                    if (g_reloadStep>=0 && g_reloadStep+1<g_reloadSeqN){
+                        g_reloadStep++;                  // next reload phase
+                        g_curAnim=g_reloadSeq[g_reloadStep]; g_animT=0.0f;
+                    } else {                             // sequence (or one-shot) done
+                        g_reloadStep=-1; g_reloading=0; g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f;
+                    }
+                } else g_animT = nf>0 ? g_animT-nf : 0.0f;
             }
         }
     }
