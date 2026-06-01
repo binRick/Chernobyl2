@@ -181,11 +181,11 @@ static void SwitchWeapon(int n){
 // Load a glb into slot, resolve idle/shoot/reload clips by name, load saved tuning.
 static void LoadWeapon(int slot, const char *path, const char *alt,
                        const char *label, const char *tunePath,
-                       Vector3 off0, float scale0, float yaw0, float pitch0){
+                       Vector3 off0, float scale0, float yaw0, float pitch0, float roll0){
     Weapon *w=&g_weapons[slot];
     w->label=label; w->tunePath=tunePath;
-    w->off0=off0; w->scale0=scale0; w->yaw0=yaw0; w->pitch0=pitch0;
-    w->off=off0; w->scale=scale0; w->yaw=yaw0; w->pitch=pitch0; w->roll=0.0f; w->roll0=0.0f;
+    w->off0=off0; w->scale0=scale0; w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;
+    w->off=off0; w->scale=scale0; w->yaw=yaw0; w->pitch=pitch0; w->roll=roll0;
     w->aIdle=0; w->aShoot=1; w->aReload=2; w->has=0; w->anim=NULL; w->animN=0;
     const char *fp=path; if(!FileExists(fp)) fp=alt;
     if(!FileExists(fp)){ DebugLog("weapon","\"slot\":%d,\"error\":\"missing\"",slot); return; }
@@ -207,7 +207,7 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
         float as=(md>0.001f)?0.8f/md:0.0004f;
         w->scale0=as; w->scale=as;
         w->off0=(Vector3){ 0.20f, -0.35f, -1.30f }; w->off=w->off0;
-        w->yaw0=yaw0; w->pitch0=pitch0;             // orientation still a guess; user rotates
+        w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;  // orientation still a guess; user rotates
     }
     for (int i=0;i<w->animN;i++){
         const char *nm=w->anim[i].name; char low[64]; int j=0;
@@ -787,15 +787,15 @@ int main(int argc, char **argv) {
     g_vmCam=(Camera3D){ (Vector3){0,0,0}, (Vector3){0,0,-1}, (Vector3){0,1,0}, 55.0f, CAMERA_PERSPECTIVE };
 
     LoadWeapon(0, "assets/rifle.glb", "../assets/rifle.glb", "M16A3 Rifle", "vm_tune.txt",
-               VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0);
+               VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0, 0.0f);
     LoadWeapon(1, "assets/shotgun.glb", "../assets/shotgun.glb", "Shotgun", "vm_tune_shotgun.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 90.0f);  // barrel along model-Z; 90deg roll stands it up
     LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
-               (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f);  // dialed in
+               (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f, 0.0f);  // dialed in
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
     LoadWeapon(4, "assets/sawnoff.glb", "../assets/sawnoff.glb", "Sawnoff", "vm_tune_sawnoff.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f);
+               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
     g_numWeapons=5;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
