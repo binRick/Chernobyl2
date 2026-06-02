@@ -902,11 +902,12 @@ int main(int argc, char **argv) {
 
     if (g_mapPath){                    // SPIKE: load a Xonotic .map's brush geometry
         g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
-        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"tris\":%d", JStr(g_mapPath),
-                 g_hasMap?"true":"false", (g_hasMap&&g_map.meshCount>0)?g_map.meshes[0].triangleCount:0);
+        int tt=0; for(int mi=0;mi<g_map.meshCount;mi++) tt+=g_map.meshes[mi].triangleCount;
+        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d",
+                 JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt);
         if (!g_hasMap) TraceLog(LOG_WARNING,"map: failed to load %s", g_mapPath);
     }
-    if (g_hasMap){ g_pos=(Vector3){0,9,0}; g_yaw=0.0f; g_pitch=-0.2f; }   // elevated free-fly vantage
+    if (g_hasMap){ g_pos=(Vector3){0,14,20}; g_yaw=PI; g_pitch=-0.35f; }   // elevated free-fly vantage
 
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);
     g_wallTex =MakeChecker(256,(Color){80,72,64,255},(Color){64,58,52,255},8);
