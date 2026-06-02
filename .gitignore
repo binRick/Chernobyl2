@@ -12,6 +12,7 @@ maps/
 vm_tune.txt
 vm_tune_*.txt
 chernobyl2-debug.log
+chernobyl2-shot.png
 
 # tooling binaries / deps
 tools/FBX2glTF

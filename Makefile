@@ -5,6 +5,7 @@ NAME    := chernobyl2
 BUILD   := build
 BIN     := $(BUILD)/$(NAME)
 SRC     := src/main.c
+HDRS    := $(wildcard src/*.h)
 
 CC      ?= clang
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -DGL_SILENCE_DEPRECATION
@@ -25,7 +26,7 @@ endif
 .PHONY: all run debug clean raylib6
 all: $(BIN)
 
-$(BIN): $(SRC) $(RAYLIB_DIR)/lib/libraylib.a | $(BUILD)
+$(BIN): $(SRC) $(HDRS) $(RAYLIB_DIR)/lib/libraylib.a | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $(SRC) $(LIBS)
 
 $(BUILD):
