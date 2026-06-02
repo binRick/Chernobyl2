@@ -142,10 +142,14 @@ typedef struct {
     Vector3         off0; float scale0, yaw0, pitch0, roll0; // defaults for 0=reset
     const char     *label;
     const char     *tunePath;
+    Sound           fireSnd;                     // per-weapon fire report
+    int             hasSnd;                      // fireSnd loaded OK
+    int             sndLoop;                     // 1 = loop while trigger held (auto); 0 = one-shot per shot
 } Weapon;
 static Weapon g_weapons[5];
 static int    g_curWeapon = 0;
 static int    g_numWeapons = 0;
+static int    g_audio = 0;                       // audio device ready (sounds load/play only when set)
 
 static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll){
     FILE *f=fopen(path,"w"); if(!f) return;
@@ -180,6 +184,9 @@ static void ActivateWeapon(int n){
 }
 static void SwitchWeapon(int n){
     if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
+    // silence the weapon we're holstering so its loop doesn't bleed past the swap
+    if (g_audio && g_weapons[g_curWeapon].hasSnd && IsSoundPlaying(g_weapons[g_curWeapon].fireSnd))
+        StopSound(g_weapons[g_curWeapon].fireSnd);
     StashActiveTuning();
     ActivateWeapon(n);
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\"", n, g_weapons[n].label);
@@ -243,6 +250,20 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
              slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
 }
 
+// Attach a fire sound to a weapon slot. loop=1 -> sustained machine-gun fire
+// (held in Update); loop=0 -> one blast per shot (played in Fire). No-op until
+// the audio device is up, and silently skips a missing file (game still runs).
+static void LoadWeaponSound(int slot, const char *path, const char *alt, int loop){
+    if (!g_audio || slot<0 || slot>=5) return;
+    Weapon *w=&g_weapons[slot];
+    const char *fp=path; if(!FileExists(fp)) fp=alt;
+    if(!FileExists(fp)){ DebugLog("wsound","\"slot\":%d,\"error\":\"missing\",\"path\":\"%s\"",slot,JStr(path)); return; }
+    w->fireSnd=LoadSound(fp);
+    w->hasSnd=(w->fireSnd.frameCount>0);
+    w->sndLoop=loop;
+    DebugLog("wsound","\"slot\":%d,\"path\":\"%s\",\"frames\":%u,\"loop\":%d",slot,JStr(fp),w->fireSnd.frameCount,loop);
+}
+
 // ---- Tracers + impact sparks ------------------------------------------------
 typedef struct { Vector3 a, b; float life; } Tracer;
 typedef struct { Vector3 pos, vel; float life, life0, size; Color col; } Spark;
@@ -266,6 +287,14 @@ static Spark  g_sparks[MAX_SPARKS];
 #define ENEMY_YAW_OFFSET   0.0f       // tune if they face the wrong way
 #define ENEMY_TOUCH_DMG    18.0f      // player hp/sec when an enemy is in melee
 #define ENEMY_ATTACK_RANGE  1.8f       // enters attack/melee within this range
+// Headshot zone: a narrower box at the TOP of the enemy silhouette. A shot
+// whose aim ray pierces it deals HEADSHOT_MULT x damage. Sized for the Mixamo
+// humanoid (~1.85m): the head/upper-neck sits in the top ~0.32m, narrower than
+// the 0.5 body radius. 3x of ENEMY_DMG_PER_SHOT (34) = 102 >= ENEMY_HP, so a
+// clean headshot one-shot-kills a full-HP enemy (the classic FPS payoff).
+#define HEAD_ZONE_H        0.32f      // vertical extent of the head box (down from the top)
+#define HEAD_RADIUS        0.22f      // half-width of the head box (tighter than the body)
+#define HEADSHOT_MULT      3.0f       // headshot damage multiplier
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; } Enemy; // state: 0 dead,1 alive,2 dying
 static Enemy           g_enemies[MAX_ENEMIES];
 static Model           g_enemy;
@@ -274,7 +303,10 @@ static int             g_enemyAnimN = 0;
 static int g_eWalk=0, g_eIdle=0, g_eRun=0, g_eHit=0, g_eAttack=0, g_eDeath=0; // clips resolved by name at load
 static int             g_hasEnemy = 0;
 static int             g_kills = 0;
+static int             g_headshots = 0;        // running headshot-kill tally (HUD)
+static float           g_hsFlash = 0.0f;       // >0: flash "HEADSHOT!" near the crosshair
 static float           g_playerHp = 100.0f;
+static int             g_godMode = 1;           // dev stage: invulnerable (no death, no "YOU DIED"). G toggles.
 
 static void SpawnEnemy(int i){
     // place at a random spot near a wall, away from the player
@@ -308,8 +340,9 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
 // Detailed blood burst: a spray of crimson droplets of varied size flung along
 // the bullet's travel (dir) in a wide cone, plus heavier slow "gobs" every few
 // particles. Gravity + fade are handled by the shared spark integrator/draw.
-static void SpawnBlood(Vector3 p, Vector3 dir) {
-    for (int i=0;i<200;i++) for (int s=0;s<MAX_SPARKS;s++){
+static void SpawnBlood(Vector3 p, Vector3 dir, float intensity) {
+    int n=(int)(200*intensity); if (n>900) n=900;          // headshots spray harder (capped)
+    for (int i=0;i<n;i++) for (int s=0;s<MAX_SPARKS;s++){
         if (g_sparks[s].life>0) continue;
         float spread=3.6f;
         Vector3 v={ dir.x*4.5f + GetRandomValue(-100,100)/100.0f*spread,
@@ -351,15 +384,25 @@ static void __attribute__((unused)) SetAnim(int idx, int once){
 
 // Test the aim ray against alive enemies (treated as a vertical box). Returns
 // the nearest enemy index hit within maxDist, -1 if none; sets *outDist/*outPt.
-static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vector3 *outPt){
-    int best=-1; float bd=maxDist;
+// *outHead is set to 1 when that nearest hit also pierces the enemy's head box.
+static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vector3 *outPt, int *outHead){
+    int best=-1; float bd=maxDist; if (outHead) *outHead=0;
     for (int i=0;i<MAX_ENEMIES;i++){
         if (g_enemies[i].state!=1) continue;
         Vector3 c=g_enemies[i].pos;
         BoundingBox bb={ (Vector3){c.x-ENEMY_RADIUS, 0, c.z-ENEMY_RADIUS},
                          (Vector3){c.x+ENEMY_RADIUS, ENEMY_HEIGHT, c.z+ENEMY_RADIUS} };
         RayCollision rc=GetRayCollisionBox((Ray){ro,rd},bb);
-        if (rc.hit && rc.distance>0 && rc.distance<bd){ bd=rc.distance; best=i; *outDist=rc.distance; *outPt=rc.point; }
+        if (rc.hit && rc.distance>0 && rc.distance<bd){
+            bd=rc.distance; best=i; *outDist=rc.distance; *outPt=rc.point;
+            // The head box lives inside the body box's vertical span, so the
+            // nearest-enemy pick above is unaffected; we just additionally ask
+            // whether this same ray clips the (narrower) head of that enemy.
+            BoundingBox hb={ (Vector3){c.x-HEAD_RADIUS, ENEMY_HEIGHT-HEAD_ZONE_H, c.z-HEAD_RADIUS},
+                             (Vector3){c.x+HEAD_RADIUS, ENEMY_HEIGHT,             c.z+HEAD_RADIUS} };
+            RayCollision hrc=GetRayCollisionBox((Ray){ro,rd},hb);
+            if (outHead) *outHead = (hrc.hit && hrc.distance>0);
+        }
     }
     return best;
 }
@@ -367,6 +410,10 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
 static void Fire(Camera3D cam) {
     if (g_fireCd>0) return;
     g_fireCd=0.12f;
+    // One-shot weapons (e.g. the shotgun) sound their report here, per shot, on
+    // the cooldown-gated trigger. Sustained-auto weapons loop in Update() instead.
+    { Weapon *cw=&g_weapons[g_curWeapon];
+      if (g_audio && cw->hasSnd && !cw->sndLoop) PlaySound(cw->fireSnd); }
     Vector3 dir=Vector3Normalize(Vector3Subtract(cam.target,cam.position));
     Vector3 muzzle=Vector3Add(cam.position,Vector3Scale(dir,0.4f));
     Vector3 hit,nrm,end=Vector3Add(cam.position,Vector3Scale(dir,80.0f));
@@ -374,14 +421,19 @@ static void Fire(Camera3D cam) {
     int worldHit=RaycastWorld(cam.position,dir,&hit,&nrm);
     if (worldHit){ end=hit; worldDist=Vector3Distance(cam.position,hit); }
     // enemy hit takes priority if it's closer than the world geometry
-    float ed; Vector3 ep;
-    int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep);
+    float ed; Vector3 ep; int head=0;
+    int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep,&head);
     if (ei>=0){
         end=ep;
-        SpawnBlood(ep,dir);                               // detailed blood spray
-        g_enemies[ei].hp-=ENEMY_DMG_PER_SHOT;
-        if (g_enemies[ei].hp<=0){ g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0; g_kills++; }
-        else g_enemies[ei].hitT=0.45f;   // non-fatal hit -> flinch
+        SpawnBlood(ep,dir, head?1.9f:1.0f);               // headshots spray harder
+        g_enemies[ei].hp -= head ? ENEMY_DMG_PER_SHOT*HEADSHOT_MULT : ENEMY_DMG_PER_SHOT;
+        if (head) g_hsFlash=1.1f;                         // flash "HEADSHOT!" on any head hit
+        if (g_enemies[ei].hp<=0){
+            g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0;
+            g_kills++; if (head) g_headshots++;           // tally a confirmed headshot kill
+        } else {
+            g_enemies[ei].hitT=0.45f;                     // non-fatal hit -> flinch
+        }
     } else if (worldHit){
         SpawnImpact(hit,nrm);
     }
@@ -389,7 +441,7 @@ static void Fire(Camera3D cam) {
     // Code-driven recoil instead of the Shoot clip (that clip repositions the
     // gun out of the viewmodel frame -> "gun goes away"). Kick rises to 1, decays.
     g_recoil=1.0f;
-    DebugLog("fire","\"enemy\":%d,\"end\":[%.2f,%.2f,%.2f]", ei, end.x,end.y,end.z);
+    DebugLog("fire","\"enemy\":%d,\"head\":%d,\"end\":[%.2f,%.2f,%.2f]", ei, head, end.x,end.y,end.z);
 }
 
 // Walk alive enemies toward the player; advance death timers; melee on contact.
@@ -408,7 +460,7 @@ static void UpdateEnemies(float dt){
                 e->pos.x+=dx/d*ENEMY_SPEED*dt;
                 e->pos.z+=dz/d*ENEMY_SPEED*dt;
             }
-            if (e->clip==g_eAttack && e->hitT<=0) g_playerHp-=ENEMY_TOUCH_DMG*dt;
+            if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
             if (g_enemyAnimN>0){                               // advance current clip (looping)
                 int nf=ANIM_FRAMES(g_enemyAnim[e->clip]);
                 float spd=(e->clip==g_eAttack)?90.0f:30.0f;    // attack plays much faster
@@ -465,6 +517,11 @@ static Camera3D g_cam;
 static void Update(void) {
     float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
 
+    // Keep the mouse captured the whole time we're playing. macOS releases the
+    // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
+    // re-grab it the instant we have focus again and it's become visible.
+    if (IsWindowFocused() && !IsCursorHidden()) DisableCursor();
+
     if (IsWindowReady() && IsCursorHidden()){
         Vector2 md=GetMouseDelta();
         g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f;
@@ -495,6 +552,7 @@ static void Update(void) {
     // shooting / reload
     if (g_fireCd>0) g_fireCd-=dt;
     if (g_recoil>0) g_recoil=fmaxf(0.0f, g_recoil - dt*7.0f);   // recoil settles in ~0.14s
+    if (g_hsFlash>0) g_hsFlash-=dt;                            // "HEADSHOT!" flash fades out
     if (IsKeyPressed(KEY_R) && !g_reloading){
         if (g_reloadSeqN>0){                              // multi-phase reload
             g_reloading=1; g_reloadStep=0;
@@ -505,6 +563,16 @@ static void Update(void) {
         }                                                // else: weapon has no reload clip, do nothing
     }
     else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !g_reloading) Fire(g_cam);
+
+    // Sustained-auto weapons (rifle/minigun/LMG) keep their fire loop running
+    // while the trigger is held and stop the moment it's released or a reload
+    // begins. Sound has no native loop, so we just re-trigger when it runs out.
+    { Weapon *cw=&g_weapons[g_curWeapon];
+      if (g_audio && cw->hasSnd && cw->sndLoop){
+          int firing = g_hasGun && !g_reloading && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+          if (firing){ if (!IsSoundPlaying(cw->fireSnd)) PlaySound(cw->fireSnd); }
+          else if (IsSoundPlaying(cw->fireSnd)) StopSound(cw->fireSnd);
+      } }
 
     UpdateEnemies(dt);
 
@@ -535,6 +603,8 @@ static void Update(void) {
     // overlay + inspect + reset
     if (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB)) g_devOverlay=!g_devOverlay;
     if (IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
+    if (IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode) g_playerHp=100.0f;   // refill on re-enable
+        DebugLog("mode","\"godMode\":%s", g_godMode?"true":"false"); }
     if (IsKeyPressed(KEY_N)){                          // N: toggle orient mode (no enemies, weapon-aim tuning)
         g_noEnemies=!g_noEnemies;
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
@@ -705,12 +775,21 @@ static void DrawHUD(void) {
     DrawLine(W/2-10,H/2,W/2-3,H/2,cc); DrawLine(W/2+3,H/2,W/2+10,H/2,cc);
     DrawLine(W/2,H/2-10,W/2,H/2-3,cc); DrawLine(W/2,H/2+3,W/2,H/2+10,cc);
     DrawFPS(W-90,10);
-    // kills + player health
+    // kills + headshots + player health
     DrawText(TextFormat("KILLS %d", g_kills), W-160, 36, 22, (Color){255,230,120,255});
+    DrawText(TextFormat("HEADSHOTS %d", g_headshots), W-160, 60, 18, (Color){255,140,50,255});
+    // "HEADSHOT!" punch near the crosshair: full for ~0.65s, then fades over 0.45s
+    if (g_hsFlash>0){
+        const char *t="HEADSHOT!"; int fs=36, tw=MeasureText(t,fs), x=W/2-tw/2, y=H/2-74;
+        float k=fminf(1.0f, g_hsFlash/0.45f);
+        DrawText(t, x+2, y+2, fs, (Color){0,0,0,(unsigned char)(180*k)});
+        DrawText(t, x,   y,   fs, (Color){255,70,40,(unsigned char)(255*k)});
+    }
     DrawRectangle(20, H-44, 224, 24, (Color){0,0,0,150});
     DrawRectangle(22, H-42, (int)(220*g_playerHp/100.0f), 20, (Color){200,40,40,255});
     DrawText(TextFormat("HP %d", (int)g_playerHp), 28, H-40, 16, RAYWHITE);
-    if (g_playerHp<=0 && !g_noEnemies) DrawText("YOU DIED - press ESC", W/2-120, H/2+30, 24, (Color){255,80,80,255});
+    if (g_godMode) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (dev)
+    if (g_playerHp<=0 && !g_noEnemies && !g_godMode) DrawText("YOU DIED - press ESC", W/2-120, H/2+30, 24, (Color){255,80,80,255});
     // Big unmistakable mode banner so "floating" can be diagnosed: INSPECT mode
     // intentionally floats the gun in front of you; press V to get back to FP.
     if (g_inspect)
@@ -718,7 +797,7 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1-5=weapon N=mode V=inspect 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1-5=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
             DrawRectangle(6,96,600,392,(Color){0,0,0,215});
             DrawRectangleLines(6,96,600,392,(Color){255,210,60,255});
@@ -801,6 +880,10 @@ int main(int argc, char **argv) {
     SetTargetFPS(60);
     DisableCursor();
 
+    InitAudioDevice();                 // weapon fire sounds; harmless if it fails
+    g_audio = IsAudioDeviceReady();
+    DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
+
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);
     g_wallTex =MakeChecker(256,(Color){80,72,64,255},(Color){64,58,52,255},8);
     g_crateTex=MakeChecker(128,(Color){120,90,55,255},(Color){95,70,42,255},4);
@@ -833,6 +916,13 @@ int main(int argc, char **argv) {
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
     g_numWeapons=5;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
+
+    // Per-weapon fire sounds. The three automatics loop while the trigger is
+    // held; the shotgun fires one blast per shot. (Slot 4 / sawnoff has none yet.)
+    LoadWeaponSound(0, "assets/rifle_fire.mp3",   "../assets/rifle_fire.mp3",   1);  // M16A3 (machine gun)
+    LoadWeaponSound(1, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // shotgun: one-shot
+    LoadWeaponSound(2, "assets/minigun_fire.mp3", "../assets/minigun_fire.mp3", 1);  // minigun
+    LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (.50 cal)
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
@@ -875,6 +965,10 @@ int main(int argc, char **argv) {
     if (g_hasEnemy){ if (g_enemyAnim) UnloadModelAnimations(g_enemyAnim,g_enemyAnimN); UnloadModel(g_enemy); }
     UnloadModel(g_floor); UnloadModel(g_wall); UnloadModel(g_crate);
     UnloadTexture(g_floorTex); UnloadTexture(g_wallTex); UnloadTexture(g_crateTex);
+    if (g_audio){
+        for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].hasSnd) UnloadSound(g_weapons[i].fireSnd);
+        CloseAudioDevice();
+    }
     CloseWindow();
     return 0;
 }

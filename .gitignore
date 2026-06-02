@@ -4,6 +4,7 @@ vendor/raylib/
 
 # large/binary game assets (kept local, not versioned)
 *.glb
+*.mp3
 
 # per-machine live state
 vm_tune.txt
