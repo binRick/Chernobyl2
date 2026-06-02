@@ -31,6 +31,8 @@
   #include <GLES3/gl3.h>
 #endif
 
+#include "mapload.h"   // SPIKE: --map loads idTech3 (.map) brush geometry as a Model
+
 // raylib 6.0 redesigned skeletal animation; macro keeps it buildable on 5.5.
 #if defined(RAYLIB_VERSION_MAJOR) && RAYLIB_VERSION_MAJOR >= 6
   #define ANIM_FRAMES(a)     ((a).keyframeCount)
@@ -69,6 +71,7 @@ typedef struct { Vector3 pos; Vector3 size; Color col; } Box;
 static Box  g_crates[NUM_CRATES];
 static Texture2D g_floorTex, g_wallTex, g_crateTex;
 static Model g_floor, g_wall, g_crate;
+static Model g_map; static int g_hasMap=0; static const char *g_mapPath=NULL;  // SPIKE: --map <file.map>
 
 // ---- Player -----------------------------------------------------------------
 static Vector3 g_pos   = { 0, EYE_H, 6 };
@@ -494,6 +497,7 @@ static void UpdateEnemies(float dt){
 }
 
 static void Collide(void) {
+    if (g_hasMap) return;   // SPIKE: free movement inside a loaded map (no map collision yet)
     float r=0.4f;
     if (g_pos.x> ARENA-r) g_pos.x= ARENA-r;  if (g_pos.x<-ARENA+r) g_pos.x=-ARENA+r;
     if (g_pos.z> ARENA-r) g_pos.z= ARENA-r;  if (g_pos.z<-ARENA+r) g_pos.z=-ARENA+r;
@@ -542,9 +546,14 @@ static void Update(void) {
         g_pos.x+=wish.x; g_pos.z+=wish.z;
         g_bob+=dt*(IsKeyDown(KEY_LEFT_SHIFT)?14.0f:10.0f);
     }
-    if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
-    g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
-    if (g_pos.y<=EYE_H){ g_pos.y=EYE_H; g_vy=0; g_grounded=1; }
+    if (g_hasMap){                                     // SPIKE: free-fly in map view (no gravity)
+        if (IsKeyDown(KEY_SPACE))        g_pos.y += speed*dt;
+        if (IsKeyDown(KEY_LEFT_CONTROL)) g_pos.y -= speed*dt;
+    } else {
+        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
+        g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
+        if (g_pos.y<=EYE_H){ g_pos.y=EYE_H; g_vy=0; g_grounded=1; }
+    }
     Collide();
 
     g_cam.position=g_pos; g_cam.target=Vector3Add(g_pos,fwd); g_cam.up=(Vector3){0,1,0};
@@ -671,13 +680,19 @@ static void Update(void) {
 }
 
 static void DrawWorld(void) {
-    DrawModelEx(g_floor,(Vector3){0,0,0},(Vector3){0,1,0},0,(Vector3){ARENA*2,1,ARENA*2},WHITE);
-    DrawModelEx(g_wall,(Vector3){0,WALL_H/2, ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
-    DrawModelEx(g_wall,(Vector3){0,WALL_H/2,-ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
-    DrawModelEx(g_wall,(Vector3){ ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
-    DrawModelEx(g_wall,(Vector3){-ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
-    for (int c=0;c<NUM_CRATES;c++)
-        DrawModelEx(g_crate,g_crates[c].pos,(Vector3){0,1,0},0,g_crates[c].size,g_crates[c].col);
+    if (g_hasMap){                          // SPIKE: draw the loaded .map (no collision yet)
+        rlDisableBackfaceCulling();         // brush winding flips under the Z->Y axis swap
+        DrawModel(g_map,(Vector3){0,0,0},1.0f,WHITE);
+        rlEnableBackfaceCulling();
+    } else {
+        DrawModelEx(g_floor,(Vector3){0,0,0},(Vector3){0,1,0},0,(Vector3){ARENA*2,1,ARENA*2},WHITE);
+        DrawModelEx(g_wall,(Vector3){0,WALL_H/2, ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        DrawModelEx(g_wall,(Vector3){0,WALL_H/2,-ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        DrawModelEx(g_wall,(Vector3){ ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        DrawModelEx(g_wall,(Vector3){-ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        for (int c=0;c<NUM_CRATES;c++)
+            DrawModelEx(g_crate,g_crates[c].pos,(Vector3){0,1,0},0,g_crates[c].size,g_crates[c].col);
+    }
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0)
         DrawLine3D(g_tracers[i].a,g_tracers[i].b,(Color){255,240,150,255});
     for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
@@ -855,6 +870,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
+        else if (!strcmp(argv[i],"--map") && i+1<argc) g_mapPath=argv[++i];   // SPIKE: load a .map
     }
     // Send the JSON event stream straight to a log file (not stdout/stderr, so
     // it stays clean of raylib's own warnings). Fresh file each run.
@@ -883,6 +899,14 @@ int main(int argc, char **argv) {
     InitAudioDevice();                 // weapon fire sounds; harmless if it fails
     g_audio = IsAudioDeviceReady();
     DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
+
+    if (g_mapPath){                    // SPIKE: load a Xonotic .map's brush geometry
+        g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
+        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"tris\":%d", JStr(g_mapPath),
+                 g_hasMap?"true":"false", (g_hasMap&&g_map.meshCount>0)?g_map.meshes[0].triangleCount:0);
+        if (!g_hasMap) TraceLog(LOG_WARNING,"map: failed to load %s", g_mapPath);
+    }
+    if (g_hasMap){ g_pos=(Vector3){0,9,0}; g_yaw=0.0f; g_pitch=-0.2f; }   // elevated free-fly vantage
 
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);
     g_wallTex =MakeChecker(256,(Color){80,72,64,255},(Color){64,58,52,255},8);
@@ -945,7 +969,7 @@ int main(int argc, char **argv) {
         DebugLog("enemy","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f]",
                  g_enemy.meshCount, g_enemy.skeleton.boneCount, g_enemyAnimN,
                  eb.max.x-eb.min.x, eb.max.y-eb.min.y, eb.max.z-eb.min.z);
-        if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);   // start with 5 enemies (none in --no-enemies mode)
+        if (!g_noEnemies && !g_hasMap) for (int i=0;i<5;i++) SpawnEnemy(i);   // none in --no-enemies / --map modes
     } else DebugLog("enemy","\"error\":\"assets/enemy.glb not found\"");
 
 #if defined(__EMSCRIPTEN__)
@@ -964,6 +988,7 @@ int main(int argc, char **argv) {
     }
     if (g_hasEnemy){ if (g_enemyAnim) UnloadModelAnimations(g_enemyAnim,g_enemyAnimN); UnloadModel(g_enemy); }
     UnloadModel(g_floor); UnloadModel(g_wall); UnloadModel(g_crate);
+    if (g_hasMap) UnloadModel(g_map);
     UnloadTexture(g_floorTex); UnloadTexture(g_wallTex); UnloadTexture(g_crateTex);
     if (g_audio){
         for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].hasSnd) UnloadSound(g_weapons[i].fireSnd);
