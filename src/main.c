@@ -775,7 +775,6 @@ static void Update(void) {
     if (IsKeyPressed(KEY_TWO)) SwitchWeapon(1);
     if (IsKeyPressed(KEY_THREE)) SwitchWeapon(2);
     if (IsKeyPressed(KEY_FOUR)) SwitchWeapon(3);
-    if (IsKeyPressed(KEY_FIVE)) SwitchWeapon(4);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
     // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
     // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
@@ -962,7 +961,7 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1-5=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1-4=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
             DrawRectangle(6,96,600,392,(Color){0,0,0,215});
             DrawRectangleLines(6,96,600,392,(Color){255,210,60,255});
@@ -1118,25 +1117,21 @@ int main(int argc, char **argv) {
                (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f, 0.0f);  // dialed in
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
-    LoadWeapon(4, "assets/sawnoff.glb", "../assets/sawnoff.glb", "Sawnoff", "vm_tune_sawnoff.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
-    g_numWeapons=5;
+    g_numWeapons=4;      // sawnoff (was slot 4) removed -- its model has no animations
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
-    // Per-weapon fire sounds. The three automatics loop while the trigger is
-    // held; the shotgun fires one blast per shot. (Slot 4 / sawnoff has none yet.)
+    // Per-weapon fire sounds. The two automatics loop while the trigger is held;
+    // the shotgun fires one blast per shot.
     LoadWeaponSound(0, "assets/rifle_fire.mp3",   "../assets/rifle_fire.mp3",   1);  // M16A3 (machine gun)
     LoadWeaponSound(1, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // shotgun: one-shot
     LoadWeaponSound(2, "assets/minigun_fire.mp3", "../assets/minigun_fire.mp3", 1);  // minigun
     LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (biggun)
-    LoadWeaponSound(4, "assets/sawnoff_fire.mp3", "../assets/sawnoff_fire.mp3", 0);  // sawnoff: one-shot
     LoadWeaponAux(1, "assets/shotgun_cock.mp3",     "../assets/shotgun_cock.mp3");     // shotgun cock between shots
     LoadWeaponAux(2, "assets/minigun_cooldown.mp3", "../assets/minigun_cooldown.mp3"); // minigun spin-down
     g_weapons[0].burst=3;        // rifle:   3-round burst per trigger pull
     g_weapons[1].autoReload=1;   // shotgun: pump (reload anim) + cock sound after each shot
     g_weapons[2].spinUp=1;       // minigun: 5s fire cap -> cooldown sound + lockout
     g_weapons[3].soundGated=1;   // LMG:     fire while the sound plays, then a 0.75s pause
-    g_weapons[4].fireCd=0.7f;    // sawnoff: slow, deliberate shots
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
