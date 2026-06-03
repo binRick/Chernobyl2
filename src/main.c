@@ -898,11 +898,25 @@ static void DrawHUD(void) {
     }
 }
 
+// Sunset-gradient sky behind the world. The .map's sky surfaces (skies/*) are
+// skipped by the loader, so those openings reveal this. A vertical gradient
+// needs no yaw response; we just slide the horizon with pitch (look up -> more
+// sky). Stands in for the named distant_sunset cubemap (its images weren't
+// fetchable); swap in a real cubemap later if wanted.
+static void DrawSky(void){
+    int W=GetScreenWidth(), H=GetScreenHeight();
+    float hy=H*0.5f + g_pitch*(float)H*0.55f; if (hy<0) hy=0; if (hy>H) hy=H;
+    Color zenith={48,58,104,255}, horizon={232,138,70,255}, ground={42,34,40,255};
+    if (hy>0) DrawRectangleGradientV(0,0,W,(int)hy, zenith, horizon);            // sky: blue -> sunset
+    if (hy<H) DrawRectangleGradientV(0,(int)hy,W,H-(int)hy, horizon, ground);    // horizon haze -> dark
+}
+
 static void Frame(void) {
     static int frameNo=0;
     Update();
     BeginDrawing();
         ClearBackground((Color){70,90,110,255});
+        if (g_hasMap) DrawSky();                  // gradient sky shows through the map's sky openings
         BeginMode3D(g_cam);
             DrawWorld();
             DrawEnemies();
