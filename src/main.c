@@ -485,6 +485,7 @@ static void EnemyNudge(int i, float mx, float mz){
 // Walk alive enemies toward the player; advance death timers; melee on contact.
 static void UpdateEnemies(float dt){
     if (!g_hasEnemy) return;
+    if (g_hasMap) MapNavUpdate(g_pos);                 // refresh the flow field if the player moved cells
     for (int i=0;i<MAX_ENEMIES;i++){
         Enemy *e=&g_enemies[i];
         if (e->state==1){
@@ -494,8 +495,11 @@ static void UpdateEnemies(float dt){
             // clip priority: flinch > attack (in melee range) > run (chasing)
             int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : g_eRun);
             if (want!=e->clip){ e->clip=want; e->animT=0; }
-            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE)            // chase (wall-blocked, slides along walls)
-                EnemyNudge(i, dx/d*ENEMY_SPEED*dt, dz/d*ENEMY_SPEED*dt);
+            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE){           // chase: follow the nav flow field, else beeline
+                Vector3 sd; float mx=dx/d, mz=dz/d;
+                if (g_hasMap && MapNavSteer(e->pos,&sd)){ mx=sd.x; mz=sd.z; }
+                EnemyNudge(i, mx*ENEMY_SPEED*dt, mz*ENEMY_SPEED*dt);
+            }
             if (g_hasMap && g_mapCol.ready){                   // keep the enemy standing on the map floor
                 float top=e->pos.y+4.0f, fd=MapRayNearest((Vector3){e->pos.x,top,e->pos.z},(Vector3){0,-1,0},40.0f);
                 if (fd>0) e->pos.y=top-fd;
@@ -1003,6 +1007,8 @@ int main(int argc, char **argv) {
     if (g_hasMap){                                    // start at a map spawn point, drop to the floor
         g_pos = g_hasSpawn ? (Vector3){g_mapSpawn.x, g_mapSpawn.y+2.0f, g_mapSpawn.z} : (Vector3){0,12,0};
         g_yaw=0.0f; g_pitch=0.0f; g_vy=0.0f; g_grounded=0;
+        MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
+        DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d", g_navNX, g_navNZ, g_navCount, g_navOK);
     }
 
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);

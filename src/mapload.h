@@ -198,6 +198,20 @@ typedef struct { Vector3 pos; float R; Vector3 color; } MapLight;   // point lig
 static MapLight g_mapLights[2048];
 static int      g_nMapLights = 0;
 
+// ---- Enemy navigation (flow field over a walkable XZ grid) ------------------
+// The grid is flood-filled along the actual floor from a seed (so it follows
+// stairs/ramps and never leaks onto roofs). A single BFS from the player's cell
+// gives every enemy a distance-to-player field to steer down -- one solve for
+// the whole swarm. Reuses the collision grid's floor ray + wall test.
+#define NAV_CELL     0.8f    // grid cell size (raylib units)
+#define NAV_STEPUP   0.9f    // max climb between adjacent cells (also the connect threshold)
+#define NAV_STEPDOWN 1.6f    // max drop between adjacent cells
+#define NAV_WALLR    0.45f   // clearance from walls a cell needs to be walkable
+static int   g_navOK=0, g_navNX=0, g_navNZ=0, g_navPlayerCell=-1, g_navCount=0;
+static float g_navCS=NAV_CELL; static Vector3 g_navMn={0,0,0};
+static unsigned char *g_navWalk=NULL; static float *g_navFloor=NULL;
+static int *g_navDist=NULL, *g_navQueue=NULL;
+
 static float MapRayTri(Vector3 o, Vector3 d, Vector3 a, Vector3 b, Vector3 c){
     Vector3 e1=Vector3Subtract(b,a), e2=Vector3Subtract(c,a);
     Vector3 p=Vector3CrossProduct(d,e2); float det=Vector3DotProduct(e1,p);
@@ -367,6 +381,98 @@ static int MapSphereHitsWall(Vector3 c, float radius){
         }
     }
     return 0;
+}
+
+// Build the walkable nav grid: flood-fill outward along the floor from `seed`,
+// stepping to a neighbour cell only when there's floor within step range there
+// and no wall in the way. Done once after the map+spawn are known.
+static void MapNavBuild(Vector3 seed){
+    g_navOK=0; if (!g_mapCol.ready) return;
+    AOGrid *g=&g_mapCol.grid;
+    g_navCS=NAV_CELL; g_navMn=(Vector3){g->mn.x,0,g->mn.z};
+    g_navNX=(int)((g->nx*g->cs)/g_navCS)+1; g_navNZ=(int)((g->nz*g->cs)/g_navCS)+1;
+    if (g_navNX<1||g_navNZ<1) return;
+    long nc=(long)g_navNX*g_navNZ; if (nc>1500000L) return;
+    free(g_navWalk); free(g_navFloor); free(g_navDist); free(g_navQueue);
+    g_navWalk=(unsigned char*)calloc(nc,1); g_navFloor=(float*)malloc(nc*sizeof(float));
+    g_navDist=(int*)malloc(nc*sizeof(int)); g_navQueue=(int*)malloc(nc*sizeof(int));
+    if (!g_navWalk||!g_navFloor||!g_navDist||!g_navQueue) return;
+    int scx=(int)((seed.x-g_navMn.x)/g_navCS), scz=(int)((seed.z-g_navMn.z)/g_navCS);
+    if (scx<0||scz<0||scx>=g_navNX||scz>=g_navNZ) return;
+    float fd=MapRayNearest((Vector3){seed.x,seed.y+4.0f,seed.z},(Vector3){0,-1,0},80.0f);
+    if (fd<=0) return;
+    int sc=scz*g_navNX+scx; g_navWalk[sc]=1; g_navFloor[sc]=seed.y+4.0f-fd;
+    int head=0,tail=0; g_navQueue[tail++]=sc;
+    const int DX[4]={1,-1,0,0}, DZ[4]={0,0,1,-1};
+    while (head<tail){
+        int ci=g_navQueue[head++]; int cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[ci];
+        float ox=g_navMn.x+(cx+0.5f)*g_navCS, oz=g_navMn.z+(cz+0.5f)*g_navCS;
+        for (int k=0;k<4;k++){
+            int nx=cx+DX[k], nz=cz+DZ[k];
+            if (nx<0||nz<0||nx>=g_navNX||nz>=g_navNZ) continue;
+            int ni=nz*g_navNX+nx; if (g_navWalk[ni]) continue;
+            float wx=g_navMn.x+(nx+0.5f)*g_navCS, wz=g_navMn.z+(nz+0.5f)*g_navCS;
+            float t=h+NAV_STEPUP, dd=MapRayNearest((Vector3){wx,t,wz},(Vector3){0,-1,0},NAV_STEPUP+NAV_STEPDOWN);
+            if (dd<=0) continue; float nh=t-dd;
+            if (nh<h-NAV_STEPDOWN || nh>h+NAV_STEPUP) continue;            // too big a step
+            if (MapSphereHitsWall((Vector3){wx,nh+0.9f,wz},NAV_WALLR)) continue;          // cell in a wall
+            if (MapSphereHitsWall((Vector3){(ox+wx)*0.5f,(h+nh)*0.5f+0.9f,(oz+wz)*0.5f},NAV_WALLR)) continue; // wall between
+            g_navWalk[ni]=1; g_navFloor[ni]=nh; g_navQueue[tail++]=ni;
+        }
+    }
+    g_navPlayerCell=-1; g_navCount=tail; g_navOK=1;   // tail = number of reachable walkable cells
+}
+
+// Recompute the distance-to-player flow field (BFS) when the player changes
+// cell. Cheap; one solve feeds every enemy.
+static void MapNavUpdate(Vector3 player){
+    if (!g_navOK) return;
+    int pcx=(int)((player.x-g_navMn.x)/g_navCS), pcz=(int)((player.z-g_navMn.z)/g_navCS);
+    if (pcx<0||pcz<0||pcx>=g_navNX||pcz>=g_navNZ) return;
+    int pc=pcz*g_navNX+pcx;
+    if (!g_navWalk[pc]){                                   // player off the grid -> nearest walkable cell
+        int found=-1,br=1<<30;
+        for (int r=1;r<=3 && found<0;r++) for (int dz=-r;dz<=r;dz++) for (int dx=-r;dx<=r;dx++){
+            int x=pcx+dx,z=pcz+dz; if(x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
+            int c=z*g_navNX+x; if (g_navWalk[c]){ int dd=dx*dx+dz*dz; if(dd<br){br=dd;found=c;} } }
+        if (found<0) return; pc=found;
+    }
+    if (pc==g_navPlayerCell) return;
+    g_navPlayerCell=pc;
+    long nc=(long)g_navNX*g_navNZ; for (long i=0;i<nc;i++) g_navDist[i]=-1;
+    int head=0,tail=0; g_navDist[pc]=0; g_navQueue[tail++]=pc;
+    const int DX[8]={1,-1,0,0,1,1,-1,-1}, DZ[8]={0,0,1,-1,1,-1,1,-1};
+    while (head<tail){
+        int ci=g_navQueue[head++]; int cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[ci];
+        for (int k=0;k<8;k++){
+            int x=cx+DX[k],z=cz+DZ[k]; if(x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
+            int ni=z*g_navNX+x; if (!g_navWalk[ni]||g_navDist[ni]>=0) continue;
+            if (fabsf(g_navFloor[ni]-h)>NAV_STEPUP) continue;
+            g_navDist[ni]=g_navDist[ci]+1; g_navQueue[tail++]=ni;
+        }
+    }
+}
+
+// Steering direction (normalised XZ) toward the player along the flow field for
+// an enemy at `from`. Returns 0 if off-grid / unreachable / already at the
+// player's cell, so the caller can fall back to a straight beeline.
+static int MapNavSteer(Vector3 from, Vector3 *dir){
+    if (!g_navOK) return 0;
+    int cx=(int)((from.x-g_navMn.x)/g_navCS), cz=(int)((from.z-g_navMn.z)/g_navCS);
+    if (cx<0||cz<0||cx>=g_navNX||cz>=g_navNZ) return 0;
+    int ci=cz*g_navNX+cx; if (!g_navWalk[ci]||g_navDist[ci]<0) return 0;
+    int best=g_navDist[ci], bx=cx, bz=cz; float h=g_navFloor[ci];
+    const int DX[8]={1,-1,0,0,1,1,-1,-1}, DZ[8]={0,0,1,-1,1,-1,1,-1};
+    for (int k=0;k<8;k++){
+        int x=cx+DX[k],z=cz+DZ[k]; if(x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
+        int ni=z*g_navNX+x; if (!g_navWalk[ni]||g_navDist[ni]<0) continue;
+        if (fabsf(g_navFloor[ni]-h)>NAV_STEPUP) continue;
+        if (g_navDist[ni]<best){ best=g_navDist[ni]; bx=x; bz=z; }
+    }
+    if (bx==cx && bz==cz) return 0;
+    float tx=g_navMn.x+(bx+0.5f)*g_navCS, tz=g_navMn.z+(bz+0.5f)*g_navCS;
+    float ddx=tx-from.x, ddz=tz-from.z, len=sqrtf(ddx*ddx+ddz*ddz); if (len<1e-4f) return 0;
+    *dir=(Vector3){ddx/len,0,ddz/len}; return 1;
 }
 
 // Parse a .map and build a textured, multi-material raylib Model.
