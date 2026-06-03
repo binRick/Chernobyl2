@@ -418,7 +418,7 @@ static void SpawnBlood(Vector3 p, Vector3 dir, float intensity, float floorY) {
         int gob=(i%5==0);                                  // heavy gobs: slower, bigger, redder, and LASTING
         if (gob){ v.x*=0.45f; v.y=v.y*0.45f+0.4f; v.z*=0.45f; }
         float lf = 1.1f + GetRandomValue(0,120)/100.0f;
-        float sz = gob ? (0.10f+GetRandomValue(0,7)/100.0f) : (0.028f+GetRandomValue(0,4)/100.0f);
+        float sz = gob ? (0.055f+GetRandomValue(0,5)/100.0f) : (0.022f+GetRandomValue(0,3)/100.0f);
         Spark sp={0}; sp.pos=p; sp.vel=v; sp.life=lf; sp.life0=lf; sp.size=sz; sp.rest=floorY; sp.blood=gob;
         sp.col=(Color){ (unsigned char)(150+GetRandomValue(0,105)), (unsigned char)GetRandomValue(0,28), (unsigned char)GetRandomValue(0,18), 255 };
         g_sparks[s]=sp;
@@ -886,10 +886,16 @@ static void DrawWorld(void) {
         DrawLine3D(g_tracers[i].a,g_tracers[i].b,(Color){255,240,150,255});
     for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
         Spark *sp=&g_sparks[i];
-        float k=(sp->life0>0)?sp->life/sp->life0:1.0f;     // 1 at birth -> 0 at death
-        float sz=sp->size*(0.45f+0.55f*k);                 // droplets shrink as they fade
-        Color c=sp->col; c.a=(unsigned char)(k*255.0f);    // and fade out
-        DrawSphereEx(sp->pos, sz*0.6f, 6, 6, c);
+        if (sp->blood && sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0){    // settled blood -> flat liquid splat
+            float r=sp->size*0.9f;                                        // thin disc lying on the floor, not a ball
+            DrawCylinderEx((Vector3){sp->pos.x,sp->rest+0.010f,sp->pos.z},
+                           (Vector3){sp->pos.x,sp->rest+0.022f,sp->pos.z}, r, r, 12, sp->col);
+        } else {
+            float k=(sp->life0>0)?sp->life/sp->life0:1.0f; // 1 at birth -> 0 at death
+            float sz=sp->size*(0.45f+0.55f*k);             // droplets shrink as they fade
+            Color c=sp->col; c.a=(unsigned char)(k*255.0f);// and fade out
+            DrawSphereEx(sp->pos, sz*0.6f, 6, 6, c);
+        }
     }
 }
 
