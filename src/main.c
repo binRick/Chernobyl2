@@ -313,14 +313,31 @@ static float           g_playerHp = 100.0f;
 static int             g_godMode = 1;           // dev stage: invulnerable (no death, no "YOU DIED"). G toggles.
 static int             g_noclip = 0;            // map mode: F toggles free-fly / noclip vs FPS collision
 
-static void SpawnEnemy(int i){
-    // place at a random spot near a wall, away from the player
-    float ang=(float)GetRandomValue(0,628)/100.0f;
-    float dist=ARENA*0.6f + GetRandomValue(0,(int)(ARENA*0.3f));
-    g_enemies[i].pos=(Vector3){ cosf(ang)*dist, 0, sinf(ang)*dist };
-    g_enemies[i].hp=ENEMY_HP; g_enemies[i].state=1;
+static void EnemyArm(int i, Vector3 pos){       // common: bring enemy i to life at pos
+    g_enemies[i].pos=pos; g_enemies[i].hp=ENEMY_HP; g_enemies[i].state=1;
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
     g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun;
+}
+// Map spawn: ring around the player, dropped onto the floor under each spot;
+// only accept floors near the player's level (not a roof or a far-below pit).
+static void SpawnEnemyMap(int i){
+    for (int t=0;t<16;t++){
+        float ang=(float)GetRandomValue(0,628)/100.0f;
+        float dist=6.0f+GetRandomValue(0,90)/10.0f;          // 6..15 units out
+        float x=g_pos.x+cosf(ang)*dist, z=g_pos.z+sinf(ang)*dist;
+        float top=g_pos.y+8.0f;
+        float fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
+        if (fd>0){ float fy=top-fd;
+            if (fabsf(fy-(g_pos.y-EYE_H))<6.0f){ EnemyArm(i,(Vector3){x,fy,z}); return; } }
+    }
+    EnemyArm(i,(Vector3){g_pos.x+2.0f, g_pos.y-EYE_H, g_pos.z});   // fallback: by the player
+}
+static void SpawnEnemy(int i){
+    if (g_hasMap && g_mapCol.ready){ SpawnEnemyMap(i); return; }
+    // arena: a random spot near a wall, away from the player
+    float ang=(float)GetRandomValue(0,628)/100.0f;
+    float dist=ARENA*0.6f + GetRandomValue(0,(int)(ARENA*0.3f));
+    EnemyArm(i,(Vector3){ cosf(ang)*dist, 0, sinf(ang)*dist });
 }
 
 static Texture2D MakeChecker(int sz, Color a, Color b, int cells) {
@@ -394,17 +411,17 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
     int best=-1; float bd=maxDist; if (outHead) *outHead=0;
     for (int i=0;i<MAX_ENEMIES;i++){
         if (g_enemies[i].state!=1) continue;
-        Vector3 c=g_enemies[i].pos;
-        BoundingBox bb={ (Vector3){c.x-ENEMY_RADIUS, 0, c.z-ENEMY_RADIUS},
-                         (Vector3){c.x+ENEMY_RADIUS, ENEMY_HEIGHT, c.z+ENEMY_RADIUS} };
+        Vector3 c=g_enemies[i].pos;          // c.y = the enemy's floor (0 in the arena, map height on a map)
+        BoundingBox bb={ (Vector3){c.x-ENEMY_RADIUS, c.y, c.z-ENEMY_RADIUS},
+                         (Vector3){c.x+ENEMY_RADIUS, c.y+ENEMY_HEIGHT, c.z+ENEMY_RADIUS} };
         RayCollision rc=GetRayCollisionBox((Ray){ro,rd},bb);
         if (rc.hit && rc.distance>0 && rc.distance<bd){
             bd=rc.distance; best=i; *outDist=rc.distance; *outPt=rc.point;
             // The head box lives inside the body box's vertical span, so the
             // nearest-enemy pick above is unaffected; we just additionally ask
             // whether this same ray clips the (narrower) head of that enemy.
-            BoundingBox hb={ (Vector3){c.x-HEAD_RADIUS, ENEMY_HEIGHT-HEAD_ZONE_H, c.z-HEAD_RADIUS},
-                             (Vector3){c.x+HEAD_RADIUS, ENEMY_HEIGHT,             c.z+HEAD_RADIUS} };
+            BoundingBox hb={ (Vector3){c.x-HEAD_RADIUS, c.y+ENEMY_HEIGHT-HEAD_ZONE_H, c.z-HEAD_RADIUS},
+                             (Vector3){c.x+HEAD_RADIUS, c.y+ENEMY_HEIGHT,             c.z+HEAD_RADIUS} };
             RayCollision hrc=GetRayCollisionBox((Ray){ro,rd},hb);
             if (outHead) *outHead = (hrc.hit && hrc.distance>0);
         }
@@ -462,8 +479,16 @@ static void UpdateEnemies(float dt){
             int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : g_eRun);
             if (want!=e->clip){ e->clip=want; e->animT=0; }
             if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE){           // chase unless flinching/in melee
-                e->pos.x+=dx/d*ENEMY_SPEED*dt;
-                e->pos.z+=dz/d*ENEMY_SPEED*dt;
+                float nx=e->pos.x+dx/d*ENEMY_SPEED*dt, nz=e->pos.z+dz/d*ENEMY_SPEED*dt;
+                if (g_hasMap && g_mapCol.ready){               // block on walls (slide, don't phase through)
+                    float by=e->pos.y+0.9f;
+                    if (!MapSphereHitsWall((Vector3){nx,by,e->pos.z},0.5f)) e->pos.x=nx;
+                    if (!MapSphereHitsWall((Vector3){e->pos.x,by,nz},0.5f)) e->pos.z=nz;
+                } else { e->pos.x=nx; e->pos.z=nz; }
+            }
+            if (g_hasMap && g_mapCol.ready){                   // keep the enemy standing on the map floor
+                float top=e->pos.y+4.0f, fd=MapRayNearest((Vector3){e->pos.x,top,e->pos.z},(Vector3){0,-1,0},40.0f);
+                if (fd>0) e->pos.y=top-fd;
             }
             if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
             if (g_enemyAnimN>0){                               // advance current clip (looping)
@@ -752,10 +777,10 @@ static void DrawEnemies(void){
         } else {
             if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->clip], e->animT);
         }
-        DrawModelEx(g_enemy, (Vector3){e->pos.x, sink, e->pos.z}, (Vector3){0,1,0}, yaw,
+        DrawModelEx(g_enemy, (Vector3){e->pos.x, e->pos.y+sink, e->pos.z}, (Vector3){0,1,0}, yaw,
                     (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
         if (e->state==1 && e->hp<ENEMY_HP){                   // HP bar above damaged enemies
-            Vector3 hp={e->pos.x, ENEMY_HEIGHT+0.3f, e->pos.z};
+            Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/ENEMY_HP), 0.08f, 0.02f, (Color){230,60,60,255});
         }
     }
@@ -1005,7 +1030,7 @@ int main(int argc, char **argv) {
         DebugLog("enemy","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f]",
                  g_enemy.meshCount, g_enemy.skeleton.boneCount, g_enemyAnimN,
                  eb.max.x-eb.min.x, eb.max.y-eb.min.y, eb.max.z-eb.min.z);
-        if (!g_noEnemies && !g_hasMap) for (int i=0;i<5;i++) SpawnEnemy(i);   // none in --no-enemies / --map modes
+        if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);   // arena or map: SpawnEnemy picks placement
     } else DebugLog("enemy","\"error\":\"assets/enemy.glb not found\"");
 
 #if defined(__EMSCRIPTEN__)
