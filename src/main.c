@@ -309,9 +309,9 @@ static void LoadWeaponAux(int slot, const char *path, const char *alt){
 
 // ---- Tracers + impact sparks ------------------------------------------------
 typedef struct { Vector3 a, b; float life; } Tracer;
-typedef struct { Vector3 pos, vel; float life, life0, size; Color col; } Spark;
+typedef struct { Vector3 pos, vel; float life, life0, size, rest; Color col; int blood; } Spark; // rest=floor Y; blood=1 persists
 #define MAX_TRACERS 32
-#define MAX_SPARKS  1400
+#define MAX_SPARKS  4096
 static Tracer g_tracers[MAX_TRACERS];
 static Spark  g_sparks[MAX_SPARKS];
 
@@ -340,6 +340,10 @@ static Spark  g_sparks[MAX_SPARKS];
 #define HEADSHOT_MULT      3.0f       // headshot damage multiplier
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; } Enemy; // state: 0 dead,1 alive,2 dying
 static Enemy           g_enemies[MAX_ENEMIES];
+#define MAX_CORPSES 32
+typedef struct { Vector3 pos; float yaw; int active; } Corpse;   // lasting dead bodies, posed at the death-anim end
+static Corpse          g_corpses[MAX_CORPSES];
+static int             g_corpseNext = 0;
 static Model           g_enemy;
 static ModelAnimation *g_enemyAnim = NULL;
 static int             g_enemyAnimN = 0;
@@ -393,7 +397,9 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
         Vector3 v={ n.x+GetRandomValue(-100,100)/100.0f, n.y+GetRandomValue(-20,120)/100.0f, n.z+GetRandomValue(-100,100)/100.0f };
         v=Vector3Scale(Vector3Normalize(v), 3.0f+GetRandomValue(0,300)/100.0f);
         float lf=0.4f+GetRandomValue(0,30)/100.0f;
-        g_sparks[s]=(Spark){ p, v, lf, lf, 0.04f, (Color){255,(unsigned char)(200+GetRandomValue(0,55)),60,255} };
+        Spark sp={0}; sp.pos=p; sp.vel=v; sp.life=lf; sp.life0=lf; sp.size=0.04f; sp.rest=p.y; sp.blood=0;
+        sp.col=(Color){255,(unsigned char)(200+GetRandomValue(0,55)),60,255};
+        g_sparks[s]=sp;
         break;
     }
 }
@@ -401,7 +407,7 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
 // Detailed blood burst: a spray of crimson droplets of varied size flung along
 // the bullet's travel (dir) in a wide cone, plus heavier slow "gobs" every few
 // particles. Gravity + fade are handled by the shared spark integrator/draw.
-static void SpawnBlood(Vector3 p, Vector3 dir, float intensity) {
+static void SpawnBlood(Vector3 p, Vector3 dir, float intensity, float floorY) {
     int n=(int)(200*intensity); if (n>900) n=900;          // headshots spray harder (capped)
     for (int i=0;i<n;i++) for (int s=0;s<MAX_SPARKS;s++){
         if (g_sparks[s].life>0) continue;
@@ -409,14 +415,13 @@ static void SpawnBlood(Vector3 p, Vector3 dir, float intensity) {
         Vector3 v={ dir.x*4.5f + GetRandomValue(-100,100)/100.0f*spread,
                     dir.y*4.5f + GetRandomValue(-100,100)/100.0f*spread + 1.7f,
                     dir.z*4.5f + GetRandomValue(-100,100)/100.0f*spread };
-        int gob=(i%5==0);                                  // heavy gobs: slower, bigger, redder
+        int gob=(i%5==0);                                  // heavy gobs: slower, bigger, redder, and LASTING
         if (gob){ v.x*=0.45f; v.y=v.y*0.45f+0.4f; v.z*=0.45f; }
         float lf = 1.1f + GetRandomValue(0,120)/100.0f;
         float sz = gob ? (0.10f+GetRandomValue(0,7)/100.0f) : (0.028f+GetRandomValue(0,4)/100.0f);
-        unsigned char r=(unsigned char)(150+GetRandomValue(0,105)); // dark maroon -> arterial red
-        unsigned char g=(unsigned char)GetRandomValue(0,28);
-        unsigned char b=(unsigned char)GetRandomValue(0,18);
-        g_sparks[s]=(Spark){ p, v, lf, lf, sz, (Color){r,g,b,255} };
+        Spark sp={0}; sp.pos=p; sp.vel=v; sp.life=lf; sp.life0=lf; sp.size=sz; sp.rest=floorY; sp.blood=gob;
+        sp.col=(Color){ (unsigned char)(150+GetRandomValue(0,105)), (unsigned char)GetRandomValue(0,28), (unsigned char)GetRandomValue(0,18), 255 };
+        g_sparks[s]=sp;
         break;
     }
 }
@@ -486,7 +491,7 @@ static void Fire(Camera3D cam) {
     int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep,&head);
     if (ei>=0){
         end=ep;
-        SpawnBlood(ep,dir, head?1.9f:1.0f);               // headshots spray harder
+        SpawnBlood(ep,dir, head?1.9f:1.0f, g_enemies[ei].pos.y);   // gobs pool on the enemy's floor
         g_enemies[ei].hp -= head ? ENEMY_DMG_PER_SHOT*HEADSHOT_MULT : ENEMY_DMG_PER_SHOT;
         if (head) g_hsFlash=1.1f;                         // flash "HEADSHOT!" on any head hit
         if (g_enemies[ei].hp<=0){
@@ -549,13 +554,18 @@ static void UpdateEnemies(float dt){
                 e->animT+=dt*spd;
                 if (nf>0 && e->animT>=nf) e->animT-=nf;
             }
-        } else if (e->state==2){                              // dying: play death once, then respawn
+        } else if (e->state==2){                              // dying: play death anim, then leave a lasting corpse
             if (g_enemyAnimN>0){
                 int nf=ANIM_FRAMES(g_enemyAnim[g_eDeath]);
                 if (nf>0){ e->animT+=dt*60.0f; if (e->animT>nf-1) e->animT=(float)(nf-1); }
             }
             e->deathT+=dt;
-            if (!g_noEnemies && e->deathT>1.8f) SpawnEnemy(i);
+            if (e->deathT>1.8f){                              // death anim done -> record the corpse, then respawn
+                float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
+                g_corpses[g_corpseNext]=(Corpse){ e->pos, yaw, 1 };   // body stays on the floor (ring-recycled)
+                g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
+                if (!g_noEnemies) SpawnEnemy(i); else e->state=0;
+            }
         }
     }
     for (int a=0;a<MAX_ENEMIES;a++){            // keep enemies from overlapping each other
@@ -787,6 +797,7 @@ static void Update(void) {
     if (IsKeyPressed(KEY_N)){                          // N: toggle orient mode (no enemies, weapon-aim tuning)
         g_noEnemies=!g_noEnemies;
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
+        for (int c=0;c<MAX_CORPSES;c++) g_corpses[c].active=0;  // and clear corpses
         g_playerHp=100.0f;                             // full health (clears a leftover YOU DIED)
         if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);  // bring the wave back
         DebugLog("mode","\"noEnemies\":%s", g_noEnemies?"true":"false");
@@ -836,14 +847,18 @@ static void Update(void) {
 
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0) g_tracers[i].life-=dt;
     for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
-        Spark *sp=&g_sparks[i]; sp->life-=dt;
-        int resting=(sp->pos.y<=0.02f && sp->vel.x==0 && sp->vel.z==0 && sp->vel.y==0);
-        if (!resting){
+        Spark *sp=&g_sparks[i];
+        int resting=(sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0 && sp->pos.y<=sp->rest+0.03f);
+        if (resting){
+            if (!sp->blood) sp->life-=dt;          // impact glints fade; blood puddles stay put
+        } else {
+            sp->life-=dt;
             sp->vel.y-=12.0f*dt;
             sp->pos=Vector3Add(sp->pos,Vector3Scale(sp->vel,dt));
-            if (sp->pos.y<=0.0f){            // hit the floor -> splat into a resting puddle
-                sp->pos.y=0.015f; sp->vel=(Vector3){0,0,0};
-                if (sp->life<2.8f) sp->life=2.8f; sp->life0=fmaxf(sp->life0,sp->life);
+            if (sp->pos.y<=sp->rest){              // hit the floor -> settle
+                sp->pos.y=sp->rest+0.015f; sp->vel=(Vector3){0,0,0};
+                if (sp->blood){ sp->life=1e9f; sp->life0=1e9f; }   // lasting blood puddle (full opacity)
+                else if (sp->life<0.5f) sp->life=0.5f;             // brief impact glow
             }
         }
     }
@@ -883,19 +898,21 @@ static void DrawEnemies(void){
         if (e->state==0) continue;
         float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;       // face the player (yaw about +Y)
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
-        float sink=0.0f;
-        if (e->state==2){                                     // dying: play death clip, sink late
-            float late=e->deathT-1.2f; if (late>0) sink=-late*2.7f;
-            if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], e->animT);
-        } else {
-            if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->clip], e->animT);
-        }
-        DrawModelEx(g_enemy, (Vector3){e->pos.x, e->pos.y+sink, e->pos.z}, (Vector3){0,1,0}, yaw,
+        if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->state==2?g_eDeath:e->clip], e->animT);
+        DrawModelEx(g_enemy, e->pos, (Vector3){0,1,0}, yaw,    // no sink: dying body falls onto the floor, not through
                     (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
         if (e->state==1 && e->hp<ENEMY_HP){                   // HP bar above damaged enemies
             Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/ENEMY_HP), 0.08f, 0.02f, (Color){230,60,60,255});
         }
+    }
+    // lasting corpses: the shared model posed at the final death frame, lying where each enemy fell
+    if (g_enemyAnimN>0){
+        int nf=ANIM_FRAMES(g_enemyAnim[g_eDeath]);
+        ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], (float)(nf>0?nf-1:0));
+        for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active)
+            DrawModelEx(g_enemy, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
+                        (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
     }
 }
 
