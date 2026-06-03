@@ -163,6 +163,7 @@ typedef struct {
     int             autoReload;                  // 1: play the reload anim after each shot (pump)
     int             spinUp;                      // 1: minigun -- 5s fire cap, then cooldown sound + lockout
     int             soundGated;                  // 1: LMG -- fires while its sound plays, then a fixed pause
+    int             playShoot;                   // 1: play the model's Shot clip on each shot (AK has a good one)
     float           fireCd;                      // per-shot cooldown override (0 -> default)
     Sound           auxSnd;                      // secondary sound: minigun spin-down, shotgun cock-between-shots
     int             hasAuxSnd;
@@ -246,14 +247,22 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
         w->off0=(Vector3){ 0.20f, -0.35f, -1.30f }; w->off=w->off0;
         w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;  // orientation still a guess; user rotates
     }
+    // Resolve clips by name with priorities (first match wins per role): a real
+    // "idle" beats take/draw/hold; "shot" counts as a fire clip; the plain
+    // "reload" beats variants like reload_full. Handles e.g. AK_Idle/Shot/Reload.
+    int rIdle=-1, rIdleAlt=-1, rShoot=-1, rReload=-1;
     for (int i=0;i<w->animN;i++){
         const char *nm=w->anim[i].name; char low[64]; int j=0;
         for (; nm[j] && j<63; j++){ char c=nm[j]; if(c>='A'&&c<='Z') c+=32; low[j]=c; }
         low[j]=0;
-        if (strstr(low,"idle")||strstr(low,"take")||strstr(low,"draw")||strstr(low,"weild")||strstr(low,"wield")) w->aIdle=i;
-        else if (strstr(low,"shoot")||strstr(low,"fire")) w->aShoot=i;
-        else if (strstr(low,"reload")) w->aReload=i;
+        if (strstr(low,"idle")){ if(rIdle<0) rIdle=i; }
+        else if (strstr(low,"take")||strstr(low,"draw")||strstr(low,"weild")||strstr(low,"wield")||strstr(low,"hold")){ if(rIdleAlt<0) rIdleAlt=i; }
+        if ((strstr(low,"shoot")||strstr(low,"fire")||strstr(low,"shot")) && rShoot<0) rShoot=i;
+        if (strstr(low,"reload") && rReload<0) rReload=i;
     }
+    w->aIdle  = (rIdle>=0)?rIdle:(rIdleAlt>=0?rIdleAlt:0);
+    w->aShoot = (rShoot>=0)?rShoot:w->aIdle;
+    w->aReload= (rReload>=0)?rReload:w->aIdle;
     // Multi-phase reload: if the rig has the named phases, play them in order
     // (e.g. shotgun pump: prep -> load shell -> load last -> recover). Falls
     // back to the single aReload clip when these aren't present.
@@ -492,6 +501,9 @@ static void Fire(Camera3D cam) {
     // Code-driven recoil instead of the Shoot clip (that clip repositions the
     // gun out of the viewmodel frame -> "gun goes away"). Kick rises to 1, decays.
     g_recoil=1.0f;
+    if (cw->playShoot && g_aShoot!=g_aIdle && g_aShoot<g_gunAnimN && !g_reloading){
+        g_curAnim=g_aShoot; g_animOnce=1; g_animT=0.0f;    // play the model's Shot clip (AK)
+    }
     DebugLog("fire","\"enemy\":%d,\"head\":%d,\"end\":[%.2f,%.2f,%.2f]", ei, head, end.x,end.y,end.z);
 }
 
@@ -775,6 +787,7 @@ static void Update(void) {
     if (IsKeyPressed(KEY_TWO)) SwitchWeapon(1);
     if (IsKeyPressed(KEY_THREE)) SwitchWeapon(2);
     if (IsKeyPressed(KEY_FOUR)) SwitchWeapon(3);
+    if (IsKeyPressed(KEY_FIVE)) SwitchWeapon(4);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
     // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
     // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
@@ -961,7 +974,7 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1-4=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1-5=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
             DrawRectangle(6,96,600,392,(Color){0,0,0,215});
             DrawRectangleLines(6,96,600,392,(Color){255,210,60,255});
@@ -1117,7 +1130,9 @@ int main(int argc, char **argv) {
                (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f, 0.0f);  // dialed in
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
-    g_numWeapons=4;      // sawnoff (was slot 4) removed -- its model has no animations
+    LoadWeapon(4, "assets/ak74.glb", "../assets/ak74.glb", "AK-74M", "vm_tune_ak.txt",
+               (Vector3){ 0,0,0 }, -1.0f, 0.0f, -90.0f, 0.0f);   // auto-framed, pitched down-range; tune live with N
+    g_numWeapons=5;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
     // Per-weapon fire sounds. The two automatics loop while the trigger is held;
@@ -1126,12 +1141,14 @@ int main(int argc, char **argv) {
     LoadWeaponSound(1, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // shotgun: one-shot
     LoadWeaponSound(2, "assets/minigun_fire.mp3", "../assets/minigun_fire.mp3", 1);  // minigun
     LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (biggun)
+    LoadWeaponSound(4, "assets/ak74_fire.mp3",    "../assets/ak74_fire.mp3",    0);  // AK-74M: one-shot per bullet
     LoadWeaponAux(1, "assets/shotgun_cock.mp3",     "../assets/shotgun_cock.mp3");     // shotgun cock between shots
     LoadWeaponAux(2, "assets/minigun_cooldown.mp3", "../assets/minigun_cooldown.mp3"); // minigun spin-down
     g_weapons[0].burst=3;        // rifle:   3-round burst per trigger pull
     g_weapons[1].autoReload=1;   // shotgun: pump (reload anim) + cock sound after each shot
     g_weapons[2].spinUp=1;       // minigun: 5s fire cap -> cooldown sound + lockout
     g_weapons[3].soundGated=1;   // LMG:     fire while the sound plays, then a 0.75s pause
+    g_weapons[4].playShoot=1;    // AK-74M:  plays its Shot clip on fire; R plays AK_Reload
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
