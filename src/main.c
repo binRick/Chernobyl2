@@ -538,8 +538,21 @@ static void UpdateEnemies(float dt){
 }
 
 static void Collide(void) {
-    if (g_hasMap) return;   // SPIKE: free movement inside a loaded map (no map collision yet)
     float r=0.4f;
+    if (g_hasMap){          // map: walls/floor are handled in Update(); here just push out of enemies
+        for (int e=0;e<MAX_ENEMIES;e++){
+            if (g_enemies[e].state!=1) continue;
+            if (fabsf((g_pos.y-EYE_H)-g_enemies[e].pos.y) > ENEMY_HEIGHT) continue;   // different floor -> ignore
+            float dx=g_pos.x-g_enemies[e].pos.x, dz=g_pos.z-g_enemies[e].pos.z;
+            float d=sqrtf(dx*dx+dz*dz), mind=r+ENEMY_RADIUS;
+            if (d<mind && d>1e-4f){
+                float nx=g_pos.x+dx*(mind-d)/d, nz=g_pos.z+dz*(mind-d)/d, by=g_pos.y-0.55f;
+                if (!MapSphereHitsWall((Vector3){nx,by,g_pos.z},0.42f)) g_pos.x=nx;   // don't get shoved into a wall
+                if (!MapSphereHitsWall((Vector3){g_pos.x,by,nz},0.42f)) g_pos.z=nz;
+            }
+        }
+        return;
+    }
     if (g_pos.x> ARENA-r) g_pos.x= ARENA-r;  if (g_pos.x<-ARENA+r) g_pos.x=-ARENA+r;
     if (g_pos.z> ARENA-r) g_pos.z= ARENA-r;  if (g_pos.z<-ARENA+r) g_pos.z=-ARENA+r;
     for (int c=0;c<NUM_CRATES;c++){
