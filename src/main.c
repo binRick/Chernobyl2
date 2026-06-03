@@ -950,7 +950,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    SetTargetFPS(60);
+    SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
     DisableCursor();
 
     InitAudioDevice();                 // weapon fire sounds; harmless if it fails
