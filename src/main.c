@@ -106,6 +106,12 @@ static float           g_animT = 0.0f;          // frame cursor
 static int             g_animOnce = 0;          // current clip is a one-shot (Reload)
 static float           g_fireCd = 0.0f;
 static float           g_recoil = 0.0f;         // 0..1 recoil kick on fire (decays); drives muzzle-up
+static int             g_burstLeft = 0;         // rounds remaining in the current burst (burst weapons)
+static float           g_spin = 0.0f;           // minigun barrel spin rate 0..1
+static float           g_spinAngle = 0.0f;      // accumulated barrel-spin angle (deg), applied to roll
+static float           g_mgHeat = 0.0f;         // seconds of continuous minigun fire (5s -> overheat)
+static int             g_mgLock = 0;            // minigun overheated: locked until trigger released
+static int             g_mgFiring = 0;          // minigun was firing last frame (edge detect for cooldown sound)
 static Camera3D        g_vmCam;
 static int             g_inspect = 0;           // V: gun floats in the world
 static float           g_savedMsg = 0.0f;       // >0: flash a "SAVED" confirmation
@@ -153,6 +159,12 @@ typedef struct {
     Sound           fireSnd;                     // per-weapon fire report
     int             hasSnd;                      // fireSnd loaded OK
     int             sndLoop;                     // 1 = loop while trigger held (auto); 0 = one-shot per shot
+    int             burst;                       // >0: rounds per trigger pull (burst fire)
+    int             autoReload;                  // 1: play the reload anim after each shot (pump)
+    int             spinUp;                      // 1: minigun -- spin up, 5s fire cap, spin-down + cooldown sound
+    float           fireCd;                      // per-shot cooldown override (0 -> default)
+    Sound           auxSnd;                      // secondary sound: minigun spin-down, shotgun cock-between-shots
+    int             hasAuxSnd;
 } Weapon;
 static Weapon g_weapons[5];
 static int    g_curWeapon = 0;
@@ -189,12 +201,15 @@ static void ActivateWeapon(int n){
     g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
     g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch; g_vmRoll=w->roll;
     g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
+    g_burstLeft=0; g_spin=0.0f; g_spinAngle=0.0f; g_mgHeat=0.0f; g_mgLock=0; g_mgFiring=0;   // reset fire-mode state
 }
 static void SwitchWeapon(int n){
     if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
     // silence the weapon we're holstering so its loop doesn't bleed past the swap
     if (g_audio && g_weapons[g_curWeapon].hasSnd && IsSoundPlaying(g_weapons[g_curWeapon].fireSnd))
         StopSound(g_weapons[g_curWeapon].fireSnd);
+    if (g_audio && g_weapons[g_curWeapon].hasAuxSnd && IsSoundPlaying(g_weapons[g_curWeapon].auxSnd))
+        StopSound(g_weapons[g_curWeapon].auxSnd);
     StashActiveTuning();
     ActivateWeapon(n);
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\"", n, g_weapons[n].label);
@@ -270,6 +285,15 @@ static void LoadWeaponSound(int slot, const char *path, const char *alt, int loo
     w->hasSnd=(w->fireSnd.frameCount>0);
     w->sndLoop=loop;
     DebugLog("wsound","\"slot\":%d,\"path\":\"%s\",\"frames\":%u,\"loop\":%d",slot,JStr(fp),w->fireSnd.frameCount,loop);
+}
+
+// Secondary per-weapon sound (minigun spin-down, shotgun cock-between-shots).
+static void LoadWeaponAux(int slot, const char *path, const char *alt){
+    if (!g_audio || slot<0 || slot>=5) return;
+    Weapon *w=&g_weapons[slot];
+    const char *fp=path; if(!FileExists(fp)) fp=alt;
+    if(!FileExists(fp)) return;
+    w->auxSnd=LoadSound(fp); w->hasAuxSnd=(w->auxSnd.frameCount>0);
 }
 
 // ---- Tracers + impact sparks ------------------------------------------------
@@ -435,11 +459,11 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
 
 static void Fire(Camera3D cam) {
     if (g_fireCd>0) return;
-    g_fireCd=0.12f;
-    // One-shot weapons (e.g. the shotgun) sound their report here, per shot, on
-    // the cooldown-gated trigger. Sustained-auto weapons loop in Update() instead.
-    { Weapon *cw=&g_weapons[g_curWeapon];
-      if (g_audio && cw->hasSnd && !cw->sndLoop) PlaySound(cw->fireSnd); }
+    Weapon *cw=&g_weapons[g_curWeapon];
+    g_fireCd = (cw->fireCd>0.0f) ? cw->fireCd : 0.12f;   // per-weapon fire rate (slow shotguns etc.)
+    // One-shot weapons (e.g. shotguns) sound their report here, per shot; auto
+    // weapons loop in Update() instead.
+    if (g_audio && cw->hasSnd && !cw->sndLoop) PlaySound(cw->fireSnd);
     Vector3 dir=Vector3Normalize(Vector3Subtract(cam.target,cam.position));
     Vector3 muzzle=Vector3Add(cam.position,Vector3Scale(dir,0.4f));
     Vector3 hit,nrm,end=Vector3Add(cam.position,Vector3Scale(dir,80.0f));
@@ -572,6 +596,14 @@ static void Collide(void) {
 
 static Camera3D g_cam;
 
+// Begin the active weapon's reload: multi-phase sequence if it has one, else the
+// single reload clip, else nothing. Used by the R key and the shotgun's pump.
+static void StartReload(void){
+    if (g_reloading) return;
+    if (g_reloadSeqN>0){ g_reloading=1; g_reloadStep=0; g_curAnim=g_reloadSeq[0]; g_animOnce=1; g_animT=0.0f; }
+    else if (g_aReload!=g_aIdle && g_aReload<g_gunAnimN){ g_reloading=1; g_reloadStep=-1; g_curAnim=g_aReload; g_animOnce=1; g_animT=0.0f; }
+}
+
 static void Update(void) {
     float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
 
@@ -644,26 +676,45 @@ static void Update(void) {
     if (g_fireCd>0) g_fireCd-=dt;
     if (g_recoil>0) g_recoil=fmaxf(0.0f, g_recoil - dt*7.0f);   // recoil settles in ~0.14s
     if (g_hsFlash>0) g_hsFlash-=dt;                            // "HEADSHOT!" flash fades out
-    if (IsKeyPressed(KEY_R) && !g_reloading){
-        if (g_reloadSeqN>0){                              // multi-phase reload
-            g_reloading=1; g_reloadStep=0;
-            g_curAnim=g_reloadSeq[0]; g_animOnce=1; g_animT=0.0f;
-        } else if (g_aReload!=g_aIdle && g_aReload<g_gunAnimN){  // single reload clip
-            g_reloading=1; g_reloadStep=-1;
-            g_curAnim=g_aReload; g_animOnce=1; g_animT=0.0f;
-        }                                                // else: weapon has no reload clip, do nothing
-    }
-    else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !g_reloading) Fire(g_cam);
+    Weapon *cw=&g_weapons[g_curWeapon];
+    int lmb=IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    int firingNow=0;                                       // looped fire sound active this frame?
 
-    // Sustained-auto weapons (rifle/minigun/LMG) keep their fire loop running
-    // while the trigger is held and stop the moment it's released or a reload
-    // begins. Sound has no native loop, so we just re-trigger when it runs out.
-    { Weapon *cw=&g_weapons[g_curWeapon];
-      if (g_audio && cw->hasSnd && cw->sndLoop){
-          int firing = g_hasGun && !g_reloading && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-          if (firing){ if (!IsSoundPlaying(cw->fireSnd)) PlaySound(cw->fireSnd); }
-          else if (IsSoundPlaying(cw->fireSnd)) StopSound(cw->fireSnd);
-      } }
+    if (IsKeyPressed(KEY_R)) StartReload();
+    else if (!g_reloading){
+        if (cw->burst>0){                                  // rifle: one 3-round burst per trigger pull
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_burstLeft==0) g_burstLeft=cw->burst;
+            if (g_burstLeft>0){ firingNow=1; if (g_fireCd<=0.0f){ Fire(g_cam); g_burstLeft--; } }
+        } else if (!cw->spinUp && lmb){                    // full-auto / one-shot (shotgun, lmg, sawnoff)
+            int willFire=(g_fireCd<=0.0f);
+            firingNow=1; Fire(g_cam);
+            if (willFire && cw->autoReload){               // shotgun: pump (reload anim) + cock sound between shots
+                StartReload();
+                if (g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd);
+            }
+        }
+    }
+
+    // minigun: spin up while firing (fires once spun up), hard 5s cap -> overheat,
+    // then spin the barrel down with the cooldown sound.
+    if (cw->spinUp){
+        if (!lmb) g_mgLock=0;                              // releasing clears the overheat lock
+        int fire = lmb && !g_reloading && !g_mgLock;
+        if (fire){
+            g_spin=fminf(1.0f,g_spin+dt*2.5f); g_mgHeat+=dt;
+            if (g_spin>0.85f){ firingNow=1; Fire(g_cam); }
+            if (g_mgHeat>=5.0f) g_mgLock=1;                // overheated -> must release
+        } else { g_spin=fmaxf(0.0f,g_spin-dt*0.4f); g_mgHeat=0.0f; }   // ~2.5s spin-down
+        if (g_mgFiring && !fire && g_spin>0.4f && g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd);   // spin-down sound
+        if (g_spin<=0.0f && g_audio && cw->hasAuxSnd && IsSoundPlaying(cw->auxSnd)) StopSound(cw->auxSnd); // cut when stopped
+        g_mgFiring=fire; g_spinAngle+=g_spin*1300.0f*dt;
+    }
+
+    // looped fire sound (rifle burst / minigun / lmg) follows the actual firing
+    if (g_audio && cw->hasSnd && cw->sndLoop){
+        if (firingNow){ if (!IsSoundPlaying(cw->fireSnd)) PlaySound(cw->fireSnd); }
+        else if (IsSoundPlaying(cw->fireSnd)) StopSound(cw->fireSnd);
+    }
 
     UpdateEnemies(dt);
 
@@ -846,7 +897,8 @@ static void DrawViewmodel(void){
     // settles. r is the live kick amount (0..1) driven by Fire().
     float r=g_recoil;
     Vector3 target={ g_vmOff.x+bobX, g_vmOff.y+bobY+r*0.012f, g_vmOff.z+r*0.03f };
-    Matrix rot=MatrixMultiply(MatrixRotateZ(DEG2RAD*g_vmRoll), MatrixMultiply(MatrixRotateX(DEG2RAD*(g_vmPitch - r*4.0f)), MatrixRotateY(DEG2RAD*g_vmYaw)));
+    float roll=g_vmRoll + (g_weapons[g_curWeapon].spinUp ? g_spinAngle : 0.0f);   // minigun barrels spin around the roll axis
+    Matrix rot=MatrixMultiply(MatrixRotateZ(DEG2RAD*roll), MatrixMultiply(MatrixRotateX(DEG2RAD*(g_vmPitch - r*4.0f)), MatrixRotateY(DEG2RAD*g_vmYaw)));
     // recenter: place the model's centroid AT target (model is far off-origin)
     Vector3 vpos=Vector3Subtract(target, Vector3Scale(Vector3Transform(g_gunCentroid,rot), g_vmScale));
     rlDrawRenderBatchActive();
@@ -1062,7 +1114,14 @@ int main(int argc, char **argv) {
     LoadWeaponSound(0, "assets/rifle_fire.mp3",   "../assets/rifle_fire.mp3",   1);  // M16A3 (machine gun)
     LoadWeaponSound(1, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // shotgun: one-shot
     LoadWeaponSound(2, "assets/minigun_fire.mp3", "../assets/minigun_fire.mp3", 1);  // minigun
-    LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (.50 cal)
+    LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (biggun)
+    LoadWeaponSound(4, "assets/sawnoff_fire.mp3", "../assets/sawnoff_fire.mp3", 0);  // sawnoff: one-shot
+    LoadWeaponAux(1, "assets/shotgun_cock.mp3",     "../assets/shotgun_cock.mp3");     // shotgun cock between shots
+    LoadWeaponAux(2, "assets/minigun_cooldown.mp3", "../assets/minigun_cooldown.mp3"); // minigun spin-down
+    g_weapons[0].burst=3;        // rifle:   3-round burst per trigger pull
+    g_weapons[1].autoReload=1;   // shotgun: pump (reload anim) + cock sound after each shot
+    g_weapons[2].spinUp=1;       // minigun: spin up, 5s fire cap, spin-down + cooldown sound
+    g_weapons[4].fireCd=0.7f;    // sawnoff: slow, deliberate shots
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
@@ -1107,7 +1166,8 @@ int main(int argc, char **argv) {
     if (g_hasMap) UnloadModel(g_map);
     UnloadTexture(g_floorTex); UnloadTexture(g_wallTex); UnloadTexture(g_crateTex);
     if (g_audio){
-        for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].hasSnd) UnloadSound(g_weapons[i].fireSnd);
+        for (int i=0;i<g_numWeapons;i++){ if (g_weapons[i].hasSnd) UnloadSound(g_weapons[i].fireSnd);
+                                          if (g_weapons[i].hasAuxSnd) UnloadSound(g_weapons[i].auxSnd); }
         CloseAudioDevice();
     }
     CloseWindow();
