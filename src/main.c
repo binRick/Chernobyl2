@@ -81,6 +81,7 @@ static float   g_vy    = 0.0f;
 static int     g_grounded = 1;
 static int     g_devOverlay = 1;
 static float   g_bob = 0.0f;
+static float   g_eyeSmooth = 0.0f;   // view-height lag that absorbs stair-step snaps, decays to 0
 
 // ---- Weapon: animated M16A3 viewmodel (assets/rifle.glb) --------------------
 // File animations: Take(51) Shoot(26) Reload(338) Watch(301) Hide(51). There's
@@ -562,9 +563,12 @@ static void Update(void) {
         float floorEye = (dn>0) ? g_pos.y-dn+EYE_H : -1e30f;    // eye height standing on that floor
         const float STEP=0.7f;                                  // auto climb/descend up to this height
         if (g_vy<=0.0f && dn>0 && (g_pos.y-floorEye)<=STEP){
-            // grounded (or within a step of the floor): glue to it. Setting y
-            // directly each frame -- instead of gravity then snap -- is what
-            // kills the stair jitter; stepping up/down just follows floorEye.
+            // grounded (or within a step of the floor): glue the feet to it,
+            // but feed the height change into g_eyeSmooth so the CAMERA eases
+            // over the step instead of popping (the actual stair-jitter fix).
+            g_eyeSmooth += floorEye - g_pos.y;
+            if (g_eyeSmooth> 1.0f) g_eyeSmooth= 1.0f;
+            if (g_eyeSmooth<-1.0f) g_eyeSmooth=-1.0f;
             g_pos.y=floorEye; g_vy=0.0f; g_grounded=1;
         } else {                                                // airborne: ballistic
             g_vy-=18.0f*dt; g_pos.y+=g_vy*dt; g_grounded=0;
@@ -578,7 +582,11 @@ static void Update(void) {
     }
     Collide();
 
-    g_cam.position=g_pos; g_cam.target=Vector3Add(g_pos,fwd); g_cam.up=(Vector3){0,1,0};
+    // ease the step-smoothing offset back to 0 (~0.15s), then view from the
+    // smoothed eye height so stairs glide instead of popping
+    if (g_eyeSmooth!=0.0f){ g_eyeSmooth -= g_eyeSmooth*fminf(1.0f,dt*14.0f); if (fabsf(g_eyeSmooth)<0.002f) g_eyeSmooth=0.0f; }
+    Vector3 eye=g_pos; eye.y-=g_eyeSmooth;
+    g_cam.position=eye; g_cam.target=Vector3Add(eye,fwd); g_cam.up=(Vector3){0,1,0};
 
     // shooting / reload
     if (g_fireCd>0) g_fireCd-=dt;
