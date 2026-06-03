@@ -554,15 +554,15 @@ static void UpdateEnemies(float dt){
                 e->animT+=dt*spd;
                 if (nf>0 && e->animT>=nf) e->animT-=nf;
             }
-        } else if (e->state==2){                              // dying: play death anim, then leave a lasting corpse
-            if (g_enemyAnimN>0){
-                int nf=ANIM_FRAMES(g_enemyAnim[g_eDeath]);
-                if (nf>0){ e->animT+=dt*60.0f; if (e->animT>nf-1) e->animT=(float)(nf-1); }
-            }
+        } else if (e->state==2){                              // dying: play the death anim THROUGH, then leave a corpse
+            int nf = (g_enemyAnimN>0) ? ANIM_FRAMES(g_enemyAnim[g_eDeath]) : 0;
+            if (nf>0){ e->animT+=dt*60.0f; if (e->animT>(float)(nf-1)) e->animT=(float)(nf-1); }
             e->deathT+=dt;
-            if (e->deathT>1.8f){                              // death anim done -> record the corpse, then respawn
+            // wait until the death anim has actually finished (body settled on the floor),
+            // not a fixed timer -- otherwise the corpse is recorded mid-fall.
+            if ((nf<=0 || e->animT>=(float)(nf-1)) && e->deathT>0.2f){
                 float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
-                g_corpses[g_corpseNext]=(Corpse){ e->pos, yaw, 1 };   // body stays on the floor (ring-recycled)
+                g_corpses[g_corpseNext]=(Corpse){ e->pos, yaw, 1 };   // lasting body, posed at the final death frame
                 g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
                 if (!g_noEnemies) SpawnEnemy(i); else e->state=0;
             }
