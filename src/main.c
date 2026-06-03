@@ -310,6 +310,7 @@ static int             g_headshots = 0;        // running headshot-kill tally (H
 static float           g_hsFlash = 0.0f;       // >0: flash "HEADSHOT!" near the crosshair
 static float           g_playerHp = 100.0f;
 static int             g_godMode = 1;           // dev stage: invulnerable (no death, no "YOU DIED"). G toggles.
+static int             g_noclip = 0;            // map mode: F toggles free-fly / noclip vs FPS collision
 
 static void SpawnEnemy(int i){
     // place at a random spot near a wall, away from the player
@@ -541,14 +542,33 @@ static void Update(void) {
     if (IsKeyDown(KEY_S)){wish=Vector3Subtract(wish,flat);moving=1;}
     if (IsKeyDown(KEY_D)){wish=Vector3Add(wish,right);moving=1;}
     if (IsKeyDown(KEY_A)){wish=Vector3Subtract(wish,right);moving=1;}
+    Vector3 mv={0,0,0};
     if (moving && Vector3Length(wish)>0.001f){
         wish=Vector3Scale(Vector3Normalize(wish),speed*dt);
-        g_pos.x+=wish.x; g_pos.z+=wish.z;
-        g_bob+=dt*(IsKeyDown(KEY_LEFT_SHIFT)?14.0f:10.0f);
+        mv=wish; g_bob+=dt*(IsKeyDown(KEY_LEFT_SHIFT)?14.0f:10.0f);
     }
-    if (g_hasMap){                                     // SPIKE: free-fly in map view (no gravity)
+    if (g_hasMap && !g_noclip){                         // block into walls per-axis (so you slide, never drift)
+        float by=g_pos.y-0.55f;
+        if (!MapSphereHitsWall((Vector3){g_pos.x+mv.x, by, g_pos.z}, 0.42f)) g_pos.x+=mv.x;
+        if (!MapSphereHitsWall((Vector3){g_pos.x, by, g_pos.z+mv.z}, 0.42f)) g_pos.z+=mv.z;
+    } else { g_pos.x+=mv.x; g_pos.z+=mv.z; }
+    if (g_hasMap && g_noclip){                         // F: free-fly / noclip (inspect or escape)
         if (IsKeyDown(KEY_SPACE))        g_pos.y += speed*dt;
         if (IsKeyDown(KEY_LEFT_CONTROL)) g_pos.y -= speed*dt;
+        g_vy=0; g_grounded=1;
+    } else if (g_hasMap){                               // FPS collision against the loaded map mesh
+        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=6.0f; g_grounded=0; }
+        g_vy -= 18.0f*dt; g_pos.y += g_vy*dt;
+        // floor: snap the eye to EYE_H above the nearest surface below it. Snap
+        // up when feet reach the floor; also stick to it on the way DOWN (within
+        // a step) while grounded, so stairs/slopes don't bounce.
+        float dn=MapRayNearest(g_pos,(Vector3){0,-1,0},80.0f);
+        float gap=dn-EYE_H;                            // feet height above the floor
+        if (dn>0 && (gap<=0.0f || (g_grounded && g_vy<=0.0f && gap<=0.4f))){
+            g_pos.y=g_pos.y-dn+EYE_H; g_vy=0; g_grounded=1;
+        } else g_grounded=0;
+        // ceiling: stop rising if the head is blocked just above
+        if (g_vy>0){ float up=MapRayNearest(g_pos,(Vector3){0,1,0},0.4f); if (up>0) g_vy=0; }
     } else {
         if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
         g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
@@ -614,6 +634,8 @@ static void Update(void) {
     if (IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
     if (IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode) g_playerHp=100.0f;   // refill on re-enable
         DebugLog("mode","\"godMode\":%s", g_godMode?"true":"false"); }
+    if (IsKeyPressed(KEY_F) && g_hasMap){ g_noclip=!g_noclip; g_vy=0.0f;   // map: fly/noclip <-> walk
+        DebugLog("mode","\"noclip\":%s", g_noclip?"true":"false"); }
     if (IsKeyPressed(KEY_N)){                          // N: toggle orient mode (no enemies, weapon-aim tuning)
         g_noEnemies=!g_noEnemies;
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
@@ -903,11 +925,14 @@ int main(int argc, char **argv) {
     if (g_mapPath){                    // SPIKE: load a Xonotic .map's brush geometry
         g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
         int tt=0; for(int mi=0;mi<g_map.meshCount;mi++) tt+=g_map.meshes[mi].triangleCount;
-        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d",
-                 JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt);
+        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d,\"ao_sec\":%.2f",
+                 JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt, g_mapAOsec);
         if (!g_hasMap) TraceLog(LOG_WARNING,"map: failed to load %s", g_mapPath);
     }
-    if (g_hasMap){ g_pos=(Vector3){0,14,20}; g_yaw=PI; g_pitch=-0.35f; }   // elevated free-fly vantage
+    if (g_hasMap){                                    // start at a map spawn point, drop to the floor
+        g_pos = g_hasSpawn ? (Vector3){g_mapSpawn.x, g_mapSpawn.y+2.0f, g_mapSpawn.z} : (Vector3){0,12,0};
+        g_yaw=0.0f; g_pitch=0.0f; g_vy=0.0f; g_grounded=0;
+    }
 
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);
     g_wallTex =MakeChecker(256,(Color){80,72,64,255},(Color){64,58,52,255},8);
