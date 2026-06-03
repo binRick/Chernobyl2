@@ -107,6 +107,7 @@ static int             g_animOnce = 0;          // current clip is a one-shot (R
 static float           g_fireCd = 0.0f;
 static float           g_recoil = 0.0f;         // 0..1 recoil kick on fire (decays); drives muzzle-up
 static int             g_burstLeft = 0;         // rounds remaining in the current burst (burst weapons)
+static float           g_spin = 0.0f;           // minigun barrel-spin rate 0..1 (drives its 'allanims' clip)
 static float           g_mgHeat = 0.0f;         // seconds of continuous minigun fire (5s -> overheat)
 static int             g_mgLock = 0;            // minigun overheated: locked until trigger released
 static int             g_mgFiring = 0;          // minigun was firing last frame (edge detect for cooldown sound)
@@ -203,7 +204,7 @@ static void ActivateWeapon(int n){
     g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
     g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch; g_vmRoll=w->roll;
     g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
-    g_burstLeft=0; g_mgHeat=0.0f; g_mgLock=0; g_mgFiring=0; g_lmgPause=0.0f; g_lmgWasPlaying=0;   // reset fire-mode state
+    g_burstLeft=0; g_spin=0.0f; g_mgHeat=0.0f; g_mgLock=0; g_mgFiring=0; g_lmgPause=0.0f; g_lmgWasPlaying=0;   // reset fire-mode state
 }
 static void SwitchWeapon(int n){
     if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
@@ -714,11 +715,14 @@ static void Update(void) {
         if (!lmb) g_mgLock=0;                              // releasing clears the overheat lock
         int fire = lmb && !g_reloading && !g_mgLock;
         if (fire){
+            g_spin=fminf(1.0f, g_spin+dt*2.0f);            // barrel spins up (~0.5s to full)
             firingNow=1; Fire(g_cam); g_mgHeat+=dt;
             if (g_audio && cw->hasAuxSnd && IsSoundPlaying(cw->auxSnd)) StopSound(cw->auxSnd);  // firing again -> cut cooldown
             if (g_mgHeat>=5.0f) g_mgLock=1;                // overheated after 5s
         } else {
-            if (g_mgFiring && g_mgHeat>0.4f && g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd); // cooldown sound on stop
+            if (g_mgFiring && g_spin>0.3f && g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd);   // just stopped -> cooldown sound
+            g_spin=fmaxf(0.0f, g_spin-dt*0.5f);            // barrel spins down (~2s to stop)
+            if (g_spin<=0.0f && g_audio && cw->hasAuxSnd && IsSoundPlaying(cw->auxSnd)) StopSound(cw->auxSnd);  // stopped -> cut sound
             g_mgHeat=0.0f;
         }
         g_mgFiring=fire;
@@ -750,7 +754,11 @@ static void Update(void) {
     // back to the held idle.
     if (g_gunAnimN>0 && g_curAnim<g_gunAnimN){
         int nf=ANIM_FRAMES(g_gunAnim[g_curAnim]);
-        if (g_curAnim==g_aIdle && !g_animOnce){
+        if (g_weapons[g_curWeapon].spinUp && g_curAnim==g_aIdle && !g_animOnce){
+            // minigun: spin the barrel by playing its 'allanims' clip at a rate
+            // set by g_spin (0=stopped). Loops; winds down to a stop on cooldown.
+            if (nf>0){ g_animT += dt*g_spin*500.0f; while (g_animT>=(float)nf) g_animT-=(float)nf; }
+        } else if (g_curAnim==g_aIdle && !g_animOnce){
             g_animT = nf>0 ? (float)(nf-1) : 0.0f;   // freeze on the drawn/ready frame
         } else {
             g_animT += dt*30.0f;
