@@ -558,17 +558,19 @@ static void Update(void) {
         g_vy=0; g_grounded=1;
     } else if (g_hasMap){                               // FPS collision against the loaded map mesh
         if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=6.0f; g_grounded=0; }
-        g_vy -= 18.0f*dt; g_pos.y += g_vy*dt;
-        // floor: snap the eye to EYE_H above the nearest surface below it. Snap
-        // up when feet reach the floor; also stick to it on the way DOWN (within
-        // a step) while grounded, so stairs/slopes don't bounce.
-        float dn=MapRayNearest(g_pos,(Vector3){0,-1,0},80.0f);
-        float gap=dn-EYE_H;                            // feet height above the floor
-        if (dn>0 && (gap<=0.0f || (g_grounded && g_vy<=0.0f && gap<=0.4f))){
-            g_pos.y=g_pos.y-dn+EYE_H; g_vy=0; g_grounded=1;
-        } else g_grounded=0;
-        // ceiling: stop rising if the head is blocked just above
-        if (g_vy>0){ float up=MapRayNearest(g_pos,(Vector3){0,1,0},0.4f); if (up>0) g_vy=0; }
+        float dn=MapRayNearest(g_pos,(Vector3){0,-1,0},80.0f);  // eye -> floor distance
+        float floorEye = (dn>0) ? g_pos.y-dn+EYE_H : -1e30f;    // eye height standing on that floor
+        const float STEP=0.7f;                                  // auto climb/descend up to this height
+        if (g_vy<=0.0f && dn>0 && (g_pos.y-floorEye)<=STEP){
+            // grounded (or within a step of the floor): glue to it. Setting y
+            // directly each frame -- instead of gravity then snap -- is what
+            // kills the stair jitter; stepping up/down just follows floorEye.
+            g_pos.y=floorEye; g_vy=0.0f; g_grounded=1;
+        } else {                                                // airborne: ballistic
+            g_vy-=18.0f*dt; g_pos.y+=g_vy*dt; g_grounded=0;
+            if (dn>0 && g_pos.y<=floorEye){ g_pos.y=floorEye; g_vy=0.0f; g_grounded=1; }   // land
+            if (g_vy>0.0f){ float up=MapRayNearest(g_pos,(Vector3){0,1,0},0.4f); if (up>0) g_vy=0.0f; }  // ceiling
+        }
     } else {
         if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
         g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
