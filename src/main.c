@@ -169,7 +169,7 @@ typedef struct {
     Sound           auxSnd;                      // secondary sound: minigun spin-down, shotgun cock-between-shots
     int             hasAuxSnd;
 } Weapon;
-static Weapon g_weapons[5];
+static Weapon g_weapons[16];
 static int    g_curWeapon = 0;
 static int    g_numWeapons = 0;
 static int    g_audio = 0;                       // audio device ready (sounds load/play only when set)
@@ -288,7 +288,7 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
 // (held in Update); loop=0 -> one blast per shot (played in Fire). No-op until
 // the audio device is up, and silently skips a missing file (game still runs).
 static void LoadWeaponSound(int slot, const char *path, const char *alt, int loop){
-    if (!g_audio || slot<0 || slot>=5) return;
+    if (!g_audio || slot<0 || slot>=16) return;
     Weapon *w=&g_weapons[slot];
     const char *fp=path; if(!FileExists(fp)) fp=alt;
     if(!FileExists(fp)){ DebugLog("wsound","\"slot\":%d,\"error\":\"missing\",\"path\":\"%s\"",slot,JStr(path)); return; }
@@ -300,7 +300,7 @@ static void LoadWeaponSound(int slot, const char *path, const char *alt, int loo
 
 // Secondary per-weapon sound (minigun spin-down, shotgun cock-between-shots).
 static void LoadWeaponAux(int slot, const char *path, const char *alt){
-    if (!g_audio || slot<0 || slot>=5) return;
+    if (!g_audio || slot<0 || slot>=16) return;
     Weapon *w=&g_weapons[slot];
     const char *fp=path; if(!FileExists(fp)) fp=alt;
     if(!FileExists(fp)) return;
@@ -807,6 +807,10 @@ static void Update(void) {
     if (IsKeyPressed(KEY_THREE)) SwitchWeapon(2);
     if (IsKeyPressed(KEY_FOUR)) SwitchWeapon(3);
     if (IsKeyPressed(KEY_FIVE)) SwitchWeapon(4);
+    if (IsKeyPressed(KEY_SIX)) SwitchWeapon(5);
+    if (IsKeyPressed(KEY_SEVEN)) SwitchWeapon(6);
+    if (IsKeyPressed(KEY_EIGHT)) SwitchWeapon(7);
+    if (IsKeyPressed(KEY_NINE)) SwitchWeapon(8);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
     // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
     // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
@@ -999,7 +1003,7 @@ static void DrawHUD(void) {
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1-5=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
+        DrawText(TextFormat("%s  [%s]  1-9=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
             DrawRectangle(6,96,600,392,(Color){0,0,0,215});
             DrawRectangleLines(6,96,600,392,(Color){255,210,60,255});
@@ -1157,7 +1161,14 @@ int main(int argc, char **argv) {
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
     LoadWeapon(4, "assets/ak74.glb", "../assets/ak74.glb", "AK-74M", "vm_tune_ak.txt",
                (Vector3){ 0.200f, -0.218f, -0.642f }, 0.290106f, -176.0f, 88.1f, 0.0f);  // dialed in
-    g_numWeapons=5;
+    // new weapons (auto-framed; tune each live with N, ENTER saves). MP5 + Benelli
+    // are clean rigs that animate fire+reload; the flamethrower/knife are model-only
+    // for now (they hitscan -- no flame/melee mechanic yet).
+    LoadWeapon(5, "assets/mp5.glb",          "../assets/mp5.glb",          "MP5",          "vm_tune_mp5.txt",     (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
+    LoadWeapon(6, "assets/benelli.glb",      "../assets/benelli.glb",      "Benelli M4",   "vm_tune_benelli.txt", (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
+    LoadWeapon(7, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
+    LoadWeapon(8, "assets/knife.glb",        "../assets/knife.glb",        "Knife",        "vm_tune_knife.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
+    g_numWeapons=9;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
     // Per-weapon fire sounds. The two automatics loop while the trigger is held;
@@ -1167,6 +1178,8 @@ int main(int argc, char **argv) {
     LoadWeaponSound(2, "assets/minigun_fire.mp3", "../assets/minigun_fire.mp3", 1);  // minigun
     LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (biggun)
     LoadWeaponSound(4, "assets/ak74_fire.mp3",    "../assets/ak74_fire.mp3",    0);  // AK-74M: one-shot per bullet
+    LoadWeaponSound(5, "assets/rifle_fire.mp3",   "../assets/rifle_fire.mp3",   1);  // MP5: reuse the MG loop
+    LoadWeaponSound(6, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // Benelli M4: one-shot per shot
     LoadWeaponAux(1, "assets/shotgun_cock.mp3",     "../assets/shotgun_cock.mp3");     // shotgun cock between shots
     LoadWeaponAux(2, "assets/minigun_cooldown.mp3", "../assets/minigun_cooldown.mp3"); // minigun spin-down
     g_weapons[0].burst=3;        // rifle:   3-round burst per trigger pull
@@ -1174,6 +1187,8 @@ int main(int argc, char **argv) {
     g_weapons[2].spinUp=1;       // minigun: 5s fire cap -> cooldown sound + lockout
     g_weapons[3].soundGated=1;   // LMG:     fire while the sound plays, then a 0.75s pause
     g_weapons[4].playShoot=1;    // AK-74M:  plays its Shot clip on fire; R plays AK_Reload
+    g_weapons[5].playShoot=1;    // MP5:     plays its Shoot clip on fire; R plays Reload
+    g_weapons[6].playShoot=1;    // Benelli: plays its Fire clip on fire; R plays Reload
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
