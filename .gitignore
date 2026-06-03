@@ -11,6 +11,7 @@ maps/
 # per-machine live state
 vm_tune.txt
 vm_tune_*.txt
+options.txt
 chernobyl2-debug.log
 chernobyl2-shot.png
 

@@ -116,8 +116,16 @@ static int             g_lmgWasPlaying = 0;     // LMG: fire sound was playing l
 static Camera3D        g_vmCam;
 static int             g_inspect = 0;           // V: gun floats in the world
 static float           g_savedMsg = 0.0f;       // >0: flash a "SAVED" confirmation
-static Vector3         g_gunCentroid = { 0, 0, 0 };  // bind-pose centroid, measured ONCE at load
+static int             g_menu = 0;              // ESC: options/pause menu open (frees cursor, pauses)
+static int             g_fullscreen = 0;        // borderless monitor-fill on/off (set via the menu, persisted)
+static int             g_quit = 0;              // menu Quit -> break the main loop
+static Vector3         g_gunCentroid = { 0, 0, 0 };  // gun centroid (bind or posed), measured ONCE at load
 static float           g_gunFitScale = 1.0f;         // inspect-view fit scale, measured ONCE at load
+// Slots whose bind pose sits far from where the gun is actually drawn (posed):
+// frame these from the POSED idle geometry. Most rigs (incl. every hand-tuned
+// legacy weapon) have bind~=posed and stay on bind, so they're untouched. Set
+// before the corresponding LoadWeapon call.
+static int             g_posedBasis[16] = {0};
 
 // This rig is BIG and off-origin (~2783u, centroid ~Y1390 Z849, barrel along
 // model +Y). So: tiny scale, and recenter on the centroid so the gun lands at
@@ -217,6 +225,18 @@ static void SwitchWeapon(int n){
     ActivateWeapon(n);
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\"", n, g_weapons[n].label);
 }
+// Measure a model's bbox CENTRE + max extent from its current vertex data.
+// useAnim picks mesh.animVertices (the posed buffer raylib actually draws) over
+// the bind-pose mesh.vertices. Returns a unit fallback for empty/vertexless rigs.
+static void MeasureBBox(Model m, int useAnim, Vector3 *centre, float *maxDim){
+    float lo[3]={1e30f,1e30f,1e30f}, hi[3]={-1e30f,-1e30f,-1e30f}; int any=0;
+    for(int mi=0;mi<m.meshCount;mi++){ Mesh*me=&m.meshes[mi];
+        float*vv=(useAnim&&me->animVertices)?me->animVertices:me->vertices; if(!vv)continue;
+        for(int v=0;v<me->vertexCount;v++){ any=1; for(int k=0;k<3;k++){float c=vv[v*3+k]; if(c<lo[k])lo[k]=c; if(c>hi[k])hi[k]=c;} } }
+    if(!any){ *centre=(Vector3){0,0,0}; *maxDim=1.0f; return; }
+    *centre=(Vector3){(lo[0]+hi[0])*0.5f,(lo[1]+hi[1])*0.5f,(lo[2]+hi[2])*0.5f};
+    *maxDim=fmaxf(hi[0]-lo[0],fmaxf(hi[1]-lo[1],hi[2]-lo[2]));
+}
 // Load a glb into slot, resolve idle/shoot/reload clips by name, load saved tuning.
 static void LoadWeapon(int slot, const char *path, const char *alt,
                        const char *label, const char *tunePath,
@@ -231,23 +251,6 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     w->model=LoadModel(fp);
     w->anim=LoadModelAnimations(fp,&w->animN);
     w->has=(w->model.meshCount>0);
-    BoundingBox sb=GetModelBoundingBox(w->model);
-    w->centroid=(Vector3){(sb.min.x+sb.max.x)*0.5f,(sb.min.y+sb.max.y)*0.5f,(sb.min.z+sb.max.z)*0.5f};
-    float md=fmaxf(sb.max.x-sb.min.x,fmaxf(sb.max.y-sb.min.y,sb.max.z-sb.min.z));
-    w->fitScale=(md>0.001f)?1.5f/md:1.0f;
-    // Auto framing: a passed scale0<=0 means "frame me from the bounding box".
-    // The recenter math lands the model's CENTROID exactly at off, so for an
-    // untuned weapon we must pick an off that's actually on-screen: dead ahead
-    // (negative Z in the vm camera), slightly down, with a scale that makes the
-    // model ~0.8 units (fits the lower third). The rifle's hand-tuned off
-    // (-2.45,-5.55,1.68) only works because it's huge; a correctly-small weapon
-    // parked there falls off-frame. A saved tune file still overrides all of it.
-    if (scale0<=0.0f){
-        float as=(md>0.001f)?0.8f/md:0.0004f;
-        w->scale0=as; w->scale=as;
-        w->off0=(Vector3){ 0.20f, -0.35f, -1.30f }; w->off=w->off0;
-        w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;  // orientation still a guess; user rotates
-    }
     // Resolve clips by name with priorities (first match wins per role): a real
     // "idle" beats take/draw/hold; "shot" counts as a fire clip; the plain
     // "reload" beats variants like reload_full. Handles e.g. AK_Idle/Shot/Reload.
@@ -279,6 +282,29 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     }
     if (w->aShoot>=w->animN)  w->aShoot=w->aIdle;    // unresolved -> valid clip
     if (w->aReload>=w->animN) w->aReload=w->aIdle;   // (aReload==aIdle means "no reload clip")
+    // Framing basis. raylib draws the POSED mesh (animVertices), but some FPS rigs
+    // ship a bind pose that sits somewhere completely different (the MP5's bind
+    // bbox is centred ~44k units off-origin, so recentering on it draws the gun
+    // into empty space and it vanishes). For flagged slots, pose to idle frame 0
+    // and frame from that; everyone else keeps the bind bbox they were tuned
+    // against. Either way the recenter lands w->centroid at the viewmodel offset.
+    Vector3 cc; float md;
+    if (g_posedBasis[slot] && w->animN>0 && w->aIdle>=0 && w->aIdle<w->animN){
+        UpdateModelAnimation(w->model, w->anim[w->aIdle], 0);
+        MeasureBBox(w->model,1,&cc,&md);     // POSED idle geometry
+    } else {
+        MeasureBBox(w->model,0,&cc,&md);     // bind pose
+    }
+    w->centroid=cc;
+    w->fitScale=(md>0.001f)?1.5f/md:1.0f;
+    // Auto framing (passed scale0<=0): land the centroid dead ahead, slightly
+    // down, scaled so the model is ~0.8 units (lower third). A saved tune overrides.
+    if (scale0<=0.0f){
+        float as=(md>0.001f)?0.8f/md:0.0004f;
+        w->scale0=as; w->scale=as;
+        w->off0=(Vector3){ 0.20f, -0.35f, -1.30f }; w->off=w->off0;
+        w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;  // orientation still a guess; user rotates
+    }
     LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll);
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
              slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
@@ -628,8 +654,51 @@ static void StartReload(void){
     else if (g_aReload!=g_aIdle && g_aReload<g_gunAnimN){ g_reloading=1; g_reloadStep=-1; g_curAnim=g_aReload; g_animOnce=1; g_animT=0.0f; }
 }
 
+// Options/pause menu: a vertical stack of buttons centred on screen. DrawMenu and
+// the click hit-test (in Update) both call MenuRect, so the layout can't drift.
+#define MENU_N 3
+static Rectangle MenuRect(int i){
+    int W=GetScreenWidth(), H=GetScreenHeight();
+    float bw=360, bh=54, gap=16, total=MENU_N*bh+(MENU_N-1)*gap;
+    return (Rectangle){ W/2.0f-bw/2.0f, H/2.0f-total/2.0f+24+i*(bh+gap), bw, bh };
+}
+// Persist the fullscreen choice across launches (per-machine, gitignored like the
+// tune files). Default is windowed; the menu writes "fullscreen 1" once enabled.
+static void LoadOptions(void){
+    FILE *f=fopen("options.txt","r"); if(!f) return;
+    int fs=0; if (fscanf(f,"fullscreen %d",&fs)==1) g_fullscreen=(fs!=0);
+    fclose(f);
+}
+static void SaveOptions(void){
+    FILE *f=fopen("options.txt","w"); if(!f) return;
+    fprintf(f,"fullscreen %d\n", g_fullscreen?1:0); fclose(f);
+}
+
 static void Update(void) {
     float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
+
+    // ESC toggles the options/pause menu. While open the cursor is freed for
+    // clicking and the whole gameplay update is skipped (early return), so the
+    // world freezes behind the overlay.
+    if (IsKeyPressed(KEY_ESCAPE)){
+        g_menu=!g_menu;
+        if (g_menu) EnableCursor(); else DisableCursor();
+        DebugLog("menu","\"open\":%s", g_menu?"true":"false");
+    }
+    if (g_menu){
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
+            Vector2 mp=GetMousePosition();
+            for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))){
+                if (i==0){                                  // Fullscreen toggle
+                    ToggleBorderlessWindowed(); g_fullscreen=!g_fullscreen; SaveOptions();
+                    EnableCursor();                         // the toggle can re-grab; keep it free for the menu
+                    DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
+                } else if (i==1){ g_menu=0; DisableCursor(); }   // Resume
+                else if (i==2) g_quit=1;                          // Quit
+            }
+        }
+        return;
+    }
 
     // Keep the mouse captured the whole time we're playing. macOS releases the
     // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
@@ -1047,6 +1116,27 @@ static void DrawSky(void){
     if (hy<H) DrawRectangleGradientV(0,(int)hy,W,H-(int)hy, horizon, ground);    // horizon haze -> dark
 }
 
+// Options/pause overlay drawn on top of the frozen world. Hover-highlighted
+// buttons; clicks are handled in Update against the same MenuRect layout.
+static void DrawMenu(void){
+    int W=GetScreenWidth(), H=GetScreenHeight();
+    DrawRectangle(0,0,W,H,(Color){0,0,0,165});
+    const char *title="OPTIONS"; int ts=46, tw=MeasureText(title,ts);
+    TextSh(title, W/2-tw/2, (int)MenuRect(0).y-78, ts, (Color){255,210,60,255});
+    Vector2 mp=GetMousePosition();
+    char fsl[40]; snprintf(fsl,sizeof fsl,"Fullscreen:  %s", g_fullscreen?"ON":"OFF");
+    const char *labels[MENU_N]={fsl,"Resume","Quit"};
+    for (int i=0;i<MENU_N;i++){
+        Rectangle r=MenuRect(i); int hov=CheckCollisionPointRec(mp,r);
+        DrawRectangleRec(r, hov?(Color){58,82,120,240}:(Color){22,30,44,225});
+        DrawRectangleLinesEx(r,2, hov?(Color){255,210,60,255}:(Color){120,140,170,255});
+        int fs=28, lw=MeasureText(labels[i],fs);
+        TextSh(labels[i], (int)(r.x+r.width/2-lw/2), (int)(r.y+r.height/2-fs/2), fs, RAYWHITE);
+    }
+    Rectangle last=MenuRect(MENU_N-1);
+    TextSh("ESC to close", W/2-72, (int)(last.y+last.height+24), 18, GRAY);
+}
+
 static void Frame(void) {
     static int frameNo=0;
     Update();
@@ -1060,6 +1150,7 @@ static void Frame(void) {
         if (g_inspect && !g_noEnemies) DrawInspect();
         DrawViewmodel();
         DrawHUD();
+        if (g_menu) DrawMenu();
     EndDrawing();
     if (g_debug && (frameNo%30==0))
         DebugLog("frame","\"n\":%d,\"fps\":%d,\"anim\":%d,\"pos\":[%.1f,%.1f,%.1f]",
@@ -1076,12 +1167,15 @@ static void Frame(void) {
 #endif
 
 int main(int argc, char **argv) {
+    int vmWeapon=-1; float vmOv[7]={0}; int vmHas=0;          // dev: --weapon / --vm framing overrides
     for (int i=1;i<argc;i++){
         if (!strcmp(argv[i],"--debug")) g_debug=1;
         else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
         else if (!strcmp(argv[i],"--map") && i+1<argc) g_mapPath=argv[++i];   // SPIKE: load a .map
+        else if (!strcmp(argv[i],"--weapon") && i+1<argc) vmWeapon=atoi(argv[++i]);   // dev: start on weapon N
+        else if (!strcmp(argv[i],"--vm") && i+1<argc) vmHas=(sscanf(argv[++i],"%f %f %f %f %f %f %f",&vmOv[0],&vmOv[1],&vmOv[2],&vmOv[3],&vmOv[4],&vmOv[5],&vmOv[6])==7);   // dev: override viewmodel "x y z scale yaw pitch roll"
     }
     // Send the JSON event stream straight to a log file (not stdout/stderr, so
     // it stays clean of raylib's own warnings). Fresh file each run.
@@ -1092,6 +1186,7 @@ int main(int argc, char **argv) {
 
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(1280,720,"Chernobyl 2");
+    SetExitKey(KEY_NULL);              // ESC opens the options menu instead of quitting
     int ready=IsWindowReady();
     DebugLog("boot","\"windowReady\":%s,\"raylib\":\"%s\"", ready?"true":"false", RAYLIB_VERSION);
 
@@ -1102,6 +1197,19 @@ int main(int argc, char **argv) {
     if (!ready){   // headless: nothing to render without a GL context
         DebugLog("shutdown","\"reason\":\"no-gl-context\"");
         return 0;
+    }
+
+    // Windowed (1280x720) by default. Fullscreen is opt-in via the in-game options
+    // menu (ESC), which uses borderless windowed mode (resizes to the monitor's
+    // resolution) and persists the choice; re-apply it here if it was left on.
+    // Skipped under --shot so headless captures stay a deterministic 1280x720.
+    // Everything renders off GetScreenWidth/Height + the framebuffer aspect, so
+    // the HUD and 3D views adapt to whatever resolution we land on.
+    LoadOptions();
+    if (g_fullscreen && g_shotFrame<=0){
+        ToggleBorderlessWindowed();
+        DebugLog("window","\"borderless\":true,\"w\":%d,\"h\":%d,\"monitor\":%d",
+                 GetScreenWidth(), GetScreenHeight(), GetCurrentMonitor());
     }
 
     SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
@@ -1170,12 +1278,14 @@ int main(int argc, char **argv) {
     // new weapons (auto-framed; tune each live with N, ENTER saves). MP5 + Benelli
     // are clean rigs that animate fire+reload; the flamethrower/knife are model-only
     // for now (they hitscan -- no flame/melee mechanic yet).
-    LoadWeapon(5, "assets/mp5.glb",          "../assets/mp5.glb",          "MP5",          "vm_tune_mp5.txt",     (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
-    LoadWeapon(6, "assets/benelli.glb",      "../assets/benelli.glb",      "Benelli M4",   "vm_tune_benelli.txt", (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
+    g_posedBasis[5]=1;   // MP5's bind pose is ~44k units off-origin; frame from the posed idle pose
+    LoadWeapon(5, "assets/mp5.glb",          "../assets/mp5.glb",          "MP5",          "vm_tune_mp5.txt",     (Vector3){0.33f,-0.49f,-1.04f}, 0.000026f, 106.0f, -90.0f, 0.0f);
+    LoadWeapon(6, "assets/benelli.glb",      "../assets/benelli.glb",      "Benelli M4",   "vm_tune_benelli.txt", (Vector3){0.30f,-0.40f,-1.08f}, 0.000021f, 104.0f, 90.0f, 0.0f);
     LoadWeapon(7, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
     LoadWeapon(8, "assets/knife.glb",        "../assets/knife.glb",        "Knife",        "vm_tune_knife.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
     g_numWeapons=9;
-    ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
+    ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // park on the rifle (or --weapon N for tuning)
+    if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
 
     // Per-weapon fire sounds. The two automatics loop while the trigger is held;
     // the shotgun fires one blast per shot.
@@ -1224,7 +1334,7 @@ int main(int argc, char **argv) {
     emscripten_set_main_loop(Frame,0,1);
 #else
     int fc=0;
-    while (!WindowShouldClose()){ Frame(); if (g_maxFrames>0 && ++fc>=g_maxFrames) break; }
+    while (!WindowShouldClose() && !g_quit){ Frame(); if (g_maxFrames>0 && ++fc>=g_maxFrames) break; }
 #endif
 
     StashActiveTuning();
