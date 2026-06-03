@@ -1131,7 +1131,7 @@ int main(int argc, char **argv) {
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
                (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
     LoadWeapon(4, "assets/ak74.glb", "../assets/ak74.glb", "AK-74M", "vm_tune_ak.txt",
-               (Vector3){ 0,0,0 }, -1.0f, 0.0f, -90.0f, 0.0f);   // auto-framed, pitched down-range; tune live with N
+               (Vector3){ 0.200f, -0.218f, -0.642f }, 0.290106f, -176.0f, 88.1f, 0.0f);  // dialed in
     g_numWeapons=5;
     ActivateWeapon(0);   // park on the rifle (also restores its saved framing)
 
