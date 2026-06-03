@@ -16,6 +16,7 @@ INCLUDES   := -I$(RAYLIB_DIR)/include
 LIBS       := $(RAYLIB_DIR)/lib/libraylib.a
 
 ifeq ($(UNAME_S),Darwin)
+  SRC  += src/macicon.m          # Objective-C: sets the Dock / Cmd-Tab icon
   LIBS += -framework OpenGL -framework Cocoa -framework IOKit \
           -framework CoreVideo -framework CoreAudio
 endif

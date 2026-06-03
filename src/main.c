@@ -33,6 +33,10 @@
 
 #include "mapload.h"   // SPIKE: --map loads idTech3 (.map) brush geometry as a Model
 
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+void MacSetDockIcon(const char *path);   // macicon.m: Dock / Cmd-Tab icon (SetWindowIcon is a no-op on macOS)
+#endif
+
 // raylib 6.0 redesigned skeletal animation; macro keeps it buildable on 5.5.
 #if defined(RAYLIB_VERSION_MAJOR) && RAYLIB_VERSION_MAJOR >= 6
   #define ANIM_FRAMES(a)     ((a).keyframeCount)
@@ -952,6 +956,18 @@ int main(int argc, char **argv) {
 
     SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
     DisableCursor();
+
+    // window + Dock/Cmd-Tab icon
+    {
+        const char *ip="assets/icon.png"; if (!FileExists(ip)) ip="../assets/icon.png";
+        if (FileExists(ip)){
+            Image ic=LoadImage(ip);
+            if (ic.data){ ImageFormat(&ic,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8); SetWindowIcon(ic); UnloadImage(ic); }
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+            MacSetDockIcon(ip);            // SetWindowIcon is ignored on macOS; set the Dock image directly
+#endif
+        }
+    }
 
     InitAudioDevice();                 // weapon fire sounds; harmless if it fails
     g_audio = IsAudioDeviceReady();
