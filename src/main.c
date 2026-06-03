@@ -470,6 +470,18 @@ static void Fire(Camera3D cam) {
     DebugLog("fire","\"enemy\":%d,\"head\":%d,\"end\":[%.2f,%.2f,%.2f]", ei, head, end.x,end.y,end.z);
 }
 
+// Move enemy i by (mx,mz), blocked per-axis against map walls. Both the chase
+// and the enemy-vs-enemy separation go through here, so nothing shoves an enemy
+// through a wall (separation used to move them with no wall check at all).
+static void EnemyNudge(int i, float mx, float mz){
+    Enemy *e=&g_enemies[i];
+    if (g_hasMap && g_mapCol.ready){
+        float by=e->pos.y+0.9f;
+        if (!MapSphereHitsWall((Vector3){e->pos.x+mx,by,e->pos.z},0.5f)) e->pos.x+=mx;
+        if (!MapSphereHitsWall((Vector3){e->pos.x,by,e->pos.z+mz},0.5f)) e->pos.z+=mz;
+    } else { e->pos.x+=mx; e->pos.z+=mz; }
+}
+
 // Walk alive enemies toward the player; advance death timers; melee on contact.
 static void UpdateEnemies(float dt){
     if (!g_hasEnemy) return;
@@ -482,14 +494,8 @@ static void UpdateEnemies(float dt){
             // clip priority: flinch > attack (in melee range) > run (chasing)
             int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : g_eRun);
             if (want!=e->clip){ e->clip=want; e->animT=0; }
-            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE){           // chase unless flinching/in melee
-                float nx=e->pos.x+dx/d*ENEMY_SPEED*dt, nz=e->pos.z+dz/d*ENEMY_SPEED*dt;
-                if (g_hasMap && g_mapCol.ready){               // block on walls (slide, don't phase through)
-                    float by=e->pos.y+0.9f;
-                    if (!MapSphereHitsWall((Vector3){nx,by,e->pos.z},0.5f)) e->pos.x=nx;
-                    if (!MapSphereHitsWall((Vector3){e->pos.x,by,nz},0.5f)) e->pos.z=nz;
-                } else { e->pos.x=nx; e->pos.z=nz; }
-            }
+            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE)            // chase (wall-blocked, slides along walls)
+                EnemyNudge(i, dx/d*ENEMY_SPEED*dt, dz/d*ENEMY_SPEED*dt);
             if (g_hasMap && g_mapCol.ready){                   // keep the enemy standing on the map floor
                 float top=e->pos.y+4.0f, fd=MapRayNearest((Vector3){e->pos.x,top,e->pos.z},(Vector3){0,-1,0},40.0f);
                 if (fd>0) e->pos.y=top-fd;
@@ -519,8 +525,8 @@ static void UpdateEnemies(float dt){
             float d=sqrtf(dx*dx+dz*dz), mind=ENEMY_RADIUS*2.0f;
             if (d<mind && d>1e-4f){
                 float push=(mind-d)*0.5f/d;
-                g_enemies[a].pos.x-=dx*push; g_enemies[a].pos.z-=dz*push;
-                g_enemies[b].pos.x+=dx*push; g_enemies[b].pos.z+=dz*push;
+                EnemyNudge(a, -dx*push, -dz*push);    // wall-gated, so crowding can't shove them through walls
+                EnemyNudge(b,  dx*push,  dz*push);
             }
         }
     }
