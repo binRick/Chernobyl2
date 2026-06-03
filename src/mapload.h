@@ -194,6 +194,9 @@ static MapCol g_mapCol = {0};
 static float  g_mapAOsec = 0.0f;   // AO bake time (for the load log)
 static Vector3 g_mapSpawn = {0,0,0};   // a player spawn point (raylib space)
 static int     g_hasSpawn = 0;
+typedef struct { Vector3 pos; float R; Vector3 color; } MapLight;   // point light (raylib space, R=reach)
+static MapLight g_mapLights[2048];
+static int      g_nMapLights = 0;
 
 static float MapRayTri(Vector3 o, Vector3 d, Vector3 a, Vector3 b, Vector3 c){
     Vector3 e1=Vector3Subtract(b,a), e2=Vector3Subtract(c,a);
@@ -242,6 +245,27 @@ static float MapVertexAO(AOGrid *g, const float *tri, Vector3 p, Vector3 n, cons
         (*rid)++; if (MapRayOccluded(g,tri,o,d,AO_RADIUS,stamp,*rid)) occ++;
     }
     return (float)occ/(float)AO_RAYS;
+}
+
+// Baked direct light at a vertex: each in-range light contributes Lambert *
+// distance-falloff, gated by a shadow ray through the grid (so it casts hard
+// shadows). White lights give a grey result; coloured lights tint.
+static Vector3 MapVertexLight(Vector3 P, Vector3 N, int *stamp, int *rid){
+    Vector3 sum={0,0,0};
+    for (int l=0;l<g_nMapLights;l++){
+        MapLight *L=&g_mapLights[l];
+        Vector3 dl=Vector3Subtract(L->pos,P); float R=L->R, d2=Vector3DotProduct(dl,dl);
+        if (d2>=R*R) continue;
+        float d=sqrtf(d2); if (d<1e-4f) d=1e-4f;
+        Vector3 Ldir=Vector3Scale(dl,1.0f/d);
+        float ndl=Vector3DotProduct(N,Ldir); if (ndl<=0.0f) continue;     // facing away
+        Vector3 o=Vector3Add(P,Vector3Scale(N,AO_BIAS));
+        (*rid)++;
+        if (MapRayOccluded(&g_mapCol.grid,g_mapCol.tri,o,Ldir,d-2.0f*AO_BIAS,stamp,*rid)) continue;  // shadowed
+        float c=ndl*(1.0f-d/R)*1.05f;
+        sum.x+=L->color.x*c; sum.y+=L->color.y*c; sum.z+=L->color.z*c;
+    }
+    return sum;
 }
 
 static int MapCellIdx(AOGrid *g,int x,int y,int z){ return (z*g->ny+y)*g->nx+x; }
@@ -352,16 +376,26 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     FILE *f=fopen(path,"r"); if(!f) return empty;
     MapReg R={0};
     MapFace ctx[8][128]; int ctxN[8]={0}; int sp=0;
-    Vector3 spQ={0,0,0}; int curSpawn=0, haveOrig=0, spawnSet=0;   // info_player_* origin capture
+    // entity capture: per-entity origin/class/light value, plus the saved spawn
+    Vector3 entO={0,0,0}, entCol={1,1,1}, spawnQ={0,0,0};
+    int curSpawn=0, curLight=0, haveOrig=0, spawnSet=0; float entLi=300.0f;
     char line[2048];
     while (fgets(line,sizeof line,f)){
         const char *p=line; while (*p==' '||*p=='\t') p++;
-        if (*p=='{'){ if (sp==0){ curSpawn=0; haveOrig=0; } if (sp<8) ctxN[sp]=0; sp++; }
+        if (*p=='{'){ if (sp==0){ curSpawn=curLight=haveOrig=0; entLi=300.0f; entCol=(Vector3){1,1,1}; } if (sp<8) ctxN[sp]=0; sp++; }
         else if (*p=='}'){ sp--; if (sp>=0 && sp<8 && ctxN[sp]>=4) MapEmitBrush(&R,ctx[sp],ctxN[sp]);
-            if (sp==0 && curSpawn && haveOrig && !spawnSet) spawnSet=1; }   // spQ holds the first spawn (Quake space)
+            if (sp==0){
+                if (curSpawn && haveOrig && !spawnSet){ spawnQ=entO; spawnSet=1; }
+                if (curLight && haveOrig && g_nMapLights<2048){
+                    g_mapLights[g_nMapLights].pos=entO; g_mapLights[g_nMapLights].R=entLi;  // Quake space + raw intensity; transformed below
+                    g_mapLights[g_nMapLights].color=entCol; g_nMapLights++;
+                }
+            } }
         else if (*p=='"' && sp==1){                                // entity key/value
-            if (!strncmp(p,"\"classname\"",11) && strstr(p,"info_player")) curSpawn=1;
-            else if (!strncmp(p,"\"origin\"",8)){ if (sscanf(p,"\"origin\" \"%f %f %f\"",&spQ.x,&spQ.y,&spQ.z)==3) haveOrig=1; }
+            if (!strncmp(p,"\"classname\"",11)){ if (strstr(p,"info_player")) curSpawn=1; else if (strstr(p,"\"light\"")) curLight=1; }
+            else if (!strncmp(p,"\"origin\"",8)){ if (sscanf(p,"\"origin\" \"%f %f %f\"",&entO.x,&entO.y,&entO.z)==3) haveOrig=1; }
+            else if (!strncmp(p,"\"light\"",7)) sscanf(p,"\"light\" \"%f\"",&entLi);
+            else if (!strncmp(p,"\"_color\"",8)) sscanf(p,"\"_color\" \"%f %f %f\"",&entCol.x,&entCol.y,&entCol.z);
         }
         else if (*p=='('){
             Vector3 a,b,c; int used=0;
@@ -396,7 +430,12 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     float ext=fmaxf(Mxx-Mnx,fmaxf(Mxy-Mny,Mxz-Mnz)); if(ext<1.0f)ext=1.0f;
     float s=60.0f/ext;
     Vector3 L=Vector3Normalize((Vector3){0.45f,0.85f,0.30f});
-    if (spawnSet){ g_mapSpawn=(Vector3){(spQ.x-cx)*s,(spQ.z-Mnz)*s,(spQ.y-cy)*s}; g_hasSpawn=1; }
+    if (spawnSet){ g_mapSpawn=(Vector3){(spawnQ.x-cx)*s,(spawnQ.z-Mnz)*s,(spawnQ.y-cy)*s}; g_hasSpawn=1; }
+    for (int l=0;l<g_nMapLights;l++){                  // lights: Quake origin -> raylib, intensity -> reach
+        Vector3 q=g_mapLights[l].pos;
+        g_mapLights[l].pos=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s};
+        g_mapLights[l].R=g_mapLights[l].R*s*2.6f; if (g_mapLights[l].R<1.0f) g_mapLights[l].R=1.0f;
+    }
 
     // 1) transform every vertex into raylib space (positions + normals)
     for (int i=0;i<R.n;i++){ MapBuf *b=&R.t[i].buf;
@@ -419,15 +458,23 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     for (int i=0;i<AO_RAYS;i++){ float kk=(i+0.5f)/AO_RAYS, z=1.0f-kk, r=sqrtf(1.0f-z*z), phi=i*2.39996323f;
         samp[i]=(Vector3){cosf(phi)*r, sinf(phi)*r, z}; }
     int *stamp=(int*)calloc(g_mapCol.ntri,sizeof(int)); int rid=0; double t0=GetTime();
+    int haveLights=(g_nMapLights>0);
     for (int i=0;i<R.n;i++){ MapBuf *b=&R.t[i].buf;
         for (int k=0;k<b->n;k++){
             Vector3 P={b->pos[k*3],b->pos[k*3+1],b->pos[k*3+2]}, N={b->nrm[k*3],b->nrm[k*3+1],b->nrm[k*3+2]};
-            float ndl=fabsf(Vector3DotProduct(N,L));
             float ao=MapVertexAO(&g_mapCol.grid,g_mapCol.tri,P,N,samp,stamp,&rid);
-            float sh=(0.50f+0.50f*ndl)*(1.0f-AO_STRENGTH*ao); if(sh<0.04f)sh=0.04f; if(sh>1.0f)sh=1.0f;
-            b->col[k*4]=(unsigned char)(b->col[k*4]*sh);
-            b->col[k*4+1]=(unsigned char)(b->col[k*4+1]*sh);
-            b->col[k*4+2]=(unsigned char)(b->col[k*4+2]*sh);
+            float sr,sg,sb;
+            if (haveLights){                                  // ambient (AO-darkened) + shadowed point lights
+                float amb=0.32f*(1.0f-AO_STRENGTH*ao);
+                Vector3 lit=MapVertexLight(P,N,stamp,&rid);
+                sr=amb+lit.x; sg=amb+lit.y; sb=amb+lit.z;
+            } else {                                          // no lights in the .map: directional fallback
+                float ndl=fabsf(Vector3DotProduct(N,L));
+                sr=sg=sb=(0.50f+0.50f*ndl)*(1.0f-AO_STRENGTH*ao);
+            }
+            if(sr<0.03f)sr=0.03f; if(sr>1.4f)sr=1.4f; if(sg<0.03f)sg=0.03f; if(sg>1.4f)sg=1.4f; if(sb<0.03f)sb=0.03f; if(sb>1.4f)sb=1.4f;
+            float cr=b->col[k*4]*sr, cg=b->col[k*4+1]*sg, cb=b->col[k*4+2]*sb;
+            b->col[k*4]=(unsigned char)(cr>255?255:cr); b->col[k*4+1]=(unsigned char)(cg>255?255:cg); b->col[k*4+2]=(unsigned char)(cb>255?255:cb);
         }
     }
     free(stamp); g_mapAOsec=(float)(GetTime()-t0);

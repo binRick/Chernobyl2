@@ -960,8 +960,8 @@ int main(int argc, char **argv) {
     if (g_mapPath){                    // SPIKE: load a Xonotic .map's brush geometry
         g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
         int tt=0; for(int mi=0;mi<g_map.meshCount;mi++) tt+=g_map.meshes[mi].triangleCount;
-        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d,\"ao_sec\":%.2f",
-                 JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt, g_mapAOsec);
+        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d,\"lights\":%d,\"bake_sec\":%.2f",
+                 JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt, g_nMapLights, g_mapAOsec);
         if (!g_hasMap) TraceLog(LOG_WARNING,"map: failed to load %s", g_mapPath);
     }
     if (g_hasMap){                                    // start at a map spawn point, drop to the floor
