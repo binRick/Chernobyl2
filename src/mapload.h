@@ -206,7 +206,11 @@ static int      g_nMapLights = 0;
 #define NAV_CELL     0.8f    // grid cell size (raylib units)
 #define NAV_STEPUP   0.9f    // max climb between adjacent cells (also the connect threshold)
 #define NAV_STEPDOWN 1.6f    // max drop between adjacent cells
-#define NAV_WALLR    0.45f   // clearance from walls a cell needs to be walkable
+#define NAV_WALLR    0.50f   // wall clearance for a walkable nav cell. Tuned so enemies stand off walls by ~their visual width (no poking through thin dividers) while narrow stairs still survive (0.55 prunes them)
+#define NAV_CLEAR    1.80f   // headroom check: the up-ray starts 0.15m above the floor, so this prunes cells whose ceiling
+                             // is below ~1.95m -- just enough that a 1.85m enemy's head won't clip stair undersides/overhangs.
+                             // DON'T raise toward 1.9: the map has many ~2m ceilings the enemy fits under, and 1.9 prunes
+                             // ~40% of the walkable area (600->353), breaking navigation. 1.80 drops only the 6 head-clip cells.
 static int   g_navOK=0, g_navNX=0, g_navNZ=0, g_navPlayerCell=-1, g_navCount=0;
 static float g_navCS=NAV_CELL; static Vector3 g_navMn={0,0,0};
 static unsigned char *g_navWalk=NULL; static float *g_navFloor=NULL;
@@ -417,6 +421,8 @@ static void MapNavBuild(Vector3 seed){
             if (nh<h-NAV_STEPDOWN || nh>h+NAV_STEPUP) continue;            // too big a step
             if (MapSphereHitsWall((Vector3){wx,nh+0.9f,wz},NAV_WALLR)) continue;          // cell in a wall
             if (MapSphereHitsWall((Vector3){(ox+wx)*0.5f,(h+nh)*0.5f+0.9f,(oz+wz)*0.5f},NAV_WALLR)) continue; // wall between
+            float head=MapRayNearest((Vector3){wx,nh+0.15f,wz},(Vector3){0,1,0},NAV_CLEAR); // ceiling / stair underside above?
+            if (head>0.0f) continue;                                                       // too little headroom: an enemy wouldn't fit
             g_navWalk[ni]=1; g_navFloor[ni]=nh; g_navQueue[tail++]=ni;
         }
     }
@@ -453,26 +459,57 @@ static void MapNavUpdate(Vector3 player){
     }
 }
 
-// Steering direction (normalised XZ) toward the player along the flow field for
-// an enemy at `from`. Returns 0 if off-grid / unreachable / already at the
-// player's cell, so the caller can fall back to a straight beeline.
+#define NAV_WALLPUSH 1.0f   // how strongly walls repel the flow (distance-field units). Kept LOW: >=2.0 over-repels and
+                            // blocks narrow stair entrances (enemies can't reach the player); 1.0 matches the old reach
+                            // rate while still smoothing the path. Persistent wall-pressing/hand-clipping is handled by
+                            // the stuck-enemy back-off in UpdateEnemies, not by cranking this up.
+// Travel cost of nav cell (x,z) as seen from height h: the BFS distance to the
+// player, or a high "wall" penalty for off-grid / unwalkable / off-step cells so
+// the flow field curves AWAY from walls instead of aiming straight into them.
+static float MapNavCell(int x, int z, float h, float wall){
+    if (x<0||z<0||x>=g_navNX||z>=g_navNZ) return wall;
+    int ni=z*g_navNX+x;
+    if (!g_navWalk[ni] || g_navDist[ni]<0) return wall;
+    if (fabsf(g_navFloor[ni]-h)>NAV_STEPUP) return wall;
+    return (float)g_navDist[ni];
+}
+// Bilinearly-interpolated cost at a continuous world point -> smooth, not blocky.
+static float MapNavCostAt(float wx, float wz, float h, float wall){
+    float fx=(wx-g_navMn.x)/g_navCS-0.5f, fz=(wz-g_navMn.z)/g_navCS-0.5f;  // cell-centre space
+    int x0=(int)floorf(fx), z0=(int)floorf(fz);
+    float tx=fx-x0, tz=fz-z0;
+    float c00=MapNavCell(x0,z0,h,wall),   c10=MapNavCell(x0+1,z0,h,wall);
+    float c01=MapNavCell(x0,z0+1,h,wall), c11=MapNavCell(x0+1,z0+1,h,wall);
+    return (c00*(1.0f-tx)+c10*tx)*(1.0f-tz) + (c01*(1.0f-tx)+c11*tx)*tz;
+}
+// Smooth steering toward the player: follow the negative gradient of the distance
+// field (sampled bilinearly, with wall repulsion baked in). Continuous everywhere,
+// so it curves around corners instead of snapping to one of 8 neighbour cells and
+// jamming an enemy into a wall. Returns 0 off-grid / unreachable -> caller beelines.
 static int MapNavSteer(Vector3 from, Vector3 *dir){
     if (!g_navOK) return 0;
     int cx=(int)((from.x-g_navMn.x)/g_navCS), cz=(int)((from.z-g_navMn.z)/g_navCS);
     if (cx<0||cz<0||cx>=g_navNX||cz>=g_navNZ) return 0;
     int ci=cz*g_navNX+cx; if (!g_navWalk[ci]||g_navDist[ci]<0) return 0;
-    int best=g_navDist[ci], bx=cx, bz=cz; float h=g_navFloor[ci];
-    const int DX[8]={1,-1,0,0,1,1,-1,-1}, DZ[8]={0,0,1,-1,1,-1,1,-1};
-    for (int k=0;k<8;k++){
-        int x=cx+DX[k],z=cz+DZ[k]; if(x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
-        int ni=z*g_navNX+x; if (!g_navWalk[ni]||g_navDist[ni]<0) continue;
-        if (fabsf(g_navFloor[ni]-h)>NAV_STEPUP) continue;
-        if (g_navDist[ni]<best){ best=g_navDist[ni]; bx=x; bz=z; }
-    }
-    if (bx==cx && bz==cz) return 0;
-    float tx=g_navMn.x+(bx+0.5f)*g_navCS, tz=g_navMn.z+(bz+0.5f)*g_navCS;
-    float ddx=tx-from.x, ddz=tz-from.z, len=sqrtf(ddx*ddx+ddz*ddz); if (len<1e-4f) return 0;
-    *dir=(Vector3){ddx/len,0,ddz/len}; return 1;
+    float h=g_navFloor[ci], wall=(float)g_navDist[ci]+NAV_WALLPUSH, eps=g_navCS;
+    float e=MapNavCostAt(from.x+eps,from.z,h,wall), w=MapNavCostAt(from.x-eps,from.z,h,wall);
+    float s=MapNavCostAt(from.x,from.z+eps,h,wall), n=MapNavCostAt(from.x,from.z-eps,h,wall);
+    float sx=w-e, sz=n-s;                       // -gradient: toward lower cost (the player), away from walls
+    float len=sqrtf(sx*sx+sz*sz); if (len<1e-4f) return 0;
+    *dir=(Vector3){sx/len,0,sz/len}; return 1;
+}
+
+// True if world point p sits on a nav cell inside the player's connected, walkable
+// region (so enemies can't spawn sealed off behind a wall). When the player flow
+// field is current, also require the cell be reachable from where the player stands.
+static int MapNavReachable(Vector3 p){
+    if (!g_navOK) return 0;
+    int cx=(int)((p.x-g_navMn.x)/g_navCS), cz=(int)((p.z-g_navMn.z)/g_navCS);
+    if (cx<0||cz<0||cx>=g_navNX||cz>=g_navNZ) return 0;
+    int ci=cz*g_navNX+cx;
+    if (!g_navWalk[ci]) return 0;                       // not in the player's flood-filled region
+    if (g_navPlayerCell>=0 && g_navDist[ci]<0) return 0; // flow field built but this cell is cut off right now
+    return 1;
 }
 
 // Parse a .map and build a textured, multi-material raylib Model.

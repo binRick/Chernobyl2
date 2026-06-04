@@ -59,6 +59,18 @@ static void DebugLog(const char *ev, const char *fmt, ...) {
     if (fmt && fmt[0]) { va_list ap; va_start(ap, fmt); fputc(',', g_dbg); vfprintf(g_dbg, fmt, ap); va_end(ap); }
     fprintf(g_dbg, "}\n"); fflush(g_dbg);
 }
+// raylib trace-log filter: passes everything through to the default handler
+// EXCEPT the harmless "Indices data converted from u32 to u16" warning that the
+// glTF loader spams for every multi-thousand-vert model. Keeps the console clean
+// without hiding genuine warnings/errors.
+static void FilteredTraceLog(int logLevel, const char *text, va_list args){
+    if (text && strstr(text, "converted from u32 to u16")) return;
+    char buf[512];
+    vsnprintf(buf, sizeof buf, text, args);
+    const char *tag = (logLevel>=LOG_ERROR)?"ERROR: ":(logLevel==LOG_WARNING)?"WARNING: ":
+                      (logLevel==LOG_INFO)?"INFO: ":(logLevel==LOG_DEBUG)?"DEBUG: ":"";
+    fprintf(logLevel>=LOG_ERROR?stderr:stdout, "%s%s\n", tag, buf);
+}
 static const char *JStr(const char *s){
     static char b[96]; size_t j=0; if(!s)s="";
     for(size_t i=0;s[i]&&j<sizeof(b)-2;i++){char c=s[i]; if(c=='"'||c=='\\'){b[j++]='\\';b[j++]=c;} else if((unsigned char)c>=0x20)b[j++]=c;}
@@ -107,7 +119,14 @@ static int             g_animOnce = 0;          // current clip is a one-shot (R
 static float           g_fireCd = 0.0f;
 static float           g_recoil = 0.0f;         // 0..1 recoil kick on fire (decays); drives muzzle-up
 static int             g_burstLeft = 0;         // rounds remaining in the current burst (burst weapons)
-static float           g_spin = 0.0f;           // minigun barrel-spin rate 0..1 (drives its 'allanims' clip)
+static float           g_spin = 0.0f;           // minigun barrel-spin rate 0..1
+static float           g_mgSpinT = 0.0f;         // minigun: seconds the trigger's been held (spin-up timer)
+static float           g_shake = 0.0f;           // 0..1 minigun "brain shake": screen jitter + edge vignette
+#define MG_SPINUP 0.333f                          // barrel spins up for 1/3 s before bullets actually fire
+static float           g_mgBarrelAngle = 0.0f;   // minigun barrel-spin angle: the barrel is a rigid (un-rigged) mesh,
+                                                 // so it can't spin via the skeleton -- we rotate the geometry directly
+#define MG_BARREL_MESH 1                          // minigun.glb mesh index of "barrels_minigun_0"
+#define MG_IDLE_FRAME  0                          // 'allanims' frame to hold the arms at (a static grip)
 static float           g_mgHeat = 0.0f;         // seconds of continuous minigun fire (5s -> overheat)
 static int             g_mgLock = 0;            // minigun overheated: locked until trigger released
 static int             g_mgFiring = 0;          // minigun was firing last frame (edge detect for cooldown sound)
@@ -116,7 +135,9 @@ static int             g_lmgWasPlaying = 0;     // LMG: fire sound was playing l
 static Camera3D        g_vmCam;
 static int             g_inspect = 0;           // V: gun floats in the world
 static float           g_savedMsg = 0.0f;       // >0: flash a "SAVED" confirmation
+static float           g_spawnMsg = 0.0f;       // >0: flash a "SPAWN SET" confirmation
 static int             g_menu = 0;              // ESC: options/pause menu open (frees cursor, pauses)
+static int             g_paused = 0;            // P: pause the game (freezes the world, keeps mouse captured)
 static int             g_fullscreen = 0;        // borderless monitor-fill on/off (set via the menu, persisted)
 static int             g_quit = 0;              // menu Quit -> break the main loop
 static Vector3         g_gunCentroid = { 0, 0, 0 };  // gun centroid (bind or posed), measured ONCE at load
@@ -181,6 +202,10 @@ static Weapon g_weapons[16];
 static int    g_curWeapon = 0;
 static int    g_numWeapons = 0;
 static int    g_audio = 0;                       // audio device ready (sounds load/play only when set)
+static Sound  g_deathSnd[8];                      // one is played at random on every enemy kill
+static int    g_nDeathSnd = 0;
+static Sound  g_attackSnd;                         // played when an enemy lunges into an attack
+static int    g_hasAttackSnd = 0;
 
 static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll){
     FILE *f=fopen(path,"w"); if(!f) return;
@@ -193,6 +218,18 @@ static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, fl
     int n=fscanf(f,"%f %f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt,&rl);
     fclose(f);
     if(n>=6){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; *roll=(n>=7)?rl:0.0f; return 1; }
+    return 0;
+}
+// Custom player spawn (F2 saves your current pose; loaded at startup to override the
+// map's spawn). Per-machine local content, like the weapon tune files.
+static void SaveSpawn(Vector3 pos, float yaw, float pitch){
+    FILE *f=fopen("spawn.txt","w"); if(!f) return;
+    fprintf(f,"%.4f %.4f %.4f %.4f %.4f\n", pos.x,pos.y,pos.z,yaw,pitch); fclose(f);
+}
+static int LoadSpawn(Vector3 *pos, float *yaw, float *pitch){
+    FILE *f=fopen("spawn.txt","r"); if(!f) return 0;
+    float x,y,z,yw,pt; int n=fscanf(f,"%f %f %f %f %f",&x,&y,&z,&yw,&pt); fclose(f);
+    if(n==5){ *pos=(Vector3){x,y,z}; *yaw=yw; *pitch=pt; return 1; }
     return 0;
 }
 // Copy the live working-set tuning back into the current slot (call before a switch/quit).
@@ -212,7 +249,7 @@ static void ActivateWeapon(int n){
     g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
     g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch; g_vmRoll=w->roll;
     g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
-    g_burstLeft=0; g_spin=0.0f; g_mgHeat=0.0f; g_mgLock=0; g_mgFiring=0; g_lmgPause=0.0f; g_lmgWasPlaying=0;   // reset fire-mode state
+    g_burstLeft=0; g_spin=0.0f; g_mgBarrelAngle=0.0f; g_mgSpinT=0.0f; g_shake=0.0f; g_mgHeat=0.0f; g_mgLock=0; g_mgFiring=0; g_lmgPause=0.0f; g_lmgWasPlaying=0;   // reset fire-mode state
 }
 static void SwitchWeapon(int n){
     if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
@@ -335,11 +372,56 @@ static void LoadWeaponAux(int slot, const char *path, const char *alt){
 
 // ---- Tracers + impact sparks ------------------------------------------------
 typedef struct { Vector3 a, b; float life; } Tracer;
-typedef struct { Vector3 pos, vel; float life, life0, size, rest; Color col; int blood; } Spark; // rest=floor Y; blood=1 persists
+typedef struct { Vector3 pos, vel; float life, life0, size, rest; Color col; int blood, lasting, pool; float ix, iz; unsigned int seed; } Spark; // rest=floor Y; blood=1 draws as a liquid streak; lasting=1 settles into spatter; pool=1 is a flat continuous stain at the body's feet; seed=stable jitter
 #define MAX_TRACERS 32
 #define MAX_SPARKS  4096
 static Tracer g_tracers[MAX_TRACERS];
 static Spark  g_sparks[MAX_SPARKS];
+
+// Minigun barrel smoke/steam: soft camera-facing billboards that rise, expand and fade.
+// hot=1 firing (darker, faster gunsmoke); hot=0 spin-down/cooling (white steam).
+typedef struct { Vector3 pos, vel; float life, life0, sz0, sz1; int hot; } Smoke;
+#define MAX_SMOKE 384
+static Smoke      g_smoke[MAX_SMOKE];
+static Texture2D  g_smokeTex;            // soft radial-gradient puff
+static int        g_hasSmokeTex = 0;
+static void SpawnSmoke(Vector3 o, int hot){
+    for (int s=0;s<MAX_SMOKE;s++){
+        if (g_smoke[s].life>0) continue;
+        Smoke p={0};
+        p.pos=o;
+        p.pos.x += GetRandomValue(-2,2)/100.0f; p.pos.y += GetRandomValue(-2,2)/100.0f; p.pos.z += GetRandomValue(-2,2)/100.0f; // tight emission point
+        p.vel=(Vector3){ GetRandomValue(-10,10)/100.0f, 0.30f+GetRandomValue(0,30)/100.0f, GetRandomValue(-10,10)/100.0f };     // finer column, less spread
+        if (hot) p.vel.y += 0.30f;                              // gunsmoke puffs up faster
+        p.life0 = (hot? 0.50f:1.00f) + GetRandomValue(0,55)/100.0f;
+        p.life=p.life0;
+        p.sz0 = 0.018f + GetRandomValue(0,2)/100.0f;            // small, fine particles at the muzzle
+        p.sz1 = (hot?0.12f:0.20f) + GetRandomValue(0,8)/100.0f; // billow out modestly as they age
+        p.hot = hot;
+        g_smoke[s]=p; return;
+    }
+}
+static void UpdateSmoke(float dt){
+    for (int s=0;s<MAX_SMOKE;s++){ Smoke *p=&g_smoke[s]; if (p->life<=0) continue;
+        p->life -= dt;
+        p->vel.y += 0.5f*dt;                                   // buoyancy
+        p->vel.x *= (1.0f-1.6f*dt); p->vel.z *= (1.0f-1.6f*dt);// drag
+        p->pos = Vector3Add(p->pos, Vector3Scale(p->vel,dt));
+    }
+}
+static void DrawSmoke(Camera3D cam){
+    if (!g_hasSmokeTex) return;
+    rlDisableDepthMask();                                      // particles blend, don't occlude each other
+    for (int s=0;s<MAX_SMOKE;s++){ Smoke *p=&g_smoke[s]; if (p->life<=0) continue;
+        float age=1.0f-p->life/p->life0;                       // 0..1
+        float sz=p->sz0+(p->sz1-p->sz0)*age;
+        float fade=p->life/p->life0; fade*=fade;               // ease-out fade
+        unsigned char g=p->hot?90:205;                         // gunsmoke grey vs white steam
+        Color tint={g,g,g,(unsigned char)(fade*(p->hot?150:120))};
+        DrawBillboard(cam, g_smokeTex, p->pos, sz, tint);
+    }
+    rlEnableDepthMask();
+}
 
 // ---- Enemies (assets/enemy.glb - Mixamo walk rig, 37 bones, verified) -------
 // One shared Model drawn many times; each enemy keeps its own animation cursor
@@ -352,6 +434,9 @@ static Spark  g_sparks[MAX_SPARKS];
 #define ENEMY_HP           100.0f
 #define ENEMY_DMG_PER_SHOT 34.0f      // ~3 shots to kill
 #define ENEMY_RADIUS       0.5f
+#define ENEMY_MOVE_R       0.48f      // movement collision radius: kept just BELOW NAV_WALLR (fits everywhere nav routes) but near the visual width so the body does not poke through walls
+#define ENEMY_HANDS_R      0.70f      // body+arms reach: a stuck/idling enemy eases back until walls are this far, so its animated hands stop poking through
+                                      // fits everywhere the nav graph routes it (no jamming in tight cells / on stairs)
 #define ENEMY_HEIGHT       1.85f
 #define ENEMY_YAW_OFFSET   0.0f       // tune if they face the wrong way
 #define ENEMY_TOUCH_DMG    18.0f      // player hp/sec when an enemy is in melee
@@ -364,7 +449,7 @@ static Spark  g_sparks[MAX_SPARKS];
 #define HEAD_ZONE_H        0.32f      // vertical extent of the head box (down from the top)
 #define HEAD_RADIUS        0.22f      // half-width of the head box (tighter than the body)
 #define HEADSHOT_MULT      3.0f       // headshot damage multiplier
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; } Enemy; // state: 0 dead,1 alive,2 dying
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; } Enemy; // state: 0 dead,1 alive,2 dying; roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn)
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
 typedef struct { Vector3 pos; float yaw; int active; } Corpse;   // lasting dead bodies, posed at the death-anim end
@@ -374,6 +459,8 @@ static Model           g_enemy;
 static ModelAnimation *g_enemyAnim = NULL;
 static int             g_enemyAnimN = 0;
 static int g_eWalk=0, g_eIdle=0, g_eRun=0, g_eHit=0, g_eAttack=0, g_eDeath=0; // clips resolved by name at load
+static int g_eDeathFrame=0;   // frame to freeze the death clip at: its LAST keyframe often loops back to the standing
+                              // start pose, so corpses must settle on an earlier "body on the floor" frame instead
 static int             g_hasEnemy = 0;
 static int             g_kills = 0;
 static int             g_headshots = 0;        // running headshot-kill tally (HUD)
@@ -385,21 +472,47 @@ static int             g_noclip = 0;            // map mode: F toggles free-fly 
 static void EnemyArm(int i, Vector3 pos){       // common: bring enemy i to life at pos
     g_enemies[i].pos=pos; g_enemies[i].hp=ENEMY_HP; g_enemies[i].state=1;
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
-    g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun;
+    g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun; g_enemies[i].roarT=0; g_enemies[i].drawY=pos.y;
+    g_enemies[i].stuckT=0; g_enemies[i].embedT=0;
 }
-// Map spawn: ring around the player, dropped onto the floor under each spot;
-// only accept floors near the player's level (not a roof or a far-below pit).
+// A spawn spot is good only if it's near the player's level, inside the player's
+// walkable nav region (not sealed off behind a wall), AND has body clearance so the
+// enemy isn't jammed in a corner where it can't move (the random point can sit nearer
+// a wall than the nav cell centre, so re-check the actual sphere here).
+static int EnemySpawnOK(float x, float fy, float z){
+    return fabsf(fy-(g_pos.y-EYE_H))<6.0f
+        && MapNavReachable((Vector3){x,fy,z})
+        && !MapSphereHitsWall((Vector3){x,fy+0.9f,z},ENEMY_MOVE_R);   // body fits (same radius it moves with)
+}
+// Map spawn: a ring around the player, dropped onto the floor under each spot.
 static void SpawnEnemyMap(int i){
-    for (int t=0;t<16;t++){
+    for (int t=0;t<40;t++){
         float ang=(float)GetRandomValue(0,628)/100.0f;
         float dist=6.0f+GetRandomValue(0,90)/10.0f;          // 6..15 units out
         float x=g_pos.x+cosf(ang)*dist, z=g_pos.z+sinf(ang)*dist;
         float top=g_pos.y+8.0f;
         float fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
-        if (fd>0){ float fy=top-fd;
-            if (fabsf(fy-(g_pos.y-EYE_H))<6.0f){ EnemyArm(i,(Vector3){x,fy,z}); return; } }
+        if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z}); return; } }
     }
-    EnemyArm(i,(Vector3){g_pos.x+2.0f, g_pos.y-EYE_H, g_pos.z});   // fallback: by the player
+    // ring failed: scan outward from the player for any reachable, roomy cell.
+    for (int rad=2; rad<14; rad++) for (int a=0;a<16;a++){
+        float ang=a*0.3927f, x=g_pos.x+cosf(ang)*rad, z=g_pos.z+sinf(ang)*rad;
+        float top=g_pos.y+8.0f, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
+        if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z}); return; } }
+    }
+    // nothing valid near the player (e.g. player is off the nav mesh in a tight nook):
+    // drop the enemy on a RANDOM walkable nav cell -- a guaranteed collision-free,
+    // navigable spot -- instead of blindly next to the player (which may be inside a wall).
+    if (g_navOK){
+        for (int t=0;t<400;t++){
+            int cx=GetRandomValue(0,g_navNX-1), cz=GetRandomValue(0,g_navNZ-1), ci=cz*g_navNX+cx;
+            if (g_navWalk[ci]){
+                EnemyArm(i,(Vector3){ g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[ci], g_navMn.z+(cz+0.5f)*g_navCS });
+                return;
+            }
+        }
+    }
+    EnemyArm(i,(Vector3){g_pos.x, g_pos.y-EYE_H, g_pos.z});        // absolute fallback: the player's own (occupied) spot
 }
 static void SpawnEnemy(int i){
     if (g_hasMap && g_mapCol.ready){ SpawnEnemyMap(i); return; }
@@ -441,12 +554,29 @@ static void SpawnBlood(Vector3 p, Vector3 dir, float intensity, float floorY) {
         Vector3 v={ dir.x*4.5f + GetRandomValue(-100,100)/100.0f*spread,
                     dir.y*4.5f + GetRandomValue(-100,100)/100.0f*spread + 1.7f,
                     dir.z*4.5f + GetRandomValue(-100,100)/100.0f*spread };
-        int gob=(i%5==0);                                  // heavy gobs: slower, bigger, redder, and LASTING
+        int gob=(i%5==0);                                  // heavy gobs: slower, redder, and LASTING (settle into spatter)
         if (gob){ v.x*=0.45f; v.y=v.y*0.45f+0.4f; v.z*=0.45f; }
         float lf = 1.1f + GetRandomValue(0,120)/100.0f;
-        float sz = gob ? (0.055f+GetRandomValue(0,5)/100.0f) : (0.022f+GetRandomValue(0,3)/100.0f);
-        Spark sp={0}; sp.pos=p; sp.vel=v; sp.life=lf; sp.life0=lf; sp.size=sz; sp.rest=floorY; sp.blood=gob;
+        // small droplets: in flight they render as thin streaks, not balls. Settled
+        // gobs leave only FINE spatter dots -- the continuous pool below carries the volume.
+        float sz = gob ? (0.016f+GetRandomValue(0,10)/1000.0f) : (0.010f+GetRandomValue(0,8)/1000.0f);
+        Spark sp={0}; sp.pos=p; sp.vel=v; sp.life=lf; sp.life0=lf; sp.size=sz; sp.rest=floorY; sp.blood=1; sp.lasting=gob;
+        sp.seed=(unsigned int)GetRandomValue(1,1<<30);     // stable per-splat outline jitter
         sp.col=(Color){ (unsigned char)(150+GetRandomValue(0,105)), (unsigned char)GetRandomValue(0,28), (unsigned char)GetRandomValue(0,18), 255 };
+        g_sparks[s]=sp;
+        break;
+    }
+    // A flat continuous pool stain spreading from the body's feet -- this is what
+    // reads as "liquid"; the flying gobs above just stipple fine spatter around it.
+    for (int s=0;s<MAX_SPARKS;s++){
+        if (g_sparks[s].life>0) continue;
+        Spark sp={0};
+        sp.pos=(Vector3){p.x, floorY+0.02f, p.z}; sp.vel=(Vector3){0,0,0};   // born settled on the floor
+        sp.life=1e9f; sp.life0=1e9f; sp.rest=floorY;
+        sp.blood=1; sp.lasting=1; sp.pool=1;
+        sp.size=0.20f+0.11f*intensity;                     // pool radius; headshots pool wider
+        sp.seed=(unsigned int)GetRandomValue(1,1<<30);
+        sp.col=(Color){ (unsigned char)(105+GetRandomValue(0,35)), (unsigned char)GetRandomValue(0,12), (unsigned char)GetRandomValue(0,8), 255 };
         g_sparks[s]=sp;
         break;
     }
@@ -522,7 +652,9 @@ static void Fire(Camera3D cam) {
         if (head) g_hsFlash=1.1f;                         // flash "HEADSHOT!" on any head hit
         if (g_enemies[ei].hp<=0){
             g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0;
+            g_enemies[ei].drawY=g_enemies[ei].pos.y;      // settle the render height so the corpse doesn't pop
             g_kills++; if (head) g_headshots++;           // tally a confirmed headshot kill
+            if (g_audio && g_nDeathSnd>0) PlaySound(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)]);   // random death sound
         } else {
             g_enemies[ei].hitT=0.45f;                     // non-fatal hit -> flinch
         }
@@ -539,39 +671,116 @@ static void Fire(Camera3D cam) {
     DebugLog("fire","\"enemy\":%d,\"head\":%d,\"end\":[%.2f,%.2f,%.2f]", ei, head, end.x,end.y,end.z);
 }
 
-// Move enemy i by (mx,mz), blocked per-axis against map walls. Both the chase
-// and the enemy-vs-enemy separation go through here, so nothing shoves an enemy
-// through a wall (separation used to move them with no wall check at all).
+// Can the enemy stand at (x,z) coming from height curY? The spot must have a floor
+// that's a sane STEP UP (<=ENEMY_STEP) or DROP DOWN (<=ENEMY_MAXDROP, ~a flight of
+// stairs) -- NOT off a ledge into the void -- and be clear of walls. This single test
+// drives all enemy movement, so they slide along walls, climb stairs, and crucially
+// REFUSE to walk forward off a ledge (they'll follow the nav path around instead).
+#define ENEMY_STEP    0.7f    // max riser an enemy can step up (matches the player's auto-step)
+#define ENEMY_MAXDROP 1.6f    // max drop it will step down (== NAV_STEPDOWN); bigger = a ledge, don't walk off
+static int EnemyMoveOK(float x, float z, float curY){
+    if (!g_mapCol.ready) return 1;
+    float top=curY+ENEMY_STEP, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},40.0f);
+    if (fd<=0) return 0;                                // no floor under the spot -> the void
+    float ny=top-fd;                                   // destination floor height
+    if (ny>curY+ENEMY_STEP)    return 0;               // riser too tall to step up
+    if (ny<curY-ENEMY_MAXDROP) return 0;               // drop too big -> a ledge, don't walk off it
+    return !MapSphereHitsWall((Vector3){x,ny+0.9f,z},ENEMY_MOVE_R);  // clear where it'd stand
+}
+// Move enemy i by (mx,mz), per-axis -- nothing walks through walls OR off ledges. Both
+// the chase and the enemy-vs-enemy separation go through here.
 static void EnemyNudge(int i, float mx, float mz){
     Enemy *e=&g_enemies[i];
     if (g_hasMap && g_mapCol.ready){
-        float by=e->pos.y+0.9f;
-        if (!MapSphereHitsWall((Vector3){e->pos.x+mx,by,e->pos.z},0.5f)) e->pos.x+=mx;
-        if (!MapSphereHitsWall((Vector3){e->pos.x,by,e->pos.z+mz},0.5f)) e->pos.z+=mz;
+        if (EnemyMoveOK(e->pos.x+mx, e->pos.z, e->pos.y)) e->pos.x+=mx;
+        if (EnemyMoveOK(e->pos.x, e->pos.z+mz, e->pos.y)) e->pos.z+=mz;
     } else { e->pos.x+=mx; e->pos.z+=mz; }
 }
 
 // Walk alive enemies toward the player; advance death timers; melee on contact.
 static void UpdateEnemies(float dt){
     if (!g_hasEnemy) return;
+    int prevCell = g_navPlayerCell;
     if (g_hasMap) MapNavUpdate(g_pos);                 // refresh the flow field if the player moved cells
+    int flowChanged = (g_navPlayerCell != prevCell);   // player crossed into a new cell -> paths changed
     for (int i=0;i<MAX_ENEMIES;i++){
         Enemy *e=&g_enemies[i];
         if (e->state==1){
             float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;
             float d=sqrtf(dx*dx+dz*dz);
             if (e->hitT>0) e->hitT-=dt;
-            // clip priority: flinch > attack (in melee range) > run (chasing)
-            int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : g_eRun);
-            if (want!=e->clip){ e->clip=want; e->animT=0; }
-            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE){           // chase: follow the nav flow field, else beeline
+            if (e->roarT>0) e->roarT-=dt;
+            // "Running in place" = it's trying to chase but the wall won't let it move at
+            // all (an unreachable spot). stuckT accrues only while it tries-but-can't-move
+            // (updated in the chase block below); a NAVIGATING enemy moves every frame even
+            // when it curves around, so this never false-flags it. flowChanged resets it.
+            if (flowChanged) e->stuckT=0.0f;
+            int stuck = (g_hasMap && e->stuckT > 1.0f);
+            // self-heal: if the body is wedged INSIDE wall geometry (spawned/pushed into an
+            // impossible spot, e.g. clipping through a wall) it can never free itself ->
+            // respawn it somewhere valid. Tracked independently of chase state, so it also
+            // fires when the enemy is jammed in a wall right next to the player (attack range).
+            if (g_mapCol.ready && MapSphereHitsWall((Vector3){e->pos.x, e->pos.y+0.9f, e->pos.z}, 0.35f)){
+                e->embedT += dt;
+                if (e->embedT > 0.8f){ SpawnEnemy(i); continue; }   // SpawnEnemy always picks a navigable cell now
+            } else e->embedT = 0.0f;
+            // clip priority: flinch > attack (in melee range) > idle-when-stuck > run (chasing)
+            int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : (stuck ? g_eIdle : g_eRun));
+            if (want!=e->clip){
+                if (want==g_eAttack && e->roarT<=0 && g_audio && g_hasAttackSnd){   // lunging into an attack -> roar
+                    PlaySound(g_attackSnd); e->roarT=2.5f;                          // cooldown so it doesn't spam at the range edge
+                }
+                e->clip=want; e->animT=0;
+            }
+            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE && !stuck){ // chase: follow the nav flow field, else beeline
                 Vector3 sd; float mx=dx/d, mz=dz/d;
                 if (g_hasMap && MapNavSteer(e->pos,&sd)){ mx=sd.x; mz=sd.z; }
-                EnemyNudge(i, mx*ENEMY_SPEED*dt, mz*ENEMY_SPEED*dt);
+                float step=ENEMY_SPEED*dt; Vector3 b4=e->pos;
+                EnemyNudge(i, mx*step, mz*step);
+                // wedged (the steer heads into a wall and per-axis collision blocks BOTH
+                // axes)? sweep the heading outward to either side -- nearest angle first --
+                // until one frees up, so the enemy slides out of corners instead of running
+                // in place. Goes out to ±150° to escape concave pockets.
+                if (g_hasMap && fabsf(e->pos.x-b4.x)<1e-5f && fabsf(e->pos.z-b4.z)<1e-5f){
+                    const float ANG[10]={0.524f,-0.524f, 1.047f,-1.047f, 1.571f,-1.571f, 2.094f,-2.094f, 2.618f,-2.618f}; // ±30,60,90,120,150
+                    for (int k=0;k<10;k++){
+                        float c=cosf(ANG[k]), s=sinf(ANG[k]);
+                        EnemyNudge(i, (mx*c-mz*s)*step, (mx*s+mz*c)*step);
+                        if (fabsf(e->pos.x-b4.x)>1e-5f || fabsf(e->pos.z-b4.z)>1e-5f) break;
+                    }
+                }
+                // tried to chase this frame: if it barely moved, it's grinding a wall; if it
+                // moved at all (even sliding/curving), it's making its way -> not stuck.
+                float mv=(e->pos.x-b4.x)*(e->pos.x-b4.x)+(e->pos.z-b4.z)*(e->pos.z-b4.z);
+                if (mv < 0.0004f) e->stuckT += dt; else e->stuckT = 0.0f;   // 0.02 units/frame threshold
+            }
+            if (g_hasMap && stuck && e->hitT<=0 && d>ENEMY_ATTACK_RANGE){
+                // stuck against a wall and idling -> ease back so the animated HANDS stop
+                // poking through it. Drift toward whichever directions clear a hands-radius
+                // sphere; settles once the body+arms no longer overlap the wall.
+                float by=e->pos.y+0.9f;
+                if (MapSphereHitsWall((Vector3){e->pos.x,by,e->pos.z},ENEMY_HANDS_R)){
+                    float ox=0,oz=0;
+                    const float A[8]={0.0f,0.785f,1.571f,2.356f,3.142f,3.927f,4.712f,5.498f};
+                    for (int k=0;k<8;k++){ float cxx=cosf(A[k]),czz=sinf(A[k]);
+                        if (!MapSphereHitsWall((Vector3){e->pos.x+cxx*0.3f,by,e->pos.z+czz*0.3f},ENEMY_HANDS_R)){ ox+=cxx; oz+=czz; } }
+                    float l=sqrtf(ox*ox+oz*oz);
+                    if (l>1e-4f) EnemyNudge(i, ox/l*ENEMY_SPEED*dt*0.6f, oz/l*ENEMY_SPEED*dt*0.6f);
+                }
             }
             if (g_hasMap && g_mapCol.ready){                   // keep the enemy standing on the map floor
-                float top=e->pos.y+4.0f, fd=MapRayNearest((Vector3){e->pos.x,top,e->pos.z},(Vector3){0,-1,0},40.0f);
+                // look down from only a step above the feet, not 4m up -- otherwise the
+                // snap can grab an overhead landing and wedge the enemy under the stairs.
+                float top=e->pos.y+ENEMY_STEP, fd=MapRayNearest((Vector3){e->pos.x,top,e->pos.z},(Vector3){0,-1,0},40.0f);
                 if (fd>0) e->pos.y=top-fd;
+            }
+            // ease the RENDER height toward the real floor so stair steps ramp smoothly
+            // instead of popping; snap on big jumps (spawn / falling off a ledge). Clamp
+            // the climb side so the feet ride ON each step, never sunk under it.
+            if (fabsf(e->pos.y-e->drawY)>1.5f) e->drawY=e->pos.y;
+            else {
+                e->drawY += (e->pos.y-e->drawY)*(1.0f-expf(-16.0f*dt));
+                if (e->drawY < e->pos.y-0.03f) e->drawY = e->pos.y-0.03f;   // feet never sink into the stairs
             }
             if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
             if (g_enemyAnimN>0){                               // advance current clip (looping)
@@ -580,13 +789,13 @@ static void UpdateEnemies(float dt){
                 e->animT+=dt*spd;
                 if (nf>0 && e->animT>=nf) e->animT-=nf;
             }
-        } else if (e->state==2){                              // dying: play the death anim THROUGH, then leave a corpse
-            int nf = (g_enemyAnimN>0) ? ANIM_FRAMES(g_enemyAnim[g_eDeath]) : 0;
-            if (nf>0){ e->animT+=dt*60.0f; if (e->animT>(float)(nf-1)) e->animT=(float)(nf-1); }
+        } else if (e->state==2){                              // dying: play the death anim to its settle frame, then leave a corpse
+            int nf = (g_enemyAnimN>0) ? g_eDeathFrame : 0;     // stop at the "on the floor" frame, not the spring-back last frame
+            if (nf>0){ e->animT+=dt*60.0f; if (e->animT>(float)nf) e->animT=(float)nf; }
             e->deathT+=dt;
-            // wait until the death anim has actually finished (body settled on the floor),
+            // wait until the death anim has actually settled (body on the floor),
             // not a fixed timer -- otherwise the corpse is recorded mid-fall.
-            if ((nf<=0 || e->animT>=(float)(nf-1)) && e->deathT>0.2f){
+            if ((nf<=0 || e->animT>=(float)nf) && e->deathT>0.2f){
                 float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
                 g_corpses[g_corpseNext]=(Corpse){ e->pos, yaw, 1 };   // lasting body, posed at the final death frame
                 g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
@@ -700,6 +909,14 @@ static void Update(void) {
         return;
     }
 
+    // P pauses/unpauses the game: the gameplay update is skipped (early return) so
+    // the world freezes, but the cursor stays captured so play resumes seamlessly.
+    if (IsKeyPressed(KEY_P)){
+        g_paused=!g_paused;
+        DebugLog("pause","\"paused\":%s", g_paused?"true":"false");
+    }
+    if (g_paused) return;
+
     // Keep the mouse captured the whole time we're playing. macOS releases the
     // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
     // re-grab it the instant we have focus again and it's become visible.
@@ -763,7 +980,18 @@ static void Update(void) {
     // smoothed eye height so stairs glide instead of popping
     if (g_eyeSmooth!=0.0f){ g_eyeSmooth -= g_eyeSmooth*fminf(1.0f,dt*14.0f); if (fabsf(g_eyeSmooth)<0.002f) g_eyeSmooth=0.0f; }
     Vector3 eye=g_pos; eye.y-=g_eyeSmooth;
+    if (g_shake>0.001f){                                   // minigun brain-shake: jitter the head a touch
+        float a=g_shake*0.055f;
+        eye.x += GetRandomValue(-1000,1000)/1000.0f*a;
+        eye.y += GetRandomValue(-1000,1000)/1000.0f*a;
+        eye.z += GetRandomValue(-1000,1000)/1000.0f*a;
+    }
     g_cam.position=eye; g_cam.target=Vector3Add(eye,fwd); g_cam.up=(Vector3){0,1,0};
+    if (g_shake>0.001f){                                   // plus a little look-direction wobble
+        float a=g_shake*0.03f;
+        g_cam.target.x += GetRandomValue(-1000,1000)/1000.0f*a;
+        g_cam.target.y += GetRandomValue(-1000,1000)/1000.0f*a;
+    }
 
     // shooting / reload
     if (g_fireCd>0) g_fireCd-=dt;
@@ -788,23 +1016,40 @@ static void Update(void) {
         }
     }
 
-    // minigun: full-auto with a hard 5s cap -> overheat (locked until release) +
-    // cooldown sound. The model has no barrel-spin rig, so there's no visible spin.
+    // minigun: hold the trigger -> the barrel SPINS UP for MG_SPINUP (1/3 s) with no
+    // bullets, then once it's at speed it fires full-auto (hard 5s cap -> overheat +
+    // cooldown sound). Firing also drives g_shake (screen jitter + edge vignette).
     if (cw->spinUp){
         if (!lmb) g_mgLock=0;                              // releasing clears the overheat lock
-        int fire = lmb && !g_reloading && !g_mgLock;
-        if (fire){
-            g_spin=fminf(1.0f, g_spin+dt*2.0f);            // barrel spins up (~0.5s to full)
-            firingNow=1; Fire(g_cam); g_mgHeat+=dt;
-            if (g_audio && cw->hasAuxSnd && IsSoundPlaying(cw->auxSnd)) StopSound(cw->auxSnd);  // firing again -> cut cooldown
-            if (g_mgHeat>=5.0f) g_mgLock=1;                // overheated after 5s
+        int trigger = lmb && !g_reloading && !g_mgLock;
+        if (trigger){
+            g_mgSpinT += dt;
+            g_spin = fminf(1.0f, g_mgSpinT/MG_SPINUP);     // barrel accelerates, reaching full at MG_SPINUP
+            if (g_audio && cw->hasAuxSnd && IsSoundPlaying(cw->auxSnd)) StopSound(cw->auxSnd);  // revving -> cut cooldown
+            if (g_mgSpinT >= MG_SPINUP){                   // AT SPEED -> actually shoot bullets
+                firingNow=1; Fire(g_cam); g_mgHeat+=dt;
+                if (g_mgHeat>=5.0f) g_mgLock=1;            // overheated after 5s of fire
+            }
+            g_shake = fminf(1.0f, g_shake + dt*3.5f);      // brain-shake builds as it revs + fires
         } else {
             if (g_mgFiring && g_spin>0.3f && g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd);   // just stopped -> cooldown sound
+            g_mgSpinT=0.0f;
             g_spin=fmaxf(0.0f, g_spin-dt*0.5f);            // barrel spins down (~2s to stop)
             if (g_spin<=0.0f && g_audio && cw->hasAuxSnd && IsSoundPlaying(cw->auxSnd)) StopSound(cw->auxSnd);  // stopped -> cut sound
             g_mgHeat=0.0f;
+            g_shake=fmaxf(0.0f, g_shake-dt*4.0f);
         }
-        g_mgFiring=fire;
+        g_mgFiring = (trigger && g_mgSpinT>=MG_SPINUP);    // "firing" = actually shooting (drives the cooldown-sound edge)
+        // smoke/steam out of the spinning barrels: thick gunsmoke while firing, lighter
+        // steam while the barrel spins down and cools. Emitted at the muzzle in world space.
+        if (g_spin>0.02f){
+            Vector3 upv=Vector3CrossProduct(right,fwd);                          // camera up
+            Vector3 muzzle=Vector3Add(g_pos, Vector3Add(Vector3Scale(fwd,1.1f), Vector3Scale(upv,-0.08f))); // dead-centre of the barrel, a hair low
+            if (g_mgFiring){ for(int q=0;q<4;q++) SpawnSmoke(muzzle,1); }        // firing: a dense fine stream
+            else if (GetRandomValue(0,1)==0) SpawnSmoke(muzzle,0);              // spin-down/cooling: light steam
+        }
+    } else {
+        g_shake=fmaxf(0.0f, g_shake-dt*4.0f);              // any other weapon -> shake fades out
     }
 
     // LMG: fires while its (one-shot) sound plays, then a fixed pause before the
@@ -827,6 +1072,7 @@ static void Update(void) {
     }
 
     UpdateEnemies(dt);
+    UpdateSmoke(dt);
 
     // advance weapon animation. idle = HOLD the last frame of Take (static ready
     // pose, no wandering). One-shot clips (Shoot/Reload) play through, then snap
@@ -834,9 +1080,13 @@ static void Update(void) {
     if (g_gunAnimN>0 && g_curAnim<g_gunAnimN){
         int nf=ANIM_FRAMES(g_gunAnim[g_curAnim]);
         if (g_weapons[g_curWeapon].spinUp && g_curAnim==g_aIdle && !g_animOnce){
-            // minigun: spin the barrel by playing its 'allanims' clip at a rate
-            // set by g_spin (0=stopped). Loops; winds down to a stop on cooldown.
-            if (nf>0){ g_animT += dt*g_spin*500.0f; while (g_animT>=(float)nf) g_animT-=(float)nf; }
+            // minigun: the barrel mesh is rigid (not skinned) and 'allanims' only
+            // animates the arms -- so scrubbing it just flails the hands. Instead
+            // HOLD the arms at a static grip and spin the barrel geometrically
+            // (DrawViewmodel rotates the barrel mesh by g_mgBarrelAngle).
+            g_animT = (nf>0) ? (float)MG_IDLE_FRAME : 0.0f;
+            g_mgBarrelAngle += dt*g_spin*42.0f;            // ~6.7 rev/s at full spin-up
+            if (g_mgBarrelAngle>2.0f*PI) g_mgBarrelAngle-=2.0f*PI;
         } else if (g_curAnim==g_aIdle && !g_animOnce){
             g_animT = nf>0 ? (float)(nf-1) : 0.0f;   // freeze on the drawn/ready frame
         } else {
@@ -892,6 +1142,14 @@ static void Update(void) {
                  g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].tunePath);
     }
     if (g_savedMsg>0) g_savedMsg-=GetFrameTime();
+    // H ("home"): remember the current spot+facing as the player spawn (written to
+    // spawn.txt, loaded at startup). Press it where you want to start next launch.
+    // (F2 also works, but macOS eats the function keys, so H is the real bind.)
+    if (IsKeyPressed(KEY_H) || IsKeyPressed(KEY_F2)){
+        SaveSpawn(g_pos,g_yaw,g_pitch); g_spawnMsg=2.0f;
+        DebugLog("spawnsave","\"pos\":[%.2f,%.2f,%.2f],\"yaw\":%.3f,\"pitch\":%.3f", g_pos.x,g_pos.y,g_pos.z,g_yaw,g_pitch);
+    }
+    if (g_spawnMsg>0) g_spawnMsg-=GetFrameTime();
 
     // live viewmodel tuning (faster in orient mode so a mispositioned weapon is
     // easy to sweep back into frame)
@@ -923,14 +1181,16 @@ static void Update(void) {
         Spark *sp=&g_sparks[i];
         int resting=(sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0 && sp->pos.y<=sp->rest+0.03f);
         if (resting){
-            if (!sp->blood) sp->life-=dt;          // impact glints fade; blood puddles stay put
+            if (!sp->lasting) sp->life-=dt;        // glints + fine spray fade; lasting blood puddles stay put
         } else {
             sp->life-=dt;
             sp->vel.y-=12.0f*dt;
             sp->pos=Vector3Add(sp->pos,Vector3Scale(sp->vel,dt));
             if (sp->pos.y<=sp->rest){              // hit the floor -> settle
+                float hl=sqrtf(sp->vel.x*sp->vel.x+sp->vel.z*sp->vel.z);  // keep the horizontal heading for a directional splat
+                if (hl>0.001f){ sp->ix=sp->vel.x/hl; sp->iz=sp->vel.z/hl; }
                 sp->pos.y=sp->rest+0.015f; sp->vel=(Vector3){0,0,0};
-                if (sp->blood){ sp->life=1e9f; sp->life0=1e9f; }   // lasting blood puddle (full opacity)
+                if (sp->lasting){ sp->life=1e9f; sp->life0=1e9f; }   // lasting blood puddle (full opacity)
                 else if (sp->life<0.5f) sp->life=0.5f;             // brief impact glow
             }
         }
@@ -955,14 +1215,50 @@ static void DrawWorld(void) {
         DrawLine3D(g_tracers[i].a,g_tracers[i].b,(Color){255,240,150,255});
     for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
         Spark *sp=&g_sparks[i];
-        if (sp->blood && sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0){    // settled blood -> flat liquid splat
-            float r=sp->size*0.9f;                                        // thin disc lying on the floor, not a ball
-            DrawCylinderEx((Vector3){sp->pos.x,sp->rest+0.010f,sp->pos.z},
-                           (Vector3){sp->pos.x,sp->rest+0.022f,sp->pos.z}, r, r, 12, sp->col);
-        } else {
-            float k=(sp->life0>0)?sp->life/sp->life0:1.0f; // 1 at birth -> 0 at death
-            float sz=sp->size*(0.45f+0.55f*k);             // droplets shrink as they fade
-            Color c=sp->col; c.a=(unsigned char)(k*255.0f);// and fade out
+        int settled=(sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0);
+        if (sp->pool){                                     // flat continuous pool stain: many small overlapping flat discs
+            float R=sp->size, y0=sp->rest+0.006f, y1=sp->rest+0.012f;  // filling a disc -> reads as one wet liquid pool
+            unsigned int s=sp->seed?sp->seed:1u;
+            for (int b=0;b<26;b++){
+                unsigned int h=s*2654435761u + (unsigned int)b*2654435789u; h^=h>>13; h*=0x9E3779B1u;
+                float t1=(float)((h>>3)&1023)/1023.0f, t2=(float)((h>>13)&1023)/1023.0f, t3=(float)((h>>23)&255)/255.0f;
+                float a=t1*6.2831853f, rr=sqrtf(t2)*R;      // sqrt -> evenly fill the disc area
+                float ox=cosf(a)*rr, oz=sinf(a)*rr;
+                float dr=R*(0.34f+0.16f*t3)*(1.0f-0.45f*(rr/R));   // solid centre, smaller discs toward the ragged edge
+                DrawCylinderEx((Vector3){sp->pos.x+ox,y0,sp->pos.z+oz},
+                               (Vector3){sp->pos.x+ox,y1,sp->pos.z+oz}, dr, dr, 10, sp->col);
+            }
+        } else if (sp->lasting && settled){                // settled gob -> a small lumpy spatter dot (a couple offset discs)
+            float ax=sp->ix, az=sp->iz; if (ax==0.0f && az==0.0f){ ax=1.0f; az=0.0f; }
+            float y0=sp->rest+0.011f, y1=sp->rest+0.018f;   // a thin slab lying on the floor, not a ball
+            unsigned int s=sp->seed?sp->seed:1u;
+            for (int b=0;b<2;b++){                          // offset discs break the circular outline
+                unsigned int h=s*2654435761u + (unsigned int)b*2246822519u;
+                float t1=(float)((h>>3)&255)/255.0f, t2=(float)((h>>11)&255)/255.0f, t3=(float)((h>>19)&255)/255.0f;
+                float along=(t1*1.4f-0.2f)*sp->size;        // mostly forward of impact (the spatter trails ahead)
+                float side =(t2-0.5f)*1.2f*sp->size;        // lateral scatter
+                float ox=ax*along - az*side, oz=az*along + ax*side;
+                float r=sp->size*(0.30f+0.30f*t3);          // small, varied
+                DrawCylinderEx((Vector3){sp->pos.x+ox,y0,sp->pos.z+oz},
+                               (Vector3){sp->pos.x+ox,y1,sp->pos.z+oz}, r, r, 8, sp->col);
+            }
+        } else if (sp->blood){                             // in-flight blood -> thin streak stretched along travel
+            float k=(sp->life0>0)?sp->life/sp->life0:1.0f;
+            Color c=sp->col; c.a=(unsigned char)(k*255.0f);
+            float spd=Vector3Length(sp->vel);
+            float r=(sp->size>0.03f?0.03f:sp->size)*0.55f; // capped so even gobs stay droplet-sized, never grapefruits
+            if (spd>0.5f){                                 // moving: a tapered teardrop pointing the way it flies
+                Vector3 dirn=Vector3Scale(sp->vel,1.0f/spd);
+                float len=sp->size*1.5f+spd*0.025f;
+                Vector3 tail=Vector3Subtract(sp->pos,Vector3Scale(dirn,len));
+                DrawCylinderEx(sp->pos, tail, r, r*0.25f, 6, c);
+            } else {                                       // nearly stopped: a small droplet
+                DrawSphereEx(sp->pos, r, 5, 5, c);
+            }
+        } else {                                           // impact glints: tiny bright spark
+            float k=(sp->life0>0)?sp->life/sp->life0:1.0f;
+            float sz=sp->size*(0.45f+0.55f*k);
+            Color c=sp->col; c.a=(unsigned char)(k*255.0f);
             DrawSphereEx(sp->pos, sz*0.6f, 6, 6, c);
         }
     }
@@ -975,20 +1271,35 @@ static void DrawEnemies(void){
     for (int i=0;i<MAX_ENEMIES;i++){
         Enemy *e=&g_enemies[i];
         if (e->state==0) continue;
+        // Occlusion cull: if the map blocks the camera's view of the enemy's feet, chest
+        // AND head, it's fully behind a wall/stairs -> don't draw it, so no part of the
+        // model pokes through the geometry to the player's side. Any point visible -> draw
+        // (so an enemy peeking around cover still shows).
+        if (g_hasMap && g_mapCol.ready){
+            const float hy[3]={0.15f,0.9f,1.7f}; int vis=0;
+            for (int p=0;p<3;p++){
+                Vector3 pt={e->pos.x, e->drawY+hy[p], e->pos.z};
+                Vector3 to=Vector3Subtract(pt,g_cam.position); float dist=Vector3Length(to);
+                if (dist<0.5f){ vis=1; break; }                      // basically on top of us -> visible
+                float hit=MapRayNearest(g_cam.position, Vector3Scale(to,1.0f/dist), dist);
+                if (hit<=0.0f || hit>=dist-0.15f){ vis=1; break; }   // nothing blocks this point
+            }
+            if (!vis) continue;
+        }
         float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;       // face the player (yaw about +Y)
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
         if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->state==2?g_eDeath:e->clip], e->animT);
-        DrawModelEx(g_enemy, e->pos, (Vector3){0,1,0}, yaw,    // no sink: dying body falls onto the floor, not through
+        Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
+        DrawModelEx(g_enemy, dpos, (Vector3){0,1,0}, yaw,     // no sink: dying body falls onto the floor, not through
                     (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
         if (e->state==1 && e->hp<ENEMY_HP){                   // HP bar above damaged enemies
             Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/ENEMY_HP), 0.08f, 0.02f, (Color){230,60,60,255});
         }
     }
-    // lasting corpses: the shared model posed at the final death frame, lying where each enemy fell
+    // lasting corpses: the shared model posed at the death clip's settle frame, lying where each enemy fell
     if (g_enemyAnimN>0){
-        int nf=ANIM_FRAMES(g_enemyAnim[g_eDeath]);
-        ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], (float)(nf>0?nf-1:0));
+        ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], (float)g_eDeathFrame);
         for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active)
             DrawModelEx(g_enemy, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
                         (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
@@ -1018,6 +1329,16 @@ static void DrawInspect(void){
     g_gun.transform=MatrixIdentity();
 }
 
+// Draw a weapon model but spin ONE rigid mesh about its local Z axis. The minigun
+// barrel cluster isn't rigged, so we rotate its geometry directly. Mirrors how
+// DrawModelEx composes its transform so every other mesh draws byte-identically.
+static void DrawGunSpinMesh(Model model, Vector3 pos, float scale, int spinMesh, float angle){
+    Matrix mt = MatrixMultiply(model.transform, MatrixMultiply(MatrixScale(scale,scale,scale), MatrixTranslate(pos.x,pos.y,pos.z)));
+    Matrix spun = MatrixMultiply(MatrixRotateZ(angle), mt);   // spin in local space (barrels run along local Z, centred on X=Y=0)
+    for (int i=0;i<model.meshCount;i++)
+        DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], (i==spinMesh)?spun:mt);
+}
+
 static void DrawViewmodel(void){
     // In orient mode the live first-person viewmodel must always show so tuning
     // is visible; inspect (which ignores the transform) is suppressed there.
@@ -1037,7 +1358,10 @@ static void DrawViewmodel(void){
 #endif
     BeginMode3D(g_vmCam);
         g_gun.transform=rot;
-        DrawModelEx(g_gun,vpos,(Vector3){0,1,0},0,(Vector3){g_vmScale,g_vmScale,g_vmScale},WHITE);
+        if (g_weapons[g_curWeapon].spinUp)               // minigun: spin the barrel mesh, hands held static
+            DrawGunSpinMesh(g_gun, vpos, g_vmScale, MG_BARREL_MESH, g_mgBarrelAngle);
+        else
+            DrawModelEx(g_gun,vpos,(Vector3){0,1,0},0,(Vector3){g_vmScale,g_vmScale,g_vmScale},WHITE);
     EndMode3D();
     g_gun.transform=MatrixIdentity();
 }
@@ -1059,6 +1383,10 @@ static void DrawHUD(void) {
     // kills + headshots + player health
     DrawText(TextFormat("KILLS %d", g_kills), W-160, 36, 22, (Color){255,230,120,255});
     DrawText(TextFormat("HEADSHOTS %d", g_headshots), W-160, 60, 18, (Color){255,140,50,255});
+    if (g_spawnMsg>0){                                 // F2 confirmation
+        const char *t="SPAWN SET"; int fs=26, tw=MeasureText(t,fs);
+        DrawText(t, W/2-tw/2, H/2+70, fs, (Color){120,220,255,255});
+    }
     // "HEADSHOT!" punch near the crosshair: full for ~0.65s, then fades over 0.45s
     if (g_hsFlash>0){
         const char *t="HEADSHOT!"; int fs=36, tw=MeasureText(t,fs), x=W/2-tw/2, y=H/2-74;
@@ -1137,6 +1465,31 @@ static void DrawMenu(void){
     TextSh("ESC to close", W/2-72, (int)(last.y+last.height+24), 18, GRAY);
 }
 
+// Minimal "PAUSED" overlay (P-pause). Unlike the options menu this keeps the
+// cursor captured, so it's just a dimmer + centred label over the frozen world.
+static void DrawPaused(void){
+    int W=GetScreenWidth(), H=GetScreenHeight();
+    DrawRectangle(0,0,W,H,(Color){0,0,0,120});
+    const char *t="PAUSED"; int ts=64, tw=MeasureText(t,ts);
+    TextSh(t, W/2-tw/2, H/2-ts/2, ts, (Color){255,210,60,255});
+    const char *h="press P to resume"; int hs=22, hw=MeasureText(h,hs);
+    TextSh(h, W/2-hw/2, H/2+ts/2+12, hs, RAYWHITE);
+}
+
+// Edge vignette: black bands fading inward on all four sides (corners darken twice ->
+// a tunnel-vision look). k=0..1 drives the darkness; used for the minigun brain-shake.
+static void DrawVignette(float k){
+    if (k<=0.001f) return;
+    int W=GetScreenWidth(), H=GetScreenHeight();
+    unsigned char a=(unsigned char)(fminf(1.0f,k)*105.0f);   // peripheral darkness (half the original 210)
+    Color edge={0,0,0,a}, clear={0,0,0,0};
+    int bw=W/6, bh=H/6;                            // narrow edge bands -> only the periphery darkens, centre stays clear
+    DrawRectangleGradientH(0,0,bw,H, edge, clear);          // left
+    DrawRectangleGradientH(W-bw,0,bw,H, clear, edge);       // right
+    DrawRectangleGradientV(0,0,W,bh, edge, clear);          // top
+    DrawRectangleGradientV(0,H-bh,W,bh, clear, edge);       // bottom
+}
+
 static void Frame(void) {
     static int frameNo=0;
     Update();
@@ -1146,11 +1499,14 @@ static void Frame(void) {
         BeginMode3D(g_cam);
             DrawWorld();
             DrawEnemies();
+            DrawSmoke(g_cam);                     // minigun muzzle smoke/steam (billboards, drawn last)
         EndMode3D();
         if (g_inspect && !g_noEnemies) DrawInspect();
         DrawViewmodel();
+        DrawVignette(g_shake);                    // minigun: blurred/darkened edges while it rips
         DrawHUD();
         if (g_menu) DrawMenu();
+        else if (g_paused) DrawPaused();
     EndDrawing();
     if (g_debug && (frameNo%30==0))
         DebugLog("frame","\"n\":%d,\"fps\":%d,\"anim\":%d,\"pos\":[%.1f,%.1f,%.1f]",
@@ -1185,9 +1541,15 @@ int main(int argc, char **argv) {
     }
 
     SetTraceLogLevel(LOG_WARNING);
+    SetTraceLogCallback(FilteredTraceLog);   // drop raylib's harmless u32->u16 index spam
     InitWindow(1280,720,"Chernobyl 2");
     SetExitKey(KEY_NULL);              // ESC opens the options menu instead of quitting
     int ready=IsWindowReady();
+    if (ready){                        // soft radial puff for the minigun smoke billboards
+        Image si=GenImageGradientRadial(64,64,0.25f,(Color){255,255,255,255},(Color){255,255,255,0});
+        g_smokeTex=LoadTextureFromImage(si); UnloadImage(si);
+        SetTextureFilter(g_smokeTex,TEXTURE_FILTER_BILINEAR); g_hasSmokeTex=(g_smokeTex.id!=0);
+    }
     DebugLog("boot","\"windowReady\":%s,\"raylib\":\"%s\"", ready?"true":"false", RAYLIB_VERSION);
 
     const char *gunPath="assets/rifle.glb";
@@ -1231,6 +1593,19 @@ int main(int argc, char **argv) {
     g_audio = IsAudioDeviceReady();
     DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
 
+    if (g_audio){                      // a random one of these plays on every enemy kill
+        const char *deaths[]={ "enemy_death1.mp3","enemy_death2.mp3","enemy_death3.mp3","enemy_death4.mp3" };
+        for (int d=0; d<(int)(sizeof deaths/sizeof deaths[0]); d++){
+            char p1[64],p2[64]; snprintf(p1,sizeof p1,"assets/%s",deaths[d]); snprintf(p2,sizeof p2,"../assets/%s",deaths[d]);
+            const char *sp=FileExists(p1)?p1:(FileExists(p2)?p2:NULL);
+            if (sp){ Sound s=LoadSound(sp); if (s.frameCount>0) g_deathSnd[g_nDeathSnd++]=s; }
+        }
+        const char *ap="assets/enemy_attack.mp3";
+        if (!FileExists(ap)) ap="../assets/enemy_attack.mp3";
+        if (FileExists(ap)){ g_attackSnd=LoadSound(ap); g_hasAttackSnd=(g_attackSnd.frameCount>0); }
+        DebugLog("enemysnd","\"deaths\":%d,\"attack\":%s", g_nDeathSnd, g_hasAttackSnd?"true":"false");
+    }
+
     if (g_mapPath){                    // SPIKE: load a Xonotic .map's brush geometry
         g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
         int tt=0; for(int mi=0;mi<g_map.meshCount;mi++) tt+=g_map.meshes[mi].triangleCount;
@@ -1241,6 +1616,9 @@ int main(int argc, char **argv) {
     if (g_hasMap){                                    // start at a map spawn point, drop to the floor
         g_pos = g_hasSpawn ? (Vector3){g_mapSpawn.x, g_mapSpawn.y+2.0f, g_mapSpawn.z} : (Vector3){0,12,0};
         g_yaw=0.0f; g_pitch=0.0f; g_vy=0.0f; g_grounded=0;
+        Vector3 sp; float sy,sp2;                     // a saved spawn (F2) overrides the map's start
+        if (LoadSpawn(&sp,&sy,&sp2)){ g_pos=sp; g_yaw=sy; g_pitch=sp2;
+            DebugLog("spawn","\"custom\":true,\"pos\":[%.1f,%.1f,%.1f]", sp.x,sp.y,sp.z); }
         MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
         DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d", g_navNX, g_navNZ, g_navCount, g_navOK);
     }
@@ -1281,7 +1659,7 @@ int main(int argc, char **argv) {
     g_posedBasis[5]=1;   // MP5's bind pose is ~44k units off-origin; frame from the posed idle pose
     LoadWeapon(5, "assets/mp5.glb",          "../assets/mp5.glb",          "MP5",          "vm_tune_mp5.txt",     (Vector3){0.33f,-0.49f,-1.04f}, 0.000026f, 106.0f, -90.0f, 0.0f);
     LoadWeapon(6, "assets/benelli.glb",      "../assets/benelli.glb",      "Benelli M4",   "vm_tune_benelli.txt", (Vector3){0.30f,-0.40f,-1.08f}, 0.000021f, 104.0f, 90.0f, 0.0f);
-    LoadWeapon(7, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
+    LoadWeapon(7, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt",   (Vector3){0.05045f,-0.37347f,-0.43725f}, 0.021775f, -330.04f, 52.32f, 134.41f);
     LoadWeapon(8, "assets/knife.glb",        "../assets/knife.glb",        "Knife",        "vm_tune_knife.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
     g_numWeapons=9;
     ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // park on the rifle (or --weapon N for tuning)
@@ -1298,6 +1676,7 @@ int main(int argc, char **argv) {
     LoadWeaponSound(6, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // Benelli M4: one-shot per shot
     LoadWeaponAux(1, "assets/shotgun_cock.mp3",     "../assets/shotgun_cock.mp3");     // shotgun cock between shots
     LoadWeaponAux(2, "assets/minigun_cooldown.mp3", "../assets/minigun_cooldown.mp3"); // minigun spin-down
+    if (g_weapons[2].hasAuxSnd) SetSoundVolume(g_weapons[2].auxSnd, 0.4f);  // spin-down was too loud/abrupt -> soften it
     g_weapons[0].burst=3;        // rifle:   3-round burst per trigger pull
     g_weapons[1].autoReload=1;   // shotgun: pump (reload anim) + cock sound after each shot
     g_weapons[2].spinUp=1;       // minigun: 5s fire cap -> cooldown sound + lockout
@@ -1322,6 +1701,26 @@ int main(int argc, char **argv) {
             else if (strstr(nm,"death"))  g_eDeath=ci;
         }
         TraceLog(LOG_INFO,"enemy clips walk=%d idle=%d run=%d hit=%d attack=%d death=%d",g_eWalk,g_eIdle,g_eRun,g_eHit,g_eAttack,g_eDeath);
+        // Pick the death clip's "settled on the floor" frame. Many death anims end
+        // with a trailing keyframe that snaps back to the standing start pose, so
+        // freezing the corpse at the literal last frame leaves it standing. Walk
+        // the root bone's vertical track and take the LATEST frame still near its
+        // lowest point -- that's the body lying down, just before any spring-back.
+        g_eDeathFrame = (g_enemyAnimN>0) ? ANIM_FRAMES(g_enemyAnim[g_eDeath])-1 : 0;
+#if defined(RAYLIB_VERSION_MAJOR) && RAYLIB_VERSION_MAJOR >= 6
+        if (g_enemyAnimN>0 && g_enemy.skeleton.boneCount>0){
+            ModelAnimation *d=&g_enemyAnim[g_eDeath];
+            int nf=ANIM_FRAMES(*d), root=0;
+            for (int b=0;b<g_enemy.skeleton.boneCount;b++)
+                if (strstr(g_enemy.skeleton.bones[b].name,"Hips")||strstr(g_enemy.skeleton.bones[b].name,"hips")){ root=b; break; }
+            float minY=1e30f, maxY=-1e30f;
+            for (int f=0;f<nf;f++){ float y=d->keyframePoses[f][root].translation.y; if(y<minY)minY=y; if(y>maxY)maxY=y; }
+            float thresh=minY+(maxY-minY)*0.2f;            // "near the floor" band
+            for (int f=nf-1;f>=0;f--)                      // latest frame still in that band
+                if (d->keyframePoses[f][root].translation.y<=thresh){ g_eDeathFrame=f; break; }
+        }
+#endif
+        DebugLog("enemydeath","\"frames\":%d,\"settleFrame\":%d", g_enemyAnimN>0?ANIM_FRAMES(g_enemyAnim[g_eDeath]):0, g_eDeathFrame);
         g_hasEnemy=(g_enemy.meshCount>0);
         BoundingBox eb=GetModelBoundingBox(g_enemy);
         DebugLog("enemy","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f]",

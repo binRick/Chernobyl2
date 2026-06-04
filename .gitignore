@@ -18,3 +18,4 @@ chernobyl2-shot.png
 # tooling binaries / deps
 tools/FBX2glTF
 tools/node_modules
+spawn.txt
