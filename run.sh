@@ -14,15 +14,11 @@ make all
 
 # Always run with --debug. The JSON event stream is written by the game to
 # ./chernobyl2-debug.log (clean JSON, no raylib warnings). Extra args pass through.
-# Default to flying the bundled Xonotic map if it's present; override with your
-# own "--map <file>" (last one wins) or any other flags - they're appended after.
-# The map is gitignored local content, so a fresh clone just boots the arena.
+# With no "--map", the game shows its startup map picker (scans maps/*.map); pass
+# "--map <file>" to skip the picker and load that map directly. Maps are gitignored
+# local content, so a fresh clone with no maps just boots the built-in arena.
 # Filter raylib's harmless per-model warnings (texcoord-attribute limit) out of the
 # console so the output stays clean.
 MGW='No more than 2 texture coordinates'
-if [[ -f maps/afterslime.map ]]; then
-  ./build/chernobyl2 --debug --map maps/afterslime.map "$@" 2>&1 | grep --line-buffered -v "$MGW" || true
-else
-  ./build/chernobyl2 --debug "$@" 2>&1 | grep --line-buffered -v "$MGW" || true
-fi
+./build/chernobyl2 --debug "$@" 2>&1 | grep --line-buffered -v "$MGW" || true
 echo "JSON event log: $(pwd)/chernobyl2-debug.log"

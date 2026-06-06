@@ -35,7 +35,7 @@ typedef struct {                                   // one brush face
 
 // Per-texture triangle soup + its loaded image.
 typedef struct { float *pos,*nrm,*uv; unsigned char *col; int n,cap; } MapBuf;
-typedef struct { char name[96]; Texture2D tex; int hasTex,w,h; MapBuf buf; } MapTex;
+typedef struct { char name[96]; Texture2D tex; int hasTex,w,h; int emissive; float scrollX,scrollY; MapBuf buf; } MapTex;
 typedef struct { MapTex *t; int n,cap; } MapReg;
 
 // Quake texture-axis basis: 6 face orientations, each {projAxis, uAxis, vAxis}.
@@ -72,6 +72,32 @@ static int MapIsFiller(const char *t){
            strstr(t,"/clip")||strstr(t,"botclip")||strstr(t,"/origin")||strstr(t,"caulk");
 }
 
+// Self-illuminating surfaces (light fixtures, lava, glowy FX). In the original
+// these are full-bright via q3map_surfacelight / additive glow stages; we have no
+// shader engine, so a face whose texture name says "light/lava/glow/..." is drawn
+// at full brightness (its baked AO+shadow shade is skipped) so it reads as a light
+// source instead of a dark panel. Heuristic, but it matches the Xonotic naming.
+static int MapIsEmissive(const char *t){
+    if (strstr(t,"lightmap")||strstr(t,"lightgrid")||strstr(t,"nolight")) return 0;
+    return strstr(t,"light")||strstr(t,"lamp")||strstr(t,"glow")||strstr(t,"lava")||
+           strstr(t,"fire")||strstr(t,"flame")||strstr(t,"plasma")||strstr(t,"neon")||
+           strstr(t,"tele")||strstr(t,"forcefield")||strstr(t,"lightning")||strstr(t,"energy")||
+           strstr(t,"beam")||strstr(t,"screen")||strstr(t,"monitor")||strstr(t,"jumppad");
+}
+
+// Scrolling surfaces. In the shaders these animate via "tcMod scroll"; the only
+// surfaces that use it here are flowing liquids (lava/slime/water "_flow") and
+// warp/teleport effects. We approximate the dominant scroll direction/speed by
+// name so the liquid visibly flows. Returns 1 and fills (sx,sy) in UV/sec.
+static int MapScrollVec(const char *t, float *sx, float *sy){
+    *sx=0; *sy=0;
+    if (strstr(t,"lava")||strstr(t,"slime")){ *sy=-0.25f; return 1; }   // matches lava0_flow tcMod scroll 0 -0.25
+    if (strstr(t,"water")&&strstr(t,"flow")){ *sy=-0.15f; return 1; }
+    if (strstr(t,"warp")||strstr(t,"warpzone")){ *sx=0.10f; *sy=0.04f; return 1; }
+    if (strstr(t,"flow")){ *sy=-0.20f; return 1; }
+    return 0;
+}
+
 // Fallback colour (used only when a texture image is missing) from a keyword.
 static Color MapMatColor(const char *t){
     static const struct { const char *k; unsigned char r,g,b; } M[]={
@@ -105,6 +131,8 @@ static int MapRegGet(MapReg *R, const char *name){
     if (R->n>=R->cap){ R->cap=R->cap?R->cap*2:64; R->t=(MapTex*)realloc(R->t,(size_t)R->cap*sizeof(MapTex)); }
     MapTex *mt=&R->t[R->n]; memset(mt,0,sizeof(*mt));
     snprintf(mt->name,sizeof mt->name,"%s",name);
+    mt->emissive=MapIsEmissive(name);
+    MapScrollVec(name,&mt->scrollX,&mt->scrollY);
     char path[256]; const char *ext[2]={".png",".tga"};   // raylib build decodes PNG, not TGA
     for (int e=0;e<2 && !mt->hasTex;e++){
         snprintf(path,sizeof path,"%s%s%s",MAP_TEXDIR,name,ext[e]);
@@ -192,6 +220,9 @@ typedef struct { Vector3 mn; float cs; int nx,ny,nz; int *start,*items; } AOGrid
 typedef struct { float *tri; int ntri; AOGrid grid; int ready; } MapCol;
 static MapCol g_mapCol = {0};
 static float  g_mapAOsec = 0.0f;   // AO bake time (for the load log)
+#define MAP_MAXMESH 4096
+static float  g_mapMeshScroll[MAP_MAXMESH*2] = {0};   // per-mesh UV scroll (x,y) in UV/sec; 0 = static. Aligned to model.meshes order.
+static int    g_mapMeshScrollAny = 0;                 // any mesh scrolls? (lets the renderer skip the work otherwise)
 static Vector3 g_mapSpawn = {0,0,0};   // a player spawn point (raylib space)
 static int     g_hasSpawn = 0;
 typedef struct { Vector3 pos; float R; Vector3 color; } MapLight;   // point light (raylib space, R=reach)
@@ -205,16 +236,29 @@ static int      g_nMapLights = 0;
 // the whole swarm. Reuses the collision grid's floor ray + wall test.
 #define NAV_CELL     0.8f    // grid cell size (raylib units)
 #define NAV_STEPUP   0.9f    // max climb between adjacent cells (also the connect threshold)
-#define NAV_STEPDOWN 1.6f    // max drop between adjacent cells
+#define NAV_STEPDOWN 1.6f    // max drop between adjacent cells when WALKING (stairs/ramps)
+#define NAV_MAXFALL  6.0f    // a chasing enemy will DROP off a ledge up to this tall to reach the player (~one storey). Bigger = leaps off higher places
 #define NAV_WALLR    0.50f   // wall clearance for a walkable nav cell. Tuned so enemies stand off walls by ~their visual width (no poking through thin dividers) while narrow stairs still survive (0.55 prunes them)
 #define NAV_CLEAR    1.80f   // headroom check: the up-ray starts 0.15m above the floor, so this prunes cells whose ceiling
                              // is below ~1.95m -- just enough that a 1.85m enemy's head won't clip stair undersides/overhangs.
                              // DON'T raise toward 1.9: the map has many ~2m ceilings the enemy fits under, and 1.9 prunes
                              // ~40% of the walkable area (600->353), breaking navigation. 1.80 drops only the 6 head-clip cells.
-static int   g_navOK=0, g_navNX=0, g_navNZ=0, g_navPlayerCell=-1, g_navCount=0;
+#define NAV_MAXL     6       // max stacked floor layers per (x,z) column -> multi-storey support
+#define NAV_LAYEREPS 0.5f    // two surfaces in one column closer than this are the SAME layer
+static int   g_navOK=0, g_navNX=0, g_navNZ=0, g_navPlayerCell=-1, g_navCount=0;  // g_navPlayerCell now holds a NODE index
 static float g_navCS=NAV_CELL; static Vector3 g_navMn={0,0,0};
-static unsigned char *g_navWalk=NULL; static float *g_navFloor=NULL;
+// Layered nav grid: each (x,z) cell holds 0..NAV_MAXL floor layers, so a storey
+// stacked directly above another is its own node. g_navNL[ci] = layer count for the
+// column; the per-layer arrays are indexed by node = ci*NAV_MAXL + layer.
+static unsigned char *g_navNL=NULL; static float *g_navFloor=NULL;
 static int *g_navDist=NULL, *g_navQueue=NULL;
+// Layer in column ci whose floor is nearest height h (within NAV_STEPUP); -1 if none.
+// Maps a continuous world height onto a discrete nav node.
+static int NavLayer(int ci, float h){
+    int best=-1; float bd=NAV_STEPUP;
+    for (int l=0;l<g_navNL[ci];l++){ float d=fabsf(g_navFloor[ci*NAV_MAXL+l]-h); if(d<=bd){bd=d;best=l;} }
+    return best;
+}
 
 static float MapRayTri(Vector3 o, Vector3 d, Vector3 a, Vector3 b, Vector3 c){
     Vector3 e1=Vector3Subtract(b,a), e2=Vector3Subtract(c,a);
@@ -397,36 +441,43 @@ static void MapNavBuild(Vector3 seed){
     g_navNX=(int)((g->nx*g->cs)/g_navCS)+1; g_navNZ=(int)((g->nz*g->cs)/g_navCS)+1;
     if (g_navNX<1||g_navNZ<1) return;
     long nc=(long)g_navNX*g_navNZ; if (nc>1500000L) return;
-    free(g_navWalk); free(g_navFloor); free(g_navDist); free(g_navQueue);
-    g_navWalk=(unsigned char*)calloc(nc,1); g_navFloor=(float*)malloc(nc*sizeof(float));
-    g_navDist=(int*)malloc(nc*sizeof(int)); g_navQueue=(int*)malloc(nc*sizeof(int));
-    if (!g_navWalk||!g_navFloor||!g_navDist||!g_navQueue) return;
+    long nn=nc*NAV_MAXL;
+    free(g_navNL); free(g_navFloor); free(g_navDist); free(g_navQueue);
+    g_navNL=(unsigned char*)calloc(nc,1); g_navFloor=(float*)malloc(nn*sizeof(float));
+    g_navDist=(int*)malloc(nn*sizeof(int)); g_navQueue=(int*)malloc(nn*sizeof(int));
+    if (!g_navNL||!g_navFloor||!g_navDist||!g_navQueue) return;
     int scx=(int)((seed.x-g_navMn.x)/g_navCS), scz=(int)((seed.z-g_navMn.z)/g_navCS);
     if (scx<0||scz<0||scx>=g_navNX||scz>=g_navNZ) return;
     float fd=MapRayNearest((Vector3){seed.x,seed.y+4.0f,seed.z},(Vector3){0,-1,0},80.0f);
     if (fd<=0) return;
-    int sc=scz*g_navNX+scx; g_navWalk[sc]=1; g_navFloor[sc]=seed.y+4.0f-fd;
-    int head=0,tail=0; g_navQueue[tail++]=sc;
+    int sc=scz*g_navNX+scx; g_navFloor[sc*NAV_MAXL+0]=seed.y+4.0f-fd; g_navNL[sc]=1;
+    int head=0,tail=0; g_navQueue[tail++]=sc*NAV_MAXL+0;          // queue holds NODE indices (ci*NAV_MAXL+layer)
     const int DX[4]={1,-1,0,0}, DZ[4]={0,0,1,-1};
     while (head<tail){
-        int ci=g_navQueue[head++]; int cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[ci];
+        int node=g_navQueue[head++]; int ci=node/NAV_MAXL;
+        int cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[node];
         float ox=g_navMn.x+(cx+0.5f)*g_navCS, oz=g_navMn.z+(cz+0.5f)*g_navCS;
         for (int k=0;k<4;k++){
             int nx=cx+DX[k], nz=cz+DZ[k];
             if (nx<0||nz<0||nx>=g_navNX||nz>=g_navNZ) continue;
-            int ni=nz*g_navNX+nx; if (g_navWalk[ni]) continue;
+            int nci=nz*g_navNX+nx;
             float wx=g_navMn.x+(nx+0.5f)*g_navCS, wz=g_navMn.z+(nz+0.5f)*g_navCS;
             float t=h+NAV_STEPUP, dd=MapRayNearest((Vector3){wx,t,wz},(Vector3){0,-1,0},NAV_STEPUP+NAV_STEPDOWN);
             if (dd<=0) continue; float nh=t-dd;
             if (nh<h-NAV_STEPDOWN || nh>h+NAV_STEPUP) continue;            // too big a step
+            // Multi-storey: a column can hold several layers, so DON'T reject it just because
+            // it already has one (the old single-layer bug that hid upper floors). Only skip if
+            // THIS surface (~nh) is already a layer here -- otherwise it's a new storey to add.
+            int dup=0; for (int l=0;l<g_navNL[nci];l++) if (fabsf(g_navFloor[nci*NAV_MAXL+l]-nh)<NAV_LAYEREPS){ dup=1; break; }
+            if (dup || g_navNL[nci]>=NAV_MAXL) continue;
             if (MapSphereHitsWall((Vector3){wx,nh+0.9f,wz},NAV_WALLR)) continue;          // cell in a wall
             if (MapSphereHitsWall((Vector3){(ox+wx)*0.5f,(h+nh)*0.5f+0.9f,(oz+wz)*0.5f},NAV_WALLR)) continue; // wall between
-            float head=MapRayNearest((Vector3){wx,nh+0.15f,wz},(Vector3){0,1,0},NAV_CLEAR); // ceiling / stair underside above?
-            if (head>0.0f) continue;                                                       // too little headroom: an enemy wouldn't fit
-            g_navWalk[ni]=1; g_navFloor[ni]=nh; g_navQueue[tail++]=ni;
+            float hd=MapRayNearest((Vector3){wx,nh+0.15f,wz},(Vector3){0,1,0},NAV_CLEAR);  // ceiling / stair underside above?
+            if (hd>0.0f) continue;                                                         // too little headroom: an enemy wouldn't fit
+            int nl=g_navNL[nci]++; g_navFloor[nci*NAV_MAXL+nl]=nh; g_navQueue[tail++]=nci*NAV_MAXL+nl;
         }
     }
-    g_navPlayerCell=-1; g_navCount=tail; g_navOK=1;   // tail = number of reachable walkable cells
+    g_navPlayerCell=-1; g_navCount=tail; g_navOK=1;   // tail = number of reachable nav nodes
 }
 
 // Recompute the distance-to-player flow field (BFS) when the player changes
@@ -435,26 +486,33 @@ static void MapNavUpdate(Vector3 player){
     if (!g_navOK) return;
     int pcx=(int)((player.x-g_navMn.x)/g_navCS), pcz=(int)((player.z-g_navMn.z)/g_navCS);
     if (pcx<0||pcz<0||pcx>=g_navNX||pcz>=g_navNZ) return;
-    int pc=pcz*g_navNX+pcx;
-    if (!g_navWalk[pc]){                                   // player off the grid -> nearest walkable cell
+    int pci=pcz*g_navNX+pcx;
+    int pl = (g_navNL[pci]>0) ? NavLayer(pci, player.y) : -1;
+    if (pl<0 && g_navNL[pci]>0) pl=0;                      // in the column but height didn't match a storey -> use its base layer
+    if (pl<0){                                             // player off the grid -> nearest column that has layers
         int found=-1,br=1<<30;
         for (int r=1;r<=3 && found<0;r++) for (int dz=-r;dz<=r;dz++) for (int dx=-r;dx<=r;dx++){
             int x=pcx+dx,z=pcz+dz; if(x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
-            int c=z*g_navNX+x; if (g_navWalk[c]){ int dd=dx*dx+dz*dz; if(dd<br){br=dd;found=c;} } }
-        if (found<0) return; pc=found;
+            int c=z*g_navNX+x; if (g_navNL[c]>0){ int dd=dx*dx+dz*dz; if(dd<br){br=dd;found=c;} } }
+        if (found<0) return; pci=found; pl=NavLayer(pci,player.y); if(pl<0)pl=0;
     }
-    if (pc==g_navPlayerCell) return;
-    g_navPlayerCell=pc;
-    long nc=(long)g_navNX*g_navNZ; for (long i=0;i<nc;i++) g_navDist[i]=-1;
-    int head=0,tail=0; g_navDist[pc]=0; g_navQueue[tail++]=pc;
+    int pnode=pci*NAV_MAXL+pl;
+    if (pnode==g_navPlayerCell) return;
+    g_navPlayerCell=pnode;
+    long nn=(long)g_navNX*g_navNZ*NAV_MAXL; for (long i=0;i<nn;i++) g_navDist[i]=-1;
+    int head=0,tail=0; g_navDist[pnode]=0; g_navQueue[tail++]=pnode;
     const int DX[8]={1,-1,0,0,1,1,-1,-1}, DZ[8]={0,0,1,-1,1,-1,1,-1};
     while (head<tail){
-        int ci=g_navQueue[head++]; int cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[ci];
+        int node=g_navQueue[head++]; int ci=node/NAV_MAXL; int cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[node];
         for (int k=0;k<8;k++){
             int x=cx+DX[k],z=cz+DZ[k]; if(x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
-            int ni=z*g_navNX+x; if (!g_navWalk[ni]||g_navDist[ni]>=0) continue;
-            if (fabsf(g_navFloor[ni]-h)>NAV_STEPUP) continue;
-            g_navDist[ni]=g_navDist[ci]+1; g_navQueue[tail++]=ni;
+            int nci=z*g_navNX+x;
+            for (int l=0;l<g_navNL[nci];l++){                 // connect within a step, OR a ledge the enemy can DROP off down to here
+                int ni=nci*NAV_MAXL+l; if (g_navDist[ni]>=0) continue;
+                float dh=g_navFloor[ni]-h;                    // neighbour height relative to this node
+                if (dh < -NAV_STEPUP || dh > NAV_MAXFALL) continue; // can't climb up to it; CAN drop down from it (up to NAV_MAXFALL)
+                g_navDist[ni]=g_navDist[node]+1; g_navQueue[tail++]=ni;
+            }
         }
     }
 }
@@ -466,12 +524,25 @@ static void MapNavUpdate(Vector3 player){
 // Travel cost of nav cell (x,z) as seen from height h: the BFS distance to the
 // player, or a high "wall" penalty for off-grid / unwalkable / off-step cells so
 // the flow field curves AWAY from walls instead of aiming straight into them.
+// Lowest-cost reachable layer in column ci as seen from sample height h: a normal
+// step (|dh|<=STEPUP) OR a ledge below that the enemy could drop onto (down to
+// NAV_MAXFALL). Letting the cheaper lower floor win means the flow gradient at a
+// ledge edge points OFF the ledge toward the player, not just along the top floor.
+static int NavCostLayer(int ci, float h){
+    int best=-1, bd=1<<30;
+    for (int l=0;l<g_navNL[ci];l++){
+        float dh=g_navFloor[ci*NAV_MAXL+l]-h;
+        if (dh>NAV_STEPUP || dh<-NAV_MAXFALL) continue;     // too high to reach / too far to drop
+        int ni=ci*NAV_MAXL+l, d=g_navDist[ni];
+        if (d>=0 && d<bd){ bd=d; best=l; }
+    }
+    return best;
+}
 static float MapNavCell(int x, int z, float h, float wall){
     if (x<0||z<0||x>=g_navNX||z>=g_navNZ) return wall;
-    int ni=z*g_navNX+x;
-    if (!g_navWalk[ni] || g_navDist[ni]<0) return wall;
-    if (fabsf(g_navFloor[ni]-h)>NAV_STEPUP) return wall;
-    return (float)g_navDist[ni];
+    int ci=z*g_navNX+x;
+    int l=NavCostLayer(ci,h); if (l<0) return wall;        // nearest-or-droppable storey, cheapest first
+    return (float)g_navDist[ci*NAV_MAXL+l];
 }
 // Bilinearly-interpolated cost at a continuous world point -> smooth, not blocky.
 static float MapNavCostAt(float wx, float wz, float h, float wall){
@@ -490,8 +561,9 @@ static int MapNavSteer(Vector3 from, Vector3 *dir){
     if (!g_navOK) return 0;
     int cx=(int)((from.x-g_navMn.x)/g_navCS), cz=(int)((from.z-g_navMn.z)/g_navCS);
     if (cx<0||cz<0||cx>=g_navNX||cz>=g_navNZ) return 0;
-    int ci=cz*g_navNX+cx; if (!g_navWalk[ci]||g_navDist[ci]<0) return 0;
-    float h=g_navFloor[ci], wall=(float)g_navDist[ci]+NAV_WALLPUSH, eps=g_navCS;
+    int ci=cz*g_navNX+cx; int l=NavLayer(ci,from.y); if (l<0) return 0;   // match the enemy's storey
+    int node=ci*NAV_MAXL+l; if (g_navDist[node]<0) return 0;
+    float h=g_navFloor[node], wall=(float)g_navDist[node]+NAV_WALLPUSH, eps=g_navCS;
     float e=MapNavCostAt(from.x+eps,from.z,h,wall), w=MapNavCostAt(from.x-eps,from.z,h,wall);
     float s=MapNavCostAt(from.x,from.z+eps,h,wall), n=MapNavCostAt(from.x,from.z-eps,h,wall);
     float sx=w-e, sz=n-s;                       // -gradient: toward lower cost (the player), away from walls
@@ -507,14 +579,16 @@ static int MapNavReachable(Vector3 p){
     int cx=(int)((p.x-g_navMn.x)/g_navCS), cz=(int)((p.z-g_navMn.z)/g_navCS);
     if (cx<0||cz<0||cx>=g_navNX||cz>=g_navNZ) return 0;
     int ci=cz*g_navNX+cx;
-    if (!g_navWalk[ci]) return 0;                       // not in the player's flood-filled region
-    if (g_navPlayerCell>=0 && g_navDist[ci]<0) return 0; // flow field built but this cell is cut off right now
+    if (g_navNL[ci]==0) return 0;                       // not in the player's flood-filled region
+    int l=NavLayer(ci,p.y); if (l<0) l=0;               // match the spot's storey
+    if (g_navPlayerCell>=0 && g_navDist[ci*NAV_MAXL+l]<0) return 0; // flow field built but this node is cut off right now
     return 1;
 }
 
 // Parse a .map and build a textured, multi-material raylib Model.
 static Model LoadQ3MapModel(const char *path, int *okOut){
     if (okOut) *okOut=0;
+    g_nMapLights=0; g_hasSpawn=0; g_mapMeshScrollAny=0;   // reset accumulating globals so reloads start clean
     Model empty={0};
     FILE *f=fopen(path,"r"); if(!f) return empty;
     MapReg R={0};
@@ -603,7 +677,11 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     int *stamp=(int*)calloc(g_mapCol.ntri,sizeof(int)); int rid=0; double t0=GetTime();
     int haveLights=(g_nMapLights>0);
     for (int i=0;i<R.n;i++){ MapBuf *b=&R.t[i].buf;
+        int emis=R.t[i].emissive;
         for (int k=0;k<b->n;k++){
+            if (emis){                                        // light fixture / lava / glow: full-bright, skip shade+AO
+                b->col[k*4]=255; b->col[k*4+1]=255; b->col[k*4+2]=255; continue;
+            }
             Vector3 P={b->pos[k*3],b->pos[k*3+1],b->pos[k*3+2]}, N={b->nrm[k*3],b->nrm[k*3+1],b->nrm[k*3+2]};
             float ao=MapVertexAO(&g_mapCol.grid,g_mapCol.tri,P,N,samp,stamp,&rid);
             float sr,sg,sb;
@@ -629,7 +707,7 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     model.meshes=(Mesh*)calloc(nMesh,sizeof(Mesh));
     model.materials=(Material*)calloc(nMesh,sizeof(Material));
     model.meshMaterial=(int*)calloc(nMesh,sizeof(int));
-    int mi=0;
+    int mi=0; g_mapMeshScrollAny=0;
     for (int i=0;i<R.n;i++){ MapBuf *b=&R.t[i].buf; if (b->n<3) continue;
         Mesh m={0}; m.vertexCount=b->n; m.triangleCount=b->n/3;
         m.vertices=b->pos; m.normals=b->nrm; m.texcoords=b->uv; m.colors=b->col;
@@ -637,7 +715,10 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
         Material mat=LoadMaterialDefault();
         if (R.t[i].hasTex) mat.maps[MATERIAL_MAP_DIFFUSE].texture=R.t[i].tex;
         mat.maps[MATERIAL_MAP_DIFFUSE].color=WHITE;
-        model.meshes[mi]=m; model.materials[mi]=mat; model.meshMaterial[mi]=mi; mi++;
+        model.meshes[mi]=m; model.materials[mi]=mat; model.meshMaterial[mi]=mi;
+        if (mi<MAP_MAXMESH){ g_mapMeshScroll[mi*2]=R.t[i].scrollX; g_mapMeshScroll[mi*2+1]=R.t[i].scrollY;
+            if (R.t[i].scrollX||R.t[i].scrollY) g_mapMeshScrollAny=1; }
+        mi++;
     }
     free(R.t);
     if (okOut) *okOut=1;
