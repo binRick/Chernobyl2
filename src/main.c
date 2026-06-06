@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <dirent.h>      // map-select menu: scan maps/*.map at startup
 
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
   #include <OpenGL/gl3.h>          // glClear(GL_DEPTH_BUFFER_BIT) for the viewmodel pass
@@ -88,11 +89,15 @@ static Box  g_crates[NUM_CRATES];
 static Texture2D g_floorTex, g_wallTex, g_crateTex;
 static Model g_floor, g_wall, g_crate;
 static Model g_map; static int g_hasMap=0; static const char *g_mapPath=NULL;  // SPIKE: --map <file.map>
+static int g_mapPathOwned=0;   // 1 if g_mapPath was malloc'd by the picker (free on map switch); 0 if it's argv
+static Shader g_scrollShader; static int g_scrollLoc=-1; static int g_hasScrollShader=0;  // animated UV scroll for liquids/warpzones
 
 // ---- Player -----------------------------------------------------------------
 static Vector3 g_pos   = { 0, EYE_H, 6 };
 static float   g_yaw   = 0.0f;
 static float   g_pitch = 0.0f;
+static int     g_lookSet = 0;            // --look <yaw> <pitch>: aim the spawn camera (dev/map inspection)
+static float   g_lookYaw = 0.0f, g_lookPitch = 0.0f;
 static float   g_vy    = 0.0f;
 static int     g_grounded = 1;
 static int     g_devOverlay = 1;
@@ -221,13 +226,24 @@ static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, fl
     return 0;
 }
 // Custom player spawn (F2 saves your current pose; loaded at startup to override the
-// map's spawn). Per-machine local content, like the weapon tune files.
+// map's spawn). Per-machine local content, like the weapon tune files. The save is
+// keyed to the map's basename (spawn_<map>.txt) so a saved spawn for one map never
+// leaks onto another -- the bind-mode pose for afterslime would otherwise dump the
+// player into the void on every other .map. The no-map (built-in arena) case keeps
+// the legacy spawn.txt name.
+static const char *SpawnPath(char *buf, int sz){
+    if (!g_mapPath){ snprintf(buf,sz,"spawn.txt"); return buf; }
+    const char *b=strrchr(g_mapPath,'/'); b=b?b+1:g_mapPath;   // basename
+    char stem[160]; snprintf(stem,sizeof stem,"%s",b);
+    char *dot=strrchr(stem,'.'); if (dot) *dot=0;              // drop ".map"
+    snprintf(buf,sz,"spawn_%s.txt",stem); return buf;
+}
 static void SaveSpawn(Vector3 pos, float yaw, float pitch){
-    FILE *f=fopen("spawn.txt","w"); if(!f) return;
+    char path[224]; FILE *f=fopen(SpawnPath(path,sizeof path),"w"); if(!f) return;
     fprintf(f,"%.4f %.4f %.4f %.4f %.4f\n", pos.x,pos.y,pos.z,yaw,pitch); fclose(f);
 }
 static int LoadSpawn(Vector3 *pos, float *yaw, float *pitch){
-    FILE *f=fopen("spawn.txt","r"); if(!f) return 0;
+    char path[224]; FILE *f=fopen(SpawnPath(path,sizeof path),"r"); if(!f) return 0;
     float x,y,z,yw,pt; int n=fscanf(f,"%f %f %f %f %f",&x,&y,&z,&yw,&pt); fclose(f);
     if(n==5){ *pos=(Vector3){x,y,z}; *yaw=yw; *pitch=pt; return 1; }
     return 0;
@@ -449,7 +465,7 @@ static void DrawSmoke(Camera3D cam){
 #define HEAD_ZONE_H        0.32f      // vertical extent of the head box (down from the top)
 #define HEAD_RADIUS        0.22f      // half-width of the head box (tighter than the body)
 #define HEADSHOT_MULT      3.0f       // headshot damage multiplier
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; } Enemy; // state: 0 dead,1 alive,2 dying; roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn)
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; } Enemy; // state: 0 dead,1 alive,2 dying; roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
 typedef struct { Vector3 pos; float yaw; int active; } Corpse;   // lasting dead bodies, posed at the death-anim end
@@ -468,12 +484,15 @@ static float           g_hsFlash = 0.0f;       // >0: flash "HEADSHOT!" near the
 static float           g_playerHp = 100.0f;
 static int             g_godMode = 1;           // dev stage: invulnerable (no death, no "YOU DIED"). G toggles.
 static int             g_noclip = 0;            // map mode: F toggles free-fly / noclip vs FPS collision
+static Vector3         g_spawnResetPos = {0,0,0};  // where to drop the player back to (fell off the map / new map)
+static float           g_voidY = -1e9f;            // below this Y the player has fallen out of the world
+static int             g_returnToMenu = 0;         // ESC menu "Select Map" -> break the game loop back to the picker
 
 static void EnemyArm(int i, Vector3 pos){       // common: bring enemy i to life at pos
     g_enemies[i].pos=pos; g_enemies[i].hp=ENEMY_HP; g_enemies[i].state=1;
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
     g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun; g_enemies[i].roarT=0; g_enemies[i].drawY=pos.y;
-    g_enemies[i].stuckT=0; g_enemies[i].embedT=0;
+    g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f;
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
@@ -485,9 +504,11 @@ static int EnemySpawnOK(float x, float fy, float z){
         && !MapSphereHitsWall((Vector3){x,fy+0.9f,z},ENEMY_MOVE_R);   // body fits (same radius it moves with)
 }
 // Map spawn: a ring around the player, dropped onto the floor under each spot.
+// Biased toward where the player is FACING so enemies appear in front, not behind.
 static void SpawnEnemyMap(int i){
+    float ahead = 1.5708f - g_yaw;                       // player's look direction in the ring's angle space
     for (int t=0;t<40;t++){
-        float ang=(float)GetRandomValue(0,628)/100.0f;
+        float ang = ahead + GetRandomValue(-115,115)/100.0f; // within ~±66 deg of straight ahead
         float dist=6.0f+GetRandomValue(0,90)/10.0f;          // 6..15 units out
         float x=g_pos.x+cosf(ang)*dist, z=g_pos.z+sinf(ang)*dist;
         float top=g_pos.y+8.0f;
@@ -506,8 +527,9 @@ static void SpawnEnemyMap(int i){
     if (g_navOK){
         for (int t=0;t<400;t++){
             int cx=GetRandomValue(0,g_navNX-1), cz=GetRandomValue(0,g_navNZ-1), ci=cz*g_navNX+cx;
-            if (g_navWalk[ci]){
-                EnemyArm(i,(Vector3){ g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[ci], g_navMn.z+(cz+0.5f)*g_navCS });
+            if (g_navNL[ci]>0){
+                int l=GetRandomValue(0,g_navNL[ci]-1);   // any storey in this column is a valid, navigable spot
+                EnemyArm(i,(Vector3){ g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[ci*NAV_MAXL+l], g_navMn.z+(cz+0.5f)*g_navCS });
                 return;
             }
         }
@@ -672,19 +694,19 @@ static void Fire(Camera3D cam) {
 }
 
 // Can the enemy stand at (x,z) coming from height curY? The spot must have a floor
-// that's a sane STEP UP (<=ENEMY_STEP) or DROP DOWN (<=ENEMY_MAXDROP, ~a flight of
-// stairs) -- NOT off a ledge into the void -- and be clear of walls. This single test
-// drives all enemy movement, so they slide along walls, climb stairs, and crucially
-// REFUSE to walk forward off a ledge (they'll follow the nav path around instead).
+// that's a sane STEP UP (<=ENEMY_STEP) or a DROP it can take (<=NAV_MAXFALL, ~one
+// storey -- so it'll leap off a balcony to chase) -- but NOT off into the void (no
+// floor) or off a cliff taller than NAV_MAXFALL -- and be clear of walls. This single
+// test drives all enemy movement: they slide along walls, climb stairs, drop off
+// ledges toward the player, and still refuse bottomless edges.
 #define ENEMY_STEP    0.7f    // max riser an enemy can step up (matches the player's auto-step)
-#define ENEMY_MAXDROP 1.6f    // max drop it will step down (== NAV_STEPDOWN); bigger = a ledge, don't walk off
 static int EnemyMoveOK(float x, float z, float curY){
     if (!g_mapCol.ready) return 1;
-    float top=curY+ENEMY_STEP, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},40.0f);
+    float top=curY+ENEMY_STEP, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
     if (fd<=0) return 0;                                // no floor under the spot -> the void
     float ny=top-fd;                                   // destination floor height
-    if (ny>curY+ENEMY_STEP)    return 0;               // riser too tall to step up
-    if (ny<curY-ENEMY_MAXDROP) return 0;               // drop too big -> a ledge, don't walk off it
+    if (ny>curY+ENEMY_STEP)  return 0;                 // riser too tall to step up
+    if (ny<curY-NAV_MAXFALL) return 0;                 // drop taller than a storey -> a cliff, don't leap
     return !MapSphereHitsWall((Vector3){x,ny+0.9f,z},ENEMY_MOVE_R);  // clear where it'd stand
 }
 // Move enemy i by (mx,mz), per-axis -- nothing walks through walls OR off ledges. Both
@@ -775,11 +797,17 @@ static void UpdateEnemies(float dt){
                 if (fd>0) e->pos.y=top-fd;
             }
             // ease the RENDER height toward the real floor so stair steps ramp smoothly
-            // instead of popping; snap on big jumps (spawn / falling off a ledge). Clamp
-            // the climb side so the feet ride ON each step, never sunk under it.
-            if (fabsf(e->pos.y-e->drawY)>1.5f) e->drawY=e->pos.y;
-            else {
-                e->drawY += (e->pos.y-e->drawY)*(1.0f-expf(-16.0f*dt));
+            // instead of popping. A real ledge DROP (drawY well above the new floor, or
+            // already mid-fall) is animated under gravity so the body falls and lands
+            // instead of teleporting. Clamp the climb side so the feet ride ON each step.
+            float dy=e->pos.y-e->drawY;
+            if (e->fallV<0.0f || dy<-1.5f){                    // mid-fall, or just stepped off a ledge
+                e->fallV -= 22.0f*dt; e->drawY += e->fallV*dt;
+                if (e->drawY <= e->pos.y){ e->drawY=e->pos.y; e->fallV=0.0f; }   // landed
+            } else if (fabsf(dy)>1.5f){
+                e->drawY=e->pos.y;                            // big upward pop (spawn / stairs up) -> snap
+            } else {
+                e->drawY += dy*(1.0f-expf(-16.0f*dt));
                 if (e->drawY < e->pos.y-0.03f) e->drawY = e->pos.y-0.03f;   // feet never sink into the stairs
             }
             if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
@@ -865,7 +893,7 @@ static void StartReload(void){
 
 // Options/pause menu: a vertical stack of buttons centred on screen. DrawMenu and
 // the click hit-test (in Update) both call MenuRect, so the layout can't drift.
-#define MENU_N 3
+#define MENU_N 4
 static Rectangle MenuRect(int i){
     int W=GetScreenWidth(), H=GetScreenHeight();
     float bw=360, bh=54, gap=16, total=MENU_N*bh+(MENU_N-1)*gap;
@@ -902,8 +930,10 @@ static void Update(void) {
                     ToggleBorderlessWindowed(); g_fullscreen=!g_fullscreen; SaveOptions();
                     EnableCursor();                         // the toggle can re-grab; keep it free for the menu
                     DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
-                } else if (i==1){ g_menu=0; DisableCursor(); }   // Resume
-                else if (i==2) g_quit=1;                          // Quit
+                } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Select Map -> back to the picker
+                    DebugLog("menu","\"selectMap\":true"); }
+                else if (i==2){ g_menu=0; DisableCursor(); }      // Resume
+                else if (i==3) g_quit=1;                          // Quit
             }
         }
         return;
@@ -973,6 +1003,13 @@ static void Update(void) {
         if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
         g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
         if (g_pos.y<=EYE_H){ g_pos.y=EYE_H; g_vy=0; g_grounded=1; }
+    }
+    // Fell out of the world (off a ledge into the void). Lethal in normal play; in
+    // god mode just teleport back to spawn so dev play isn't an endless fall.
+    if (g_hasMap && !g_noclip && g_pos.y < g_voidY){
+        if (!g_godMode) g_playerHp = 0.0f;
+        g_pos=g_spawnResetPos; g_vy=0.0f; g_grounded=0; g_eyeSmooth=0.0f;
+        DebugLog("void","\"fell\":true,\"died\":%s", g_godMode?"false":"true");
     }
     Collide();
 
@@ -1200,7 +1237,18 @@ static void Update(void) {
 static void DrawWorld(void) {
     if (g_hasMap){                          // SPIKE: draw the loaded .map (no collision yet)
         rlDisableBackfaceCulling();         // brush winding flips under the Z->Y axis swap
-        DrawModel(g_map,(Vector3){0,0,0},1.0f,WHITE);
+        if (g_hasScrollShader && g_mapMeshScrollAny){
+            // per-mesh draw so flowing liquids/warpzones can scroll their UVs (tcMod scroll)
+            float t=(float)GetTime();
+            for (int i=0;i<g_map.meshCount;i++){
+                float sx=g_mapMeshScroll[i*2], sy=g_mapMeshScroll[i*2+1];
+                Vector2 off={ sx*t, sy*t };
+                SetShaderValue(g_scrollShader,g_scrollLoc,&off,SHADER_UNIFORM_VEC2);
+                DrawMesh(g_map.meshes[i], g_map.materials[g_map.meshMaterial[i]], g_map.transform);
+            }
+        } else {
+            DrawModel(g_map,(Vector3){0,0,0},1.0f,WHITE);
+        }
         rlEnableBackfaceCulling();
     } else {
         DrawModelEx(g_floor,(Vector3){0,0,0},(Vector3){0,1,0},0,(Vector3){ARENA*2,1,ARENA*2},WHITE);
@@ -1453,7 +1501,7 @@ static void DrawMenu(void){
     TextSh(title, W/2-tw/2, (int)MenuRect(0).y-78, ts, (Color){255,210,60,255});
     Vector2 mp=GetMousePosition();
     char fsl[40]; snprintf(fsl,sizeof fsl,"Fullscreen:  %s", g_fullscreen?"ON":"OFF");
-    const char *labels[MENU_N]={fsl,"Resume","Quit"};
+    const char *labels[MENU_N]={fsl,"Select Map","Resume","Quit"};
     for (int i=0;i<MENU_N;i++){
         Rectangle r=MenuRect(i); int hov=CheckCollisionPointRec(mp,r);
         DrawRectangleRec(r, hov?(Color){58,82,120,240}:(Color){22,30,44,225});
@@ -1518,6 +1566,224 @@ static void Frame(void) {
     frameNo++;
 }
 
+// ---- Map selection menu (startup) ------------------------------------------
+// Scans maps/*.map and lets the player pick one before the game loads. Each
+// entry shows the map's worldspawn "message" title and, if present, a thumbnail
+// from maps/shots/<name>.png (extracted from the original pk3 by tools/stage_map.sh).
+#define MAPSEL_MAX 128
+typedef struct { char path[256]; char name[96]; char title[96]; Texture2D shot; int hasShot; } MapEntry;
+static MapEntry g_mapList[MAPSEL_MAX]; static int g_mapListN=0;
+
+// Pull the worldspawn "message" "..." title out of the first chunk of a .map.
+static void MapReadTitle(const char *path, char *out, int outsz){
+    out[0]=0; FILE *f=fopen(path,"r"); if(!f) return;
+    char buf[8192]; size_t n=fread(buf,1,sizeof buf-1,f); buf[n]=0; fclose(f);
+    const char *m=strstr(buf,"\"message\"");
+    if (m){ m=strchr(m+9,'"'); if(m){ const char *e=strchr(m+1,'"');
+        if(e && e-m-1<outsz){ int L=(int)(e-m-1); memcpy(out,m+1,L); out[L]=0; } } }
+}
+static int MapEntryCmp(const void *a, const void *b){ return strcmp(((const MapEntry*)a)->name,((const MapEntry*)b)->name); }
+
+static void ScanMaps(void){
+    g_mapListN=0;
+    DIR *d=opendir("maps"); if(!d) d=opendir("../maps");
+    const char *dir = d ? (opendir("maps")?"maps":"../maps") : "maps";
+    if(!d) return; closedir(d);
+    d=opendir(dir); if(!d) return;
+    struct dirent *e;
+    while ((e=readdir(d)) && g_mapListN<MAPSEL_MAX){
+        const char *nm=e->d_name; size_t L=strlen(nm);
+        if (L<5 || strcmp(nm+L-4,".map")) continue;
+        MapEntry *me=&g_mapList[g_mapListN];
+        snprintf(me->path,sizeof me->path,"%s/%s",dir,nm);
+        snprintf(me->name,sizeof me->name,"%.*s",(int)(L-4),nm);
+        MapReadTitle(me->path,me->title,sizeof me->title);
+        if (!me->title[0]) snprintf(me->title,sizeof me->title,"%s",me->name);
+        me->hasShot=0;
+        char sp[300]; snprintf(sp,sizeof sp,"maps/shots/%s.png",me->name);
+        if (!FileExists(sp)) snprintf(sp,sizeof sp,"../maps/shots/%s.png",me->name);
+        if (FileExists(sp)){ me->shot=LoadTexture(sp); if(me->shot.id>0){ me->hasShot=1;
+            SetTextureFilter(me->shot,TEXTURE_FILTER_BILINEAR); } }
+        g_mapListN++;
+    }
+    closedir(d);
+    qsort(g_mapList,g_mapListN,sizeof(MapEntry),MapEntryCmp);
+}
+
+// Modal map picker. Returns a malloc'd path to the chosen .map, or NULL to quit.
+// Runs its own draw loop (the window/GL context already exists).
+static char *RunMapSelect(void){
+    ScanMaps();
+    if (g_mapListN==0) return NULL;                       // nothing to pick -> built-in arena
+    int sel=0, top=0, frame=0;
+    EnableCursor();
+    while (!WindowShouldClose()){
+        frame++;
+        int W=GetScreenWidth(), H=GetScreenHeight();
+        // layout: a scrolling list on the left, a big preview on the right. Shrink the
+        // row height so the whole list fits on screen (down to a floor); only longer
+        // lists than that scroll.
+        int listX=60, listW=W*42/100, listY=150, avail=H-listY-70;
+        int rowH=44; if (g_mapListN*rowH>avail){ rowH=avail/g_mapListN; if(rowH<26)rowH=26; }
+        int visible=avail/rowH; if(visible<1)visible=1;
+        Vector2 mp=GetMousePosition();
+        // input ---------------------------------------------------------------
+        if (IsKeyPressed(KEY_DOWN)||IsKeyPressed(KEY_S)) sel=(sel+1)%g_mapListN;
+        if (IsKeyPressed(KEY_UP)  ||IsKeyPressed(KEY_W)) sel=(sel-1+g_mapListN)%g_mapListN;
+        sel -= (int)GetMouseWheelMove(); if(sel<0)sel=0; if(sel>=g_mapListN)sel=g_mapListN-1;
+        for (int i=top;i<top+visible && i<g_mapListN;i++){
+            Rectangle r={(float)listX,(float)(listY+(i-top)*rowH),(float)listW,(float)(rowH-6)};
+            if (CheckCollisionPointRec(mp,r)){
+                sel=i;
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) goto chosen;
+            }
+        }
+        if (sel<top) top=sel; if (sel>=top+visible) top=sel-visible+1;
+        if (IsKeyPressed(KEY_ENTER)||IsKeyPressed(KEY_SPACE)) goto chosen;
+        if (IsKeyPressed(KEY_ESCAPE)){ EnableCursor(); return NULL; }
+        // draw ----------------------------------------------------------------
+        BeginDrawing();
+        ClearBackground((Color){14,16,22,255});
+        DrawRectangleGradientV(0,0,W,H,(Color){20,24,34,255},(Color){10,11,16,255});
+        TextSh("CHERNOBYL 2", 60, 48, 30, (Color){120,140,170,255});
+        TextSh("SELECT MAP", 60, 84, 52, (Color){255,210,60,255});
+        // preview panel (right)
+        int pvX=listX+listW+40, pvW=W-pvX-60, pvY=listY, pvH=H-listY-70;
+        if (pvW>80){
+            DrawRectangle(pvX,pvY,pvW,pvH,(Color){0,0,0,150});
+            DrawRectangleLines(pvX,pvY,pvW,pvH,(Color){90,105,130,255});
+            MapEntry *me=&g_mapList[sel];
+            if (me->hasShot){
+                float ar=(float)me->shot.width/me->shot.height;
+                int iw=pvW-20, ih=(int)(iw/ar); if(ih>pvH-70){ ih=pvH-70; iw=(int)(ih*ar);}
+                DrawTexturePro(me->shot,(Rectangle){0,0,(float)me->shot.width,(float)me->shot.height},
+                    (Rectangle){(float)(pvX+(pvW-iw)/2),(float)(pvY+10),(float)iw,(float)ih},(Vector2){0,0},0,WHITE);
+            } else {
+                const char *ns="(no preview)"; int nw=MeasureText(ns,22);
+                DrawText(ns,pvX+(pvW-nw)/2,pvY+pvH/2-11,22,(Color){90,100,120,255});
+            }
+            int tw=MeasureText(me->title,30);
+            TextSh(me->title, pvX+(pvW-tw)/2, pvY+pvH-44, 30, RAYWHITE);
+        }
+        // list (left)
+        for (int i=top;i<top+visible && i<g_mapListN;i++){
+            Rectangle r={(float)listX,(float)(listY+(i-top)*rowH),(float)listW,(float)(rowH-6)};
+            int on=(i==sel), hov=CheckCollisionPointRec(mp,r);
+            DrawRectangleRec(r, on?(Color){58,82,120,240}:(hov?(Color){34,44,62,230}:(Color){22,28,40,210}));
+            DrawRectangleLinesEx(r,2, on?(Color){255,210,60,255}:(Color){70,84,108,255});
+            TextSh(g_mapList[i].title, (int)r.x+16, (int)r.y+(rowH-6)/2-11, 22, on?(Color){255,235,150,255}:RAYWHITE);
+        }
+        if (g_mapListN>visible){
+            char sc[32]; snprintf(sc,sizeof sc,"%d / %d", sel+1, g_mapListN);
+            DrawText(sc, listX, listY+visible*rowH+8, 18, (Color){120,135,160,255});
+        }
+        TextSh("UP/DOWN or mouse to choose     ENTER to play     ESC to quit",
+               60, H-44, 20, (Color){150,165,190,255});
+        EndDrawing();
+        if (g_shotFrame>0 && frame>=g_shotFrame){          // headless: capture the menu and exit
+            TakeScreenshot("chernobyl2-shot.png");
+            DebugLog("mapselect","\"menushot\":%d,\"maps\":%d", frame, g_mapListN);
+            EnableCursor(); return NULL;
+        }
+    }
+    EnableCursor(); return NULL;
+  chosen:;
+    char *out=(char*)malloc(256); snprintf(out,256,"%s",g_mapList[sel].path);
+    for (int i=0;i<g_mapListN;i++) if (g_mapList[i].hasShot) UnloadTexture(g_mapList[i].shot);
+    DisableCursor();
+    return out;
+}
+
+// Choose a spawn facing that looks into open space, not a wall/corner. Casts a ring
+// of horizontal rays from the eye and picks the heading whose narrow cone is clearest
+// (min distance over a few sub-rays, so a lucky gap through a doorway doesn't win).
+// Returns a yaw in the game's convention (forward = (sin yaw, 0, cos yaw)).
+static float PickOpenYaw(Vector3 eye){
+    if (!g_mapCol.ready) return 0.0f;
+    const int N=24; const float R=120.0f;
+    float best=-1.0f, bestYaw=0.0f;
+    for (int i=0;i<N;i++){
+        float yaw=(float)i/(float)N*6.2831853f, score=1e30f;
+        for (int j=-1;j<=1;j++){                       // sample the heading +- ~10 deg
+            float a=yaw+(float)j*0.18f;
+            float d=MapRayNearest(eye,(Vector3){sinf(a),0.0f,cosf(a)},R);
+            if (d<0.0f) d=R;                           // nothing in range -> wide open
+            if (d<score) score=d;
+        }
+        if (score>best){ best=score; bestYaw=yaw; }
+    }
+    return bestYaw;
+}
+
+// Load g_mapPath and (re)initialise everything tied to the current map: geometry,
+// the UV-scroll shader, player spawn + nav, and a fresh wave of enemies. Safe to
+// call repeatedly (e.g. after the ESC "Select Map" button). g_mapPath==NULL -> the
+// built-in arena. The one-time setup (weapons, enemy model, sounds) is NOT redone.
+static void StartSelectedMap(void){
+    if (g_mapPath){
+        g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
+        int tt=0; for(int mi=0;mi<g_map.meshCount;mi++) tt+=g_map.meshes[mi].triangleCount;
+        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d,\"lights\":%d,\"bake_sec\":%.2f",
+                 JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt, g_nMapLights, g_mapAOsec);
+        if (!g_hasMap) TraceLog(LOG_WARNING,"map: failed to load %s", g_mapPath);
+    } else g_hasMap=0;
+
+    // Animated UV-scroll shader for flowing liquids / warpzones (tcMod scroll):
+    // raylib's default textured shader plus a uvOffset uniform. Built once, reused.
+    if (g_hasMap && g_mapMeshScrollAny){
+        if (!g_hasScrollShader){
+            const char *vs="#version 330\n"
+                "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor;\n"
+                "uniform mat4 mvp; out vec2 fragTexCoord; out vec4 fragColor;\n"
+                "void main(){ fragTexCoord=vertexTexCoord; fragColor=vertexColor; gl_Position=mvp*vec4(vertexPosition,1.0); }\n";
+            const char *fs="#version 330\n"
+                "in vec2 fragTexCoord; in vec4 fragColor;\n"
+                "uniform sampler2D texture0; uniform vec4 colDiffuse; uniform vec2 uvOffset;\n"
+                "out vec4 finalColor;\n"
+                "void main(){ vec4 t=texture(texture0, fragTexCoord+uvOffset); finalColor=t*colDiffuse*fragColor; }\n";
+            g_scrollShader=LoadShaderFromMemory(vs,fs);
+            if (g_scrollShader.id>0){ g_scrollLoc=GetShaderLocation(g_scrollShader,"uvOffset"); g_hasScrollShader=1; }
+        }
+        if (g_hasScrollShader){
+            for (int i=0;i<g_map.materialCount;i++) g_map.materials[i].shader=g_scrollShader;
+            DebugLog("mapfx","\"scrollShader\":true");
+        }
+    }
+
+    if (g_hasMap){                                    // start at a map spawn point, drop to the floor
+        g_pos = g_hasSpawn ? (Vector3){g_mapSpawn.x, g_mapSpawn.y+2.0f, g_mapSpawn.z} : (Vector3){0,12,0};
+        g_yaw=0.0f; g_pitch=0.0f; g_vy=0.0f; g_grounded=0;
+        Vector3 sp; float sy,sp2; int haveCustom=0;   // a saved spawn (F2) overrides the map's start
+        if (LoadSpawn(&sp,&sy,&sp2)){ g_pos=sp; g_yaw=sy; g_pitch=sp2; haveCustom=1;
+            DebugLog("spawn","\"custom\":true,\"pos\":[%.1f,%.1f,%.1f]", sp.x,sp.y,sp.z); }
+        if (g_lookSet){ g_yaw=g_lookYaw*0.01745329252f; g_pitch=g_lookPitch*0.01745329252f; }  // dev: aim camera
+        else if (!haveCustom){ g_yaw=PickOpenYaw(g_pos);          // face the most open direction, not a wall
+            DebugLog("spawnface","\"yaw\":%.1f", g_yaw*57.29578f); }
+        MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
+        DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d", g_navNX, g_navNZ, g_navCount, g_navOK);
+        g_spawnResetPos=g_pos; g_voidY=-12.0f;        // below the lowest floor (normalised to y=0) -> fell off
+    } else { g_pos=(Vector3){0,EYE_H,6}; g_voidY=-1e9f; }
+
+    g_playerHp=100.0f; g_vy=0.0f; g_eyeSmooth=0.0f;   // fresh start for the (new) map
+    g_cam=(Camera3D){ g_pos, Vector3Add(g_pos,(Vector3){0,0,-1}), (Vector3){0,1,0}, 70.0f, CAMERA_PERSPECTIVE };
+    for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;          // clear any survivors from the previous map
+    if (g_hasEnemy && !g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);
+}
+
+// Tear down the current map before loading another. The scroll shader is shared by
+// all map materials, so restore the default shader first or UnloadModel would free
+// our shared one (it's kept for the next map and released at shutdown).
+static void EndCurrentMap(void){
+    if (!g_hasMap) return;
+    if (g_hasScrollShader)
+        for (int i=0;i<g_map.materialCount;i++){
+            g_map.materials[i].shader.id   = rlGetShaderIdDefault();
+            g_map.materials[i].shader.locs = rlGetShaderLocsDefault();
+        }
+    UnloadModel(g_map);
+    g_hasMap=0;
+}
+
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
 #endif
@@ -1530,6 +1796,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
         else if (!strcmp(argv[i],"--map") && i+1<argc) g_mapPath=argv[++i];   // SPIKE: load a .map
+        else if (!strcmp(argv[i],"--look") && i+2<argc){ g_lookYaw=(float)atof(argv[++i]); g_lookPitch=(float)atof(argv[++i]); g_lookSet=1; }   // dev: aim spawn camera (deg)
         else if (!strcmp(argv[i],"--weapon") && i+1<argc) vmWeapon=atoi(argv[++i]);   // dev: start on weapon N
         else if (!strcmp(argv[i],"--vm") && i+1<argc) vmHas=(sscanf(argv[++i],"%f %f %f %f %f %f %f",&vmOv[0],&vmOv[1],&vmOv[2],&vmOv[3],&vmOv[4],&vmOv[5],&vmOv[6])==7);   // dev: override viewmodel "x y z scale yaw pitch roll"
     }
@@ -1606,22 +1873,9 @@ int main(int argc, char **argv) {
         DebugLog("enemysnd","\"deaths\":%d,\"attack\":%s", g_nDeathSnd, g_hasAttackSnd?"true":"false");
     }
 
-    if (g_mapPath){                    // SPIKE: load a Xonotic .map's brush geometry
-        g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
-        int tt=0; for(int mi=0;mi<g_map.meshCount;mi++) tt+=g_map.meshes[mi].triangleCount;
-        DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d,\"lights\":%d,\"bake_sec\":%.2f",
-                 JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt, g_nMapLights, g_mapAOsec);
-        if (!g_hasMap) TraceLog(LOG_WARNING,"map: failed to load %s", g_mapPath);
-    }
-    if (g_hasMap){                                    // start at a map spawn point, drop to the floor
-        g_pos = g_hasSpawn ? (Vector3){g_mapSpawn.x, g_mapSpawn.y+2.0f, g_mapSpawn.z} : (Vector3){0,12,0};
-        g_yaw=0.0f; g_pitch=0.0f; g_vy=0.0f; g_grounded=0;
-        Vector3 sp; float sy,sp2;                     // a saved spawn (F2) overrides the map's start
-        if (LoadSpawn(&sp,&sy,&sp2)){ g_pos=sp; g_yaw=sy; g_pitch=sp2;
-            DebugLog("spawn","\"custom\":true,\"pos\":[%.1f,%.1f,%.1f]", sp.x,sp.y,sp.z); }
-        MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
-        DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d", g_navNX, g_navNZ, g_navCount, g_navOK);
-    }
+    // (Map selection + load happens in the per-map outer loop below, via
+    // RunMapSelect() + StartSelectedMap(), so the ESC "Select Map" button can
+    // return here without redoing the one-time setup.)
 
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);
     g_wallTex =MakeChecker(256,(Color){80,72,64,255},(Color){64,58,52,255},8);
@@ -1640,8 +1894,7 @@ int main(int argc, char **argv) {
         g_crates[c]=(Box){ (Vector3){gx,h/2,gz}, (Vector3){1.6f,h,1.6f}, WHITE };
     }
 
-    g_cam  =(Camera3D){ g_pos, Vector3Add(g_pos,(Vector3){0,0,-1}), (Vector3){0,1,0}, 70.0f, CAMERA_PERSPECTIVE };
-    g_vmCam=(Camera3D){ (Vector3){0,0,0}, (Vector3){0,0,-1}, (Vector3){0,1,0}, 55.0f, CAMERA_PERSPECTIVE };
+    g_vmCam=(Camera3D){ (Vector3){0,0,0}, (Vector3){0,0,-1}, (Vector3){0,1,0}, 55.0f, CAMERA_PERSPECTIVE };  // g_cam is set per-map in StartSelectedMap
 
     LoadWeapon(0, "assets/rifle.glb", "../assets/rifle.glb", "M16A3 Rifle", "vm_tune.txt",
                VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0, 0.0f);
@@ -1726,14 +1979,31 @@ int main(int argc, char **argv) {
         DebugLog("enemy","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f]",
                  g_enemy.meshCount, g_enemy.skeleton.boneCount, g_enemyAnimN,
                  eb.max.x-eb.min.x, eb.max.y-eb.min.y, eb.max.z-eb.min.z);
-        if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);   // arena or map: SpawnEnemy picks placement
     } else DebugLog("enemy","\"error\":\"assets/enemy.glb not found\"");
+    // (the starting wave of enemies is spawned per-map in StartSelectedMap)
 
 #if defined(__EMSCRIPTEN__)
+    if (!g_mapPath){ char *p=RunMapSelect(); if (p) g_mapPath=p; }
+    StartSelectedMap();
     emscripten_set_main_loop(Frame,0,1);
 #else
-    int fc=0;
-    while (!WindowShouldClose() && !g_quit){ Frame(); if (g_maxFrames>0 && ++fc>=g_maxFrames) break; }
+    // Per-map outer loop: pick a map (unless one was named on the CLI), play it, and
+    // loop back to the picker when the ESC menu's "Select Map" sets g_returnToMenu.
+    for (;;){
+        if (!g_mapPath){
+            char *p=RunMapSelect();
+            if (!p){ if (g_mapListN>0){ DebugLog("mapselect","\"quit\":true"); break; } } // user quit (no maps -> arena)
+            else { g_mapPath=p; g_mapPathOwned=1; DebugLog("mapselect","\"path\":\"%s\"", JStr(g_mapPath)); }
+        }
+        StartSelectedMap();
+        g_returnToMenu=0;
+        int fc=0;
+        while (!WindowShouldClose() && !g_quit && !g_returnToMenu){ Frame(); if (g_maxFrames>0 && ++fc>=g_maxFrames) break; }
+        if (WindowShouldClose() || g_quit || g_maxFrames>0) break;   // real exit (headless --frames always exits)
+        EndCurrentMap();                                             // "Select Map": tear down, back to the picker
+        if (g_mapPathOwned){ free((void*)g_mapPath); g_mapPathOwned=0; }
+        g_mapPath=NULL;
+    }
 #endif
 
     StashActiveTuning();
@@ -1745,6 +2015,7 @@ int main(int argc, char **argv) {
     }
     if (g_hasEnemy){ if (g_enemyAnim) UnloadModelAnimations(g_enemyAnim,g_enemyAnimN); UnloadModel(g_enemy); }
     UnloadModel(g_floor); UnloadModel(g_wall); UnloadModel(g_crate);
+    if (g_hasScrollShader) UnloadShader(g_scrollShader);
     if (g_hasMap) UnloadModel(g_map);
     UnloadTexture(g_floorTex); UnloadTexture(g_wallTex); UnloadTexture(g_crateTex);
     if (g_audio){
