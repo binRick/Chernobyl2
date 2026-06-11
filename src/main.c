@@ -114,7 +114,7 @@ static Model           g_gun;
 static ModelAnimation *g_gunAnim = NULL;
 static int             g_gunAnimN = 0;
 static int             g_hasGun = 0;
-static int             g_aIdle=0, g_aShoot=1, g_aReload=2;  // idle = hold last frame of "Take"
+static int             g_aIdle=0, g_aShoot=1, g_aReload=2, g_aWalk=-1;  // idle = hold last frame of "Take"; aWalk=-1 = no walk clip
 static int             g_reloadSeq[6], g_reloadSeqN=0;  // active weapon's multi-phase reload clips
 static int             g_reloadStep=-1;                 // -1 idle; >=0 index into g_reloadSeq
 static int             g_reloading=0;                   // a reload (single or sequence) is in progress
@@ -127,6 +127,8 @@ static int             g_burstLeft = 0;         // rounds remaining in the curre
 static float           g_spin = 0.0f;           // minigun barrel-spin rate 0..1
 static float           g_mgSpinT = 0.0f;         // minigun: seconds the trigger's been held (spin-up timer)
 static float           g_shake = 0.0f;           // 0..1 minigun "brain shake": screen jitter + edge vignette
+static float           g_flameHeat = 0.0f;        // flamethrower warm-up: seconds the trigger's been held; below FLAME_WARMUP it spits raw fuel, above it ignites
+#define FLAME_WARMUP 0.55f                         // warm-up before the flame catches: spray unignited liquid until then
 #define MG_SPINUP 0.333f                          // barrel spins up for 1/3 s before bullets actually fire
 static float           g_mgBarrelAngle = 0.0f;   // minigun barrel-spin angle: the barrel is a rigid (un-rigged) mesh,
                                                  // so it can't spin via the skeleton -- we rotate the geometry directly
@@ -140,6 +142,7 @@ static int             g_lmgWasPlaying = 0;     // LMG: fire sound was playing l
 static Camera3D        g_vmCam;
 static int             g_inspect = 0;           // V: gun floats in the world
 static float           g_savedMsg = 0.0f;       // >0: flash a "SAVED" confirmation
+static int             g_tuneTarget = 0;        // tuning focus: 0 = whole viewmodel, 1 = gun-on-hand grip (B toggles, pinned guns only)
 static float           g_spawnMsg = 0.0f;       // >0: flash a "SPAWN SET" confirmation
 static int             g_menu = 0;              // ESC: options/pause menu open (frees cursor, pauses)
 static int             g_paused = 0;            // P: pause the game (freezes the world, keeps mouse captured)
@@ -183,7 +186,8 @@ typedef struct {
     Model           model;
     ModelAnimation *anim;
     int             animN, has;
-    int             aIdle, aShoot, aReload;
+    int             aIdle, aShoot, aReload, aWalk;
+    int             idleHold;                    // ready-pose anim frame to HOLD (-1 = default last frame); Z/X scrub it, saved to the tune file -- so the hands grip the gun instead of T-posing
     int             reloadSeq[6], reloadSeqN;   // multi-phase reload clips, in play order
     Vector3         centroid;
     float           fitScale;
@@ -198,6 +202,18 @@ typedef struct {
     int             autoReload;                  // 1: play the reload anim after each shot (pump)
     int             spinUp;                      // 1: minigun -- 5s fire cap, then cooldown sound + lockout
     int             soundGated;                  // 1: LMG -- fires while its sound plays, then a fixed pause
+    int             flame;                       // 1: flamethrower -- continuous fire cone while the trigger is held
+    int             melee;                       // 1: knife -- short-range arc swing on each click
+    int             grenade;                     // 1: grenade launcher -- lobs an arcing grenade that explodes on impact
+    int             pinGun;                      // 1: gun mesh is STATIC & detached from the arms -> draw it rigidly attached to handBone each frame
+    int             handBone, handBoneL;         // right / left hand bones; the gun RIDES the right, -1 = not found
+    Vector3         gunBindC;                    // bind-space centre of the static gun meshes
+    Vector3         pinSeat;                     // bind-space point the gun centre is seated at: the PALM MIDPOINT (so it spans both hands), else the right palm
+    Matrix          pinAlign;                    // auto-rotation: gun's principal (long) axis -> the palm-to-palm axis
+    Vector3         pinOff; float pinScale, pinYaw, pinPitch, pinRoll;  // grip trim on top of the auto-seat, in hand-bind space (B-mode tunes it; saved to <tune>.pin)
+    Vector3         armsROff;                    // minigun-style rigs: extra nudge applied to RIGHT-arm vertices only (baked into mesh.vertices; B-mode state 2)
+    unsigned long long gunMask;                  // bit k = mesh k is a GUN part (unskinned OR rigid-bound to one bone) vs blended-skinned arms
+    int             pinAuthored;                 // 1: raylib's bake reproduces the file's authored gun-in-hands placement -> keep it (no re-seat), just ride the hand
     int             playShoot;                   // 1: play the model's Shot clip on each shot (AK has a good one)
     float           fireCd;                      // per-shot cooldown override (0 -> default)
     Sound           auxSnd;                      // secondary sound: minigun spin-down, shotgun cock-between-shots
@@ -212,18 +228,34 @@ static int    g_nDeathSnd = 0;
 static Sound  g_attackSnd;                         // played when an enemy lunges into an attack
 static int    g_hasAttackSnd = 0;
 
-static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll){
+static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll, int idleHold){
     FILE *f=fopen(path,"w"); if(!f) return;
-    fprintf(f,"%.5f %.5f %.5f %.6f %.2f %.2f %.2f\n", off.x,off.y,off.z,scale,yaw,pitch,roll);
+    fprintf(f,"%.5f %.5f %.5f %.6f %.2f %.2f %.2f %d\n", off.x,off.y,off.z,scale,yaw,pitch,roll,idleHold);
     fclose(f);
 }
-static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll){
+static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll, int *idleHold){
     FILE *f=fopen(path,"r"); if(!f) return 0;
-    float ox,oy,oz,sc,yw,pt,rl=0.0f;
-    int n=fscanf(f,"%f %f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt,&rl);
+    float ox,oy,oz,sc,yw,pt,rl=0.0f; int ih=-1;
+    int n=fscanf(f,"%f %f %f %f %f %f %f %d",&ox,&oy,&oz,&sc,&yw,&pt,&rl,&ih);
     fclose(f);
+    if (idleHold) *idleHold = (n>=8)?ih:-1;   // 8th value optional: old 7-value tunes keep the default
     if(n>=6){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; *roll=(n>=7)?rl:0.0f; return 1; }
     return 0;
+}
+// Gun-pin grip tune (gun pose relative to the hand bone) -- kept in a sibling "<tune>.pin"
+// file so it's separate from the whole-viewmodel transform.
+static void SavePin(const char *tunePath, Vector3 off, float scale, float yaw, float pitch, float roll, Vector3 rOff){
+    char p[280]; snprintf(p,sizeof p,"%s.pin",tunePath);
+    FILE *f=fopen(p,"w"); if(!f) return;
+    fprintf(f,"%.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f\n", off.x,off.y,off.z,scale,yaw,pitch,roll,rOff.x,rOff.y,rOff.z); fclose(f);
+}
+static void LoadPin(const char *tunePath, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll, Vector3 *rOff){
+    char p[280]; snprintf(p,sizeof p,"%s.pin",tunePath);
+    FILE *f=fopen(p,"r"); if(!f) return;
+    float ox,oy,oz,sc,yw,pt,rl,rx=0,ry=0,rz=0;
+    int n=fscanf(f,"%f %f %f %f %f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt,&rl,&rx,&ry,&rz); fclose(f);
+    if(n>=7){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; *roll=rl; }
+    if(rOff) *rOff = (n>=10) ? (Vector3){rx,ry,rz} : (Vector3){0,0,0};   // optional right-hand nudge (old 7-value pins keep zero)
 }
 // Custom player spawn (F2 saves your current pose; loaded at startup to override the
 // map's spawn). Per-machine local content, like the weapon tune files. The save is
@@ -254,18 +286,93 @@ static void StashActiveTuning(void){
     Weapon *w=&g_weapons[g_curWeapon];
     w->off=g_vmOff; w->scale=g_vmScale; w->yaw=g_vmYaw; w->pitch=g_vmPitch; w->roll=g_vmRoll;
 }
+// Which side of the body does bone b belong to? Walk ancestry until a name carries a
+// side prefix (handles unprefixed bones like the minigun's left 'palm_016', whose parent
+// chain is L_*). +1 right, -1 left, 0 neutral (root/torso).
+static int BoneSide(Model *m, int b){
+    while (b>=0 && b<m->skeleton.boneCount){
+        const char *bn=m->skeleton.bones[b].name; char low[40]; int j=0;
+        for(;bn[j]&&j<39;j++){char c=bn[j]; low[j]=(c>='A'&&c<='Z')?c+32:c;} low[j]=0;
+        if (strstr(low,"l_")==low || strstr(low,"left"))  return -1;
+        if (strstr(low,"r_")==low || strstr(low,"right")) return  1;
+        b=m->skeleton.bones[b].parent;
+    }
+    return 0;
+}
+// Shift only the RIGHT-arm vertices of the skinned arms meshes by dv (model space,
+// baked straight into mesh.vertices -- the per-frame skinning pass re-uploads from
+// there, so the edit shows immediately and composes with the whole-arms nudge).
+// Used by minigun-style rigs where the two hands need seating independently.
+static void ApplyArmsRDelta(Weapon *w, Vector3 dv){
+    if (fabsf(dv.x)+fabsf(dv.y)+fabsf(dv.z) < 1e-9f) return;
+    for (int k=0;k<w->model.meshCount && k<64;k++){
+        Mesh *ms=&w->model.meshes[k];
+        if ((w->gunMask>>k)&1ULL) continue;                       // arms meshes only
+        if (!ms->boneIndices || !ms->boneWeights || !ms->vertices) continue;
+        for (int v=0;v<ms->vertexCount;v++){
+            int best=-1; float bw=0.0f;
+            for (int c=0;c<4;c++){ float wt=ms->boneWeights[v*4+c]; if (wt>bw){ bw=wt; best=(int)ms->boneIndices[v*4+c]; } }
+            if (best<0 || BoneSide(&w->model,best)!=1) continue;  // right-side verts only
+            ms->vertices[v*3]+=dv.x; ms->vertices[v*3+1]+=dv.y; ms->vertices[v*3+2]+=dv.z;
+        }
+    }
+}
+
+// One-shot diagnostic for the pinned-gun path: after posing the model at the held
+// frame, log (a) where raylib's OWN skinning matrix sends the wrist bind point,
+// (b) where MY keyframe-derived skin matrix sends it, (c) where the most wrist-bound
+// ARM VERTEX actually landed (mesh.animVertices = the rendered ground truth). If
+// (a)==(b)==(c), gun and hand must coincide on screen; whichever differs is the lie.
+static Matrix XformToMatrix(Transform t);      // fwd decl (defined near DrawPinnedGun)
+static void DebugPinProbe(Weapon *w){
+    if (!w->pinGun) return;                                       // only instrumented weapons
+    if (w->handBone<0 || w->animN<=0 || !w->model.boneMatrices){  // log WHY it can't probe -- a NULL boneMatrices means arms never animate at all
+        DebugLog("pinprobe","\"skip\":true,\"handBone\":%d,\"animN\":%d,\"boneMatricesNull\":%d",
+                 w->handBone, w->animN, w->model.boneMatrices==NULL);
+        return;
+    }
+    int hb=w->handBone;
+    float hold=(w->idleHold>=0)?(float)w->idleHold:0.0f;
+    ANIM_APPLY(w->model, w->anim[0], hold);                       // pose arms + boneMatrices at the held frame
+    int kf=(int)hold; int nf=ANIM_FRAMES(w->anim[0]); if (kf<0) kf=0; if (nf>0 && kf>=nf) kf=nf-1;
+    Vector3 pw=w->model.skeleton.bindPose[hb].translation;        // the wrist, bind space
+    Vector3 raylibSays=Vector3Transform(pw, w->model.boneMatrices[hb]);
+    Matrix mySkin=MatrixMultiply(MatrixInvert(XformToMatrix(w->model.skeleton.bindPose[hb])),
+                                 XformToMatrix(w->anim[0].keyframePoses[kf][hb]));
+    Vector3 mineSays=Vector3Transform(pw, mySkin);
+    Vector3 posedKey=w->anim[0].keyframePoses[kf][hb].translation;
+    // ground truth: the arm vertex most bound to the wrist, baked vs rendered
+    Vector3 armBaked={0,0,0}, armPosed={0,0,0}; float bestW=0;
+    for (int k=0;k<w->model.meshCount && k<64;k++){
+        Mesh *ms=&w->model.meshes[k];
+        if ((w->gunMask>>k)&1ULL) continue;                       // arms only
+        if (!ms->boneWeights||!ms->boneIndices||!ms->animVertices) continue;
+        for (int v=0;v<ms->vertexCount;v++)
+            for (int c=0;c<4;c++)
+                if ((int)ms->boneIndices[v*4+c]==hb && ms->boneWeights[v*4+c]>bestW){
+                    bestW=ms->boneWeights[v*4+c];
+                    armBaked=(Vector3){ms->vertices[v*3],ms->vertices[v*3+1],ms->vertices[v*3+2]};
+                    armPosed=(Vector3){ms->animVertices[v*3],ms->animVertices[v*3+1],ms->animVertices[v*3+2]};
+                }
+    }
+    DebugLog("pinprobe","\"hold\":%d,\"bindW\":[%.2f,%.2f,%.2f],\"keyPose\":[%.2f,%.2f,%.2f],\"raylibSkin\":[%.2f,%.2f,%.2f],\"mySkin\":[%.2f,%.2f,%.2f],\"armW\":%.2f,\"armBaked\":[%.2f,%.2f,%.2f],\"armPosed\":[%.2f,%.2f,%.2f]",
+             kf, pw.x,pw.y,pw.z, posedKey.x,posedKey.y,posedKey.z, raylibSays.x,raylibSays.y,raylibSays.z,
+             mineSays.x,mineSays.y,mineSays.z, bestW, armBaked.x,armBaked.y,armBaked.z, armPosed.x,armPosed.y,armPosed.z);
+}
+
 // Make slot n the live weapon: copy its model/clips/tuning into the globals.
 static void ActivateWeapon(int n){
     g_curWeapon=n;
     Weapon *w=&g_weapons[n];
     g_gun=w->model; g_gunAnim=w->anim; g_gunAnimN=w->animN; g_hasGun=w->has;
-    g_aIdle=w->aIdle; g_aShoot=w->aShoot; g_aReload=w->aReload;
+    g_aIdle=w->aIdle; g_aShoot=w->aShoot; g_aReload=w->aReload; g_aWalk=w->aWalk;
     g_reloadSeqN=w->reloadSeqN; for(int i=0;i<w->reloadSeqN;i++) g_reloadSeq[i]=w->reloadSeq[i];
     g_reloadStep=-1; g_reloading=0;
     g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
     g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch; g_vmRoll=w->roll;
     g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
-    g_burstLeft=0; g_spin=0.0f; g_mgBarrelAngle=0.0f; g_mgSpinT=0.0f; g_shake=0.0f; g_mgHeat=0.0f; g_mgLock=0; g_mgFiring=0; g_lmgPause=0.0f; g_lmgWasPlaying=0;   // reset fire-mode state
+    g_burstLeft=0; g_spin=0.0f; g_mgBarrelAngle=0.0f; g_mgSpinT=0.0f; g_shake=0.0f; g_mgHeat=0.0f; g_mgLock=0; g_mgFiring=0; g_lmgPause=0.0f; g_lmgWasPlaying=0; g_flameHeat=0.0f;   // reset fire-mode state
+    DebugPinProbe(w);    // pinned guns: log raylib-vs-mine wrist placement (no-op otherwise)
 }
 static void SwitchWeapon(int n){
     if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
@@ -304,10 +411,129 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     w->model=LoadModel(fp);
     w->anim=LoadModelAnimations(fp,&w->animN);
     w->has=(w->model.meshCount>0);
+    // Cull stray morph-target / blend-shape helper meshes: those ship with NO diffuse
+    // texture AND the default white material, so raylib draws them as a white untextured
+    // blob over the gun (the M16A3's "shape_pose" mesh -> "rifle looks unskinned"). Only
+    // hide meshes that are BOTH untextured AND pure white -- legit flat-colour parts (the
+    // flamethrower's tinted glass / status lights have real baseColorFactor) are kept.
+    for (int k=0;k<w->model.meshCount;k++){
+        int mi=w->model.meshMaterial[k]; if (mi<0) continue;
+        MaterialMap dm=w->model.materials[mi].maps[MATERIAL_MAP_DIFFUSE];
+        if (dm.texture.id==rlGetTextureIdDefault() && dm.color.r==255 && dm.color.g==255 && dm.color.b==255 && dm.color.a==255){
+            w->model.meshes[k].vertexCount=0; w->model.meshes[k].triangleCount=0;   // draw nothing for this mesh
+            DebugLog("weapon","\"slot\":%d,\"culledUntexturedMesh\":%d",slot,k);
+        }
+    }
+    // Gun-pin: locate the right-hand bone so a detached static gun mesh can ride it
+    // (set per-slot via pinGun). Prefer the RIGHT wrist/hand/palm; fall back to any.
+    w->handBone=-1; w->handBoneL=-1; w->pinScale=1.0f; w->pinOff=(Vector3){0,0,0}; w->pinYaw=0; w->pinPitch=0; w->pinRoll=0;
+    w->pinAlign=MatrixIdentity(); w->pinSeat=(Vector3){0,0,0};
+    for (int b=0;b<w->model.skeleton.boneCount;b++){
+        const char *bn=w->model.skeleton.bones[b].name; char low[40]; int j=0;
+        for(;bn[j]&&j<39;j++){char c=bn[j]; low[j]=(c>='A'&&c<='Z')?c+32:c;} low[j]=0;
+        if (!(strstr(low,"wrist")||strstr(low,"hand")||strstr(low,"palm"))) continue;
+        int isL=(strstr(low,"l_")==low)||strstr(low,"left");
+        int isR=(strstr(low,"r_")==low)||strstr(low,"right");
+        if (isL){ if (w->handBoneL<0) w->handBoneL=b; }
+        else if (isR){ if (w->handBone<0) w->handBone=b; }
+        else if (w->handBone<0) w->handBone=b;            // unsided "hand" -> usable as the ride bone
+    }
+    // Which meshes are GUN parts? This raylib build gives EVERY mesh of a rigged model
+    // bone data (static meshes get rigid-bound to a bone), so "boneCount==0" finds
+    // nothing (the first pin attempt classified all 15 meshes as arms -> the pin was a
+    // no-op). Real test: a gun part is unskinned OR rigid (every vertex 100%% on the
+    // same single bone); the arms are BLENDED across many bones.
+    w->gunMask=0ULL;
+    for (int k=0;k<w->model.meshCount && k<64;k++){
+        Mesh *ms=&w->model.meshes[k];
+        if (ms->vertexCount<=0 || !ms->vertices) continue;
+        int isGun=0;
+        if (!ms->boneIndices || !ms->boneWeights) isGun=1;            // no skin data at all -> static gun part
+        else {
+            int rigid=1, rb=-2;                                       // rb: -2 unset, -1 unweighted, >=0 the single bone
+            for (int v=0;v<ms->vertexCount && rigid;v++){
+                int best=-1; float bw=0.0f;
+                for (int c=0;c<4;c++){ float wt=ms->boneWeights[v*4+c]; if (wt>bw){ bw=wt; best=(int)ms->boneIndices[v*4+c]; } }
+                int vb = (bw>=0.99f) ? best : ((bw<=0.01f) ? -1 : -3); // -3 = genuinely blended vertex
+                if (vb==-3){ rigid=0; break; }
+                if (rb==-2) rb=vb; else if (vb!=rb) rigid=0;          // spans multiple bones -> organic arms
+            }
+            isGun=rigid;
+        }
+        if (isGun) w->gunMask |= (1ULL<<k);
+    }
+    // Bind-space centre of the gun meshes. The pinned draw seats this point at the
+    // palms, so the gun starts in the hands instead of wherever the artist parked it;
+    // the .pin grip trim then nudges from there.
+    w->gunBindC=(Vector3){0,0,0};
+    { int nstat=0; Vector3 acc={0,0,0};
+      for (int k=0;k<w->model.meshCount && k<64;k++){
+        Mesh *ms=&w->model.meshes[k];
+        if (!((w->gunMask>>k)&1ULL)) continue;
+        Vector3 mn={1e9f,1e9f,1e9f}, mx={-1e9f,-1e9f,-1e9f};
+        for (int v=0;v<ms->vertexCount;v++){
+            float X=ms->vertices[v*3], Y=ms->vertices[v*3+1], Z=ms->vertices[v*3+2];
+            if(X<mn.x)mn.x=X; if(Y<mn.y)mn.y=Y; if(Z<mn.z)mn.z=Z;
+            if(X>mx.x)mx.x=X; if(Y>mx.y)mx.y=Y; if(Z>mx.z)mx.z=Z;
+        }
+        acc.x+=(mn.x+mx.x)*0.5f; acc.y+=(mn.y+mx.y)*0.5f; acc.z+=(mn.z+mx.z)*0.5f; nstat++;
+      }
+      if (nstat>0) w->gunBindC=(Vector3){acc.x/nstat,acc.y/nstat,acc.z/nstat};
+      // Auto-seat + auto-align: the bind data shows the palms in their hold pose, so by
+      // default seat the gun's CENTRE at the palm MIDPOINT and rotate its principal
+      // (long) axis onto the palm-to-palm axis -- the gun then spans both hands like a
+      // real two-handed hold instead of hanging centred on one palm.
+      if (w->handBone>=0 && w->model.skeleton.bindPose){
+        Vector3 R=w->model.skeleton.bindPose[w->handBone].translation;
+        w->pinSeat=R;
+        if (nstat>0 && w->handBoneL>=0){
+            Vector3 Lp=w->model.skeleton.bindPose[w->handBoneL].translation;
+            w->pinSeat=(Vector3){(R.x+Lp.x)*0.5f,(R.y+Lp.y)*0.5f,(R.z+Lp.z)*0.5f};
+            double C[3][3]={{0,0,0},{0,0,0},{0,0,0}}; long nv=0;   // covariance of the gun verts
+            for (int k=0;k<w->model.meshCount && k<64;k++){
+                Mesh *ms=&w->model.meshes[k];
+                if (!((w->gunMask>>k)&1ULL)) continue;
+                for (int v=0;v<ms->vertexCount;v++){
+                    double dx=ms->vertices[v*3]-w->gunBindC.x, dy=ms->vertices[v*3+1]-w->gunBindC.y, dz=ms->vertices[v*3+2]-w->gunBindC.z;
+                    C[0][0]+=dx*dx; C[0][1]+=dx*dy; C[0][2]+=dx*dz;
+                    C[1][1]+=dy*dy; C[1][2]+=dy*dz; C[2][2]+=dz*dz; nv++;
+                }
+            }
+            C[1][0]=C[0][1]; C[2][0]=C[0][2]; C[2][1]=C[1][2];
+            if (nv>0){
+                double ax=1.0,ay=0.31,az=0.17;                      // power iteration -> dominant eigenvector = the gun's long axis
+                for (int it=0;it<32;it++){
+                    double nx=C[0][0]*ax+C[0][1]*ay+C[0][2]*az;
+                    double ny=C[1][0]*ax+C[1][1]*ay+C[1][2]*az;
+                    double nz=C[2][0]*ax+C[2][1]*ay+C[2][2]*az;
+                    double L2=sqrt(nx*nx+ny*ny+nz*nz); if (L2<1e-12) break;
+                    ax=nx/L2; ay=ny/L2; az=nz/L2;
+                }
+                Vector3 u={(float)ax,(float)ay,(float)az};
+                Vector3 vdir=Vector3Normalize(Vector3Subtract(Lp,R));   // rear (right) palm -> front (left) palm
+                if (Vector3DotProduct(u,vdir)<0.0f) u=Vector3Negate(u);
+                Vector3 axv=Vector3CrossProduct(u,vdir); float al=Vector3Length(axv);
+                float dot=Vector3DotProduct(u,vdir); if(dot>1)dot=1; if(dot<-1)dot=-1;
+                if (al>1e-4f) w->pinAlign=MatrixRotate(Vector3Scale(axv,1.0f/al), acosf(dot));
+            }
+        }
+      }
+      // Measured from grenadelauncher.glb itself: the AUTHORED scene already has the
+      // launcher in the hands (gun centre [0.0,11.0,19.9] -- 9.3 units from the palm
+      // midpoint, the exact grip the hand animation was authored around). If raylib's
+      // bake lands the gun there, the authored placement IS the grip: keep it verbatim
+      // and just ride it on the hand bone, instead of re-seating by centroid/PCA.
+      { Vector3 authoredC={0.02f,11.0f,19.88f};
+        w->pinAuthored = (nstat>0 && w->handBone>=0 && Vector3Distance(w->gunBindC,authoredC)<3.0f); }
+      DebugLog("gunpin","\"slot\":%d,\"gunMeshes\":%d,\"mask\":%llu,\"handR\":%d,\"handL\":%d,\"authored\":%d,\"gunC\":[%.1f,%.1f,%.1f],\"seat\":[%.1f,%.1f,%.1f]",
+               slot, nstat, w->gunMask, w->handBone, w->handBoneL, w->pinAuthored, w->gunBindC.x, w->gunBindC.y, w->gunBindC.z, w->pinSeat.x, w->pinSeat.y, w->pinSeat.z);
+    }
+    LoadPin(w->tunePath,&w->pinOff,&w->pinScale,&w->pinYaw,&w->pinPitch,&w->pinRoll,&w->armsROff);
+    ApplyArmsRDelta(w, w->armsROff);   // bake the saved right-hand nudge into the arm verts (no-op when zero)
     // Resolve clips by name with priorities (first match wins per role): a real
     // "idle" beats take/draw/hold; "shot" counts as a fire clip; the plain
     // "reload" beats variants like reload_full. Handles e.g. AK_Idle/Shot/Reload.
-    int rIdle=-1, rIdleAlt=-1, rShoot=-1, rReload=-1;
+    int rIdle=-1, rIdleAlt=-1, rShoot=-1, rReload=-1, rWalk=-1;
     for (int i=0;i<w->animN;i++){
         const char *nm=w->anim[i].name; char low[64]; int j=0;
         for (; nm[j] && j<63; j++){ char c=nm[j]; if(c>='A'&&c<='Z') c+=32; low[j]=c; }
@@ -316,7 +542,9 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
         else if (strstr(low,"take")||strstr(low,"draw")||strstr(low,"weild")||strstr(low,"wield")||strstr(low,"hold")){ if(rIdleAlt<0) rIdleAlt=i; }
         if ((strstr(low,"shoot")||strstr(low,"fire")||strstr(low,"shot")) && rShoot<0) rShoot=i;
         if (strstr(low,"reload") && rReload<0) rReload=i;
+        if ((strstr(low,"walk")||strstr(low,"run")) && rWalk<0) rWalk=i;
     }
+    w->aWalk = (rWalk>=0)?rWalk:-1;   // -1 = no walk clip (most guns); set below after aIdle resolves
     w->aIdle  = (rIdle>=0)?rIdle:(rIdleAlt>=0?rIdleAlt:0);
     w->aShoot = (rShoot>=0)?rShoot:w->aIdle;
     w->aReload= (rReload>=0)?rReload:w->aIdle;
@@ -358,7 +586,8 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
         w->off0=(Vector3){ 0.20f, -0.35f, -1.30f }; w->off=w->off0;
         w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;  // orientation still a guess; user rotates
     }
-    LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll);
+    w->idleHold=-1;
+    LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll,&w->idleHold);
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
              slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
 }
@@ -394,9 +623,21 @@ typedef struct { Vector3 pos, vel; float life, life0, size, rest; Color col; int
 static Tracer g_tracers[MAX_TRACERS];
 static Spark  g_sparks[MAX_SPARKS];
 
+// Scorch decals: persistent soot marks the flamethrower burns onto whatever it hits.
+// Each is a cluster of flat dark discs lying on the surface (oriented to its normal).
+typedef struct { Vector3 pos, n; float r; unsigned int seed; int active; } Scorch;
+#define MAX_SCORCH 192
+static Scorch g_scorch[MAX_SCORCH];
+static int    g_scorchNext=0;
+static float  g_scorchT=0.0f;            // throttle so the flame lays marks at a steady rate, not every frame
+static void AddScorch(Vector3 p, Vector3 n, float r){
+    g_scorch[g_scorchNext]=(Scorch){ p, Vector3Normalize(n), r, (unsigned int)GetRandomValue(1,1<<30), 1 };
+    g_scorchNext=(g_scorchNext+1)%MAX_SCORCH;
+}
+
 // Minigun barrel smoke/steam: soft camera-facing billboards that rise, expand and fade.
 // hot=1 firing (darker, faster gunsmoke); hot=0 spin-down/cooling (white steam).
-typedef struct { Vector3 pos, vel; float life, life0, sz0, sz1; int hot; } Smoke;
+typedef struct { Vector3 pos, vel; float life, life0, sz0, sz1; int hot; int flame; int liquid; } Smoke;
 #define MAX_SMOKE 384
 static Smoke      g_smoke[MAX_SMOKE];
 static Texture2D  g_smokeTex;            // soft radial-gradient puff
@@ -417,26 +658,106 @@ static void SpawnSmoke(Vector3 o, int hot){
         g_smoke[s]=p; return;
     }
 }
+// Flamethrower jet: bright billboards shot FORWARD along the aim, with spread, that
+// decelerate and curl up as they age. Reuses the smoke pool/draw (flame flag picks
+// the additive fire gradient). o=muzzle, fwd=aim direction.
+static void SpawnFlame(Vector3 o, Vector3 fwd){
+    for (int s=0;s<MAX_SMOKE;s++){
+        if (g_smoke[s].life>0) continue;
+        Smoke p={0};
+        p.pos=o;
+        float spd=8.0f+GetRandomValue(0,50)/10.0f;
+        Vector3 jit={GetRandomValue(-30,30)/100.0f,GetRandomValue(-30,30)/100.0f,GetRandomValue(-30,30)/100.0f};
+        p.vel=Vector3Add(Vector3Scale(fwd,spd), Vector3Scale(jit,9.0f));   // strong lateral spread -> a fat, fanning gout
+        p.vel.y += 0.6f;                                       // the jet licks upward as it travels
+        p.life0=0.34f+GetRandomValue(0,22)/100.0f; p.life=p.life0;  // short-lived: a lick of fire, not lingering smoke
+        p.sz0=0.16f+GetRandomValue(0,8)/100.0f;
+        p.sz1=1.05f+GetRandomValue(0,55)/100.0f;               // billow large as it burns out -> a wide wall of fire
+        p.hot=1; p.flame=1;
+        g_smoke[s]=p; return;
+    }
+}
+// Unignited fuel: the flamethrower's warm-up spit -- a pale liquid jet that arcs DOWN
+// under gravity (heavy, not buoyant) and does no damage. Same nozzle/aim as the flame.
+static void SpawnLiquid(Vector3 o, Vector3 fwd){
+    for (int s=0;s<MAX_SMOKE;s++){
+        if (g_smoke[s].life>0) continue;
+        Smoke p={0};
+        p.pos=o;
+        float spd=6.0f+GetRandomValue(0,30)/10.0f;             // a bit slower/heavier than lit flame
+        Vector3 jit={GetRandomValue(-12,12)/100.0f,GetRandomValue(-12,12)/100.0f,GetRandomValue(-12,12)/100.0f};
+        p.vel=Vector3Add(Vector3Scale(fwd,spd), Vector3Scale(jit,3.0f));
+        p.life0=0.45f+GetRandomValue(0,25)/100.0f; p.life=p.life0;  // lives a touch longer (it falls, doesn't burn up)
+        p.sz0=0.05f+GetRandomValue(0,4)/100.0f;
+        p.sz1=0.16f+GetRandomValue(0,10)/100.0f;               // a fine mist, doesn't billow like fire
+        p.hot=0; p.liquid=1;
+        g_smoke[s]=p; return;
+    }
+}
 static void UpdateSmoke(float dt){
     for (int s=0;s<MAX_SMOKE;s++){ Smoke *p=&g_smoke[s]; if (p->life<=0) continue;
         p->life -= dt;
-        p->vel.y += 0.5f*dt;                                   // buoyancy
-        p->vel.x *= (1.0f-1.6f*dt); p->vel.z *= (1.0f-1.6f*dt);// drag
+        if (p->liquid){                                        // unignited fuel: heavy, falls + air drag
+            p->vel.y -= 9.0f*dt;
+            p->vel = Vector3Scale(p->vel, 1.0f-2.4f*dt);
+        } else {
+            p->vel.y += 0.5f*dt;                               // smoke/flame: buoyancy
+            if (p->flame) p->vel = Vector3Scale(p->vel, 1.0f-3.2f*dt);  // the fire jet decelerates fast (air drag)
+            else { p->vel.x *= (1.0f-1.6f*dt); p->vel.z *= (1.0f-1.6f*dt); } // smoke: horizontal drag only
+        }
         p->pos = Vector3Add(p->pos, Vector3Scale(p->vel,dt));
     }
 }
 static void DrawSmoke(Camera3D cam){
     if (!g_hasSmokeTex) return;
     rlDisableDepthMask();                                      // particles blend, don't occlude each other
-    for (int s=0;s<MAX_SMOKE;s++){ Smoke *p=&g_smoke[s]; if (p->life<=0) continue;
+    for (int s=0;s<MAX_SMOKE;s++){ Smoke *p=&g_smoke[s]; if (p->life<=0 || p->flame) continue;
         float age=1.0f-p->life/p->life0;                       // 0..1
         float sz=p->sz0+(p->sz1-p->sz0)*age;
         float fade=p->life/p->life0; fade*=fade;               // ease-out fade
-        unsigned char g=p->hot?90:205;                         // gunsmoke grey vs white steam
-        Color tint={g,g,g,(unsigned char)(fade*(p->hot?150:120))};
+        Color tint;
+        if (p->liquid) tint=(Color){210,200,150,(unsigned char)(fade*150)};  // pale amber atomised fuel
+        else { unsigned char g=p->hot?90:205; tint=(Color){g,g,g,(unsigned char)(fade*(p->hot?150:120))}; } // gunsmoke grey vs white steam
         DrawBillboard(cam, g_smokeTex, p->pos, sz, tint);
     }
+    // Flame pass: additive so overlapping licks build into a bright hot core, and a
+    // young->old colour ramp (white-yellow -> orange -> deep red) that reads as fire.
+    BeginBlendMode(BLEND_ADDITIVE);
+    for (int s=0;s<MAX_SMOKE;s++){ Smoke *p=&g_smoke[s]; if (p->life<=0 || !p->flame) continue;
+        float age=1.0f-p->life/p->life0;                       // 0..1
+        float sz=p->sz0+(p->sz1-p->sz0)*age;
+        float fade=p->life/p->life0;                           // linear fade-out
+        unsigned char a=(unsigned char)(fade*200.0f);
+        Color tint = (age<0.25f) ? (Color){255,240,180,a}     // ignition: hot white-yellow
+                   : (age<0.60f) ? (Color){255,140,40,a}      // body: orange
+                                 : (Color){170,35,20,a};       // dying: deep red
+        DrawBillboard(cam, g_smokeTex, p->pos, sz, tint);
+    }
+    EndBlendMode();
     rlEnableDepthMask();
+}
+// Soot decals: each scorch is a ragged cluster of flat near-black discs lying ON the
+// burned surface (built in the surface's tangent plane, oriented to its normal), so
+// overlapping marks build up grime. Depth-tested with the world so walls occlude them.
+static void DrawScorch(void){
+    for (int i=0;i<MAX_SCORCH;i++){
+        Scorch *s=&g_scorch[i]; if (!s->active) continue;
+        Vector3 n=s->n;
+        Vector3 up = (fabsf(n.y)>0.9f) ? (Vector3){1,0,0} : (Vector3){0,1,0};
+        Vector3 T=Vector3Normalize(Vector3CrossProduct(up,n));
+        Vector3 B=Vector3CrossProduct(n,T);
+        unsigned int sd=s->seed?s->seed:1u;
+        for (int b=0;b<7;b++){                                  // overlapping discs -> a sooty, irregular smudge
+            unsigned int h=sd*2654435761u + (unsigned int)b*2246822519u; h^=h>>13; h*=0x9E3779B1u;
+            float t1=(float)((h>>3)&1023)/1023.0f, t2=(float)((h>>13)&1023)/1023.0f, t3=(float)((h>>23)&255)/255.0f;
+            float a=t1*6.2831853f, rr=sqrtf(t2)*s->r;
+            Vector3 c=Vector3Add(s->pos, Vector3Add(Vector3Scale(T,cosf(a)*rr), Vector3Scale(B,sinf(a)*rr)));
+            float dr=s->r*(0.30f+0.22f*t3)*(1.0f-0.4f*(rr/s->r));   // solid centre, smaller flecks toward the edge
+            Vector3 p0=Vector3Add(c, Vector3Scale(n, 0.012f));     // float just off the surface (no z-fight)
+            Vector3 p1=Vector3Add(c, Vector3Scale(n, 0.028f));
+            DrawCylinderEx(p0,p1, dr,dr, 10, (Color){18,15,13,(unsigned char)(110+(int)(t3*60))});
+        }
+    }
 }
 
 // ---- Enemies (assets/enemy.glb - Mixamo walk rig, 37 bones, verified) -------
@@ -465,10 +786,21 @@ static void DrawSmoke(Camera3D cam){
 #define HEAD_ZONE_H        0.32f      // vertical extent of the head box (down from the top)
 #define HEAD_RADIUS        0.22f      // half-width of the head box (tighter than the body)
 #define HEADSHOT_MULT      3.0f       // headshot damage multiplier
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; } Enemy; // state: 0 dead,1 alive,2 dying; roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
+// Flamethrower (slot 7): a continuous cone of fire. Burns any enemy inside the
+// cone + range while the trigger is held, no per-shot cooldown.
+#define FLAME_RANGE        8.5f       // reach of the fire cone (units)
+#define FLAME_COS          0.80f      // cos of the half-angle (~37deg): a broad billowing gout, not a thin jet
+#define FLAME_DPS          85.0f      // damage/sec to an enemy fully in the cone (~1.2s to kill at 100hp)
+// Knife (slot 8): a short, wide melee swing on each click.
+#define KNIFE_RANGE        2.6f       // lunge reach (units)
+#define KNIFE_COS          0.55f      // cos half-angle (~57deg): a wide slash, forgiving to aim
+#define KNIFE_DMG          75.0f      // per swing; two slashes (or a clean one on a softened enemy) kills
+#define KNIFE_CD           0.42f      // seconds between swings (the slash cadence)
+#define MAX_BURN 8       // localised flame-char marks per body (height up the body + how dark/wide that spot is)
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
-typedef struct { Vector3 pos; float yaw; int active; } Corpse;   // lasting dead bodies, posed at the death-anim end
+typedef struct { Vector3 pos; float yaw; int active; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
 static Corpse          g_corpses[MAX_CORPSES];
 static int             g_corpseNext = 0;
 static Model           g_enemy;
@@ -483,6 +815,10 @@ static int             g_headshots = 0;        // running headshot-kill tally (H
 static float           g_hsFlash = 0.0f;       // >0: flash "HEADSHOT!" near the crosshair
 static float           g_playerHp = 100.0f;
 static int             g_godMode = 1;           // dev stage: invulnerable (no death, no "YOU DIED"). G toggles.
+static int             g_dead = 0;              // player death state: world frozen, waiting on a respawn input
+static float           g_deadT = 0.0f;          // seconds since death (brief delay before respawn is allowed)
+static float           g_hurt = 0.0f;           // 0..1 red damage flash, spikes on hp loss then decays
+static float           g_prevHp = 100.0f;       // last frame's hp, to detect a drop -> trigger the hurt flash
 static int             g_noclip = 0;            // map mode: F toggles free-fly / noclip vs FPS collision
 static Vector3         g_spawnResetPos = {0,0,0};  // where to drop the player back to (fell off the map / new map)
 static float           g_voidY = -1e9f;            // below this Y the player has fallen out of the world
@@ -492,7 +828,7 @@ static void EnemyArm(int i, Vector3 pos){       // common: bring enemy i to life
     g_enemies[i].pos=pos; g_enemies[i].hp=ENEMY_HP; g_enemies[i].state=1;
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
     g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun; g_enemies[i].roarT=0; g_enemies[i].drawY=pos.y;
-    g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f;
+    g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f; g_enemies[i].burnN=0;
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
@@ -651,6 +987,82 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
     return best;
 }
 
+// Apply damage to alive enemy ei (dmg already includes any headshot multiplier).
+// Shared by every weapon: bullets, the flame cone, and the knife. Handles the
+// flinch, the kill -> dying state + tally + death sound. blood>0 spurts blood at
+// hitPt along dir; head>0 also pops the "HEADSHOT!" flash + counts a headshot kill.
+static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, int blood){
+    if (ei<0 || g_enemies[ei].state!=1) return;
+    if (blood) SpawnBlood(hitPt, dir, head?1.9f:1.0f, g_enemies[ei].pos.y);
+    g_enemies[ei].hp -= dmg;
+    if (head) g_hsFlash=1.1f;
+    if (g_enemies[ei].hp<=0){
+        g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0;
+        g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
+        g_kills++; if (head) g_headshots++;
+        if (g_audio && g_nDeathSnd>0) PlaySound(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)]);
+    } else {
+        g_enemies[ei].hitT=0.45f;                         // non-fatal hit -> flinch
+    }
+}
+
+// ---- Grenade launcher (slot 0) -- arcing projectile + radial explosion ----------
+typedef struct { Vector3 pos, vel; float life; int active; } Grenade;
+#define MAX_GREN     8
+#define GREN_SPEED   30.0f     // launch speed (units/s)
+#define GREN_GRAV    24.0f     // downward accel -> the lob arc
+#define GREN_RADIUS  4.8f      // explosion blast radius
+#define GREN_DMG     140.0f    // damage at the centre, linear falloff to 0 at the edge
+#define GREN_LIFE    4.0f      // fuse: detonates after this long if it hasn't hit anything
+#define GL_FIRE_CD   0.85f     // seconds between launches
+// 'allanims' frame layout (605 frames total). Wrist-motion analysis of the clip shows
+// the hold pose at frame 0 (and ~531-573), with action bursts at ~127-131, ~179-183,
+// ~388-392 -- the first burst pair reads as the shell-load action:
+#define GL_IDLE_FRAME   0      // rest/hold pose kept between shots
+#define GL_RELOAD_FROM  120    // reload sub-range (R plays FROM..TO then returns to idle)
+#define GL_RELOAD_TO    185
+static Grenade g_gren[MAX_GREN];
+static void LaunchGrenade(Camera3D cam){
+    Vector3 dir=Vector3Normalize(Vector3Subtract(cam.target,cam.position));
+    Vector3 muzzle=Vector3Add(cam.position, Vector3Scale(dir,0.6f));
+    for (int i=0;i<MAX_GREN;i++) if (!g_gren[i].active){
+        g_gren[i]=(Grenade){ muzzle, Vector3Scale(dir,GREN_SPEED), GREN_LIFE, 1 };
+        g_gren[i].vel.y += 3.0f;                            // a touch of loft -> it arcs, not a flat line
+        DebugLog("grenade","\"launched\":1");
+        return;
+    }
+}
+static void GrenadeExplode(Vector3 p){
+    for (int i=0;i<MAX_ENEMIES;i++){                        // radial damage, linear falloff
+        if (g_enemies[i].state!=1) continue;
+        Vector3 c=(Vector3){g_enemies[i].pos.x, g_enemies[i].pos.y+ENEMY_HEIGHT*0.5f, g_enemies[i].pos.z};
+        float d=Vector3Distance(p,c);
+        if (d<=GREN_RADIUS) HurtEnemy(i, GREN_DMG*(1.0f-d/GREN_RADIUS), 0, (Vector3){0,1,0}, c, 1);
+    }
+    for (int q=0;q<26;q++) SpawnSmoke(p,1);                 // fireball: smoke...
+    for (int q=0;q<34;q++) SpawnFlame(p,(Vector3){GetRandomValue(-100,100)/100.0f, GetRandomValue(-30,100)/100.0f, GetRandomValue(-100,100)/100.0f}); // ...radial flame
+    SpawnImpact(p,(Vector3){0,1,0});                        // bright spark glints
+    AddScorch(p,(Vector3){0,1,0}, 1.3f);                   // soot on the ground
+    g_shake=fminf(1.0f, g_shake+0.7f);                     // concussion
+    DebugLog("grenade","\"explode\":[%.1f,%.1f,%.1f]", p.x,p.y,p.z);
+}
+static void UpdateGrenades(float dt){
+    for (int i=0;i<MAX_GREN;i++){ Grenade *g=&g_gren[i]; if (!g->active) continue;
+        g->life-=dt;
+        Vector3 prev=g->pos;
+        g->vel.y -= GREN_GRAV*dt;
+        g->pos=Vector3Add(g->pos, Vector3Scale(g->vel,dt));
+        int hit=0; Vector3 hp=g->pos;
+        Vector3 seg=Vector3Subtract(g->pos,prev); float L=Vector3Length(seg);
+        if (g_hasMap && g_mapCol.ready){                    // hit map geometry along this step?
+            if (L>1e-4f){ Vector3 d=Vector3Scale(seg,1.0f/L); float wd=MapRayNearest(prev,d,L+0.15f);
+                if (wd>0.0f && wd<=L+0.1f){ hp=Vector3Add(prev,Vector3Scale(d,wd)); hit=1; } }
+        } else if (g->pos.y<=0.12f){ hp=(Vector3){g->pos.x,0.12f,g->pos.z}; hit=1; }   // arena floor
+        if (!hit && g->life<=0.0f){ hit=1; hp=g->pos; }     // fuse ran out -> air burst
+        if (hit){ GrenadeExplode(hp); g->active=0; }
+    }
+}
+
 static void Fire(Camera3D cam) {
     if (g_fireCd>0) return;
     Weapon *cw=&g_weapons[g_curWeapon];
@@ -668,18 +1080,8 @@ static void Fire(Camera3D cam) {
     float ed; Vector3 ep; int head=0;
     int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep,&head);
     if (ei>=0){
-        end=ep;
-        SpawnBlood(ep,dir, head?1.9f:1.0f, g_enemies[ei].pos.y);   // gobs pool on the enemy's floor
-        g_enemies[ei].hp -= head ? ENEMY_DMG_PER_SHOT*HEADSHOT_MULT : ENEMY_DMG_PER_SHOT;
-        if (head) g_hsFlash=1.1f;                         // flash "HEADSHOT!" on any head hit
-        if (g_enemies[ei].hp<=0){
-            g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0;
-            g_enemies[ei].drawY=g_enemies[ei].pos.y;      // settle the render height so the corpse doesn't pop
-            g_kills++; if (head) g_headshots++;           // tally a confirmed headshot kill
-            if (g_audio && g_nDeathSnd>0) PlaySound(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)]);   // random death sound
-        } else {
-            g_enemies[ei].hitT=0.45f;                     // non-fatal hit -> flinch
-        }
+        end=ep;                                           // gobs pool on the enemy's floor
+        HurtEnemy(ei, head ? ENEMY_DMG_PER_SHOT*HEADSHOT_MULT : ENEMY_DMG_PER_SHOT, head, dir, ep, 1);
     } else if (worldHit){
         SpawnImpact(hit,nrm);
     }
@@ -825,7 +1227,9 @@ static void UpdateEnemies(float dt){
             // not a fixed timer -- otherwise the corpse is recorded mid-fall.
             if ((nf<=0 || e->animT>=(float)nf) && e->deathT>0.2f){
                 float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
-                g_corpses[g_corpseNext]=(Corpse){ e->pos, yaw, 1 };   // lasting body, posed at the final death frame
+                Corpse *cp=&g_corpses[g_corpseNext]; *cp=(Corpse){0};            // lasting body, posed at the final death frame
+                cp->pos=e->pos; cp->yaw=yaw; cp->active=1; cp->burnN=e->burnN;    // keep the soot marks it earned while alive
+                for (int k=0;k<e->burnN;k++){ cp->burnY[k]=e->burnY[k]; cp->burnR[k]=e->burnR[k]; }
                 g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
                 if (!g_noEnemies) SpawnEnemy(i); else e->state=0;
             }
@@ -910,9 +1314,46 @@ static void SaveOptions(void){
     FILE *f=fopen("options.txt","w"); if(!f) return;
     fprintf(f,"fullscreen %d\n", g_fullscreen?1:0); fclose(f);
 }
+// Fullscreen as a plain UNDECORATED window sized to the monitor -- NOT raylib's
+// ToggleBorderlessWindowed(), which on macOS drops the window into a native
+// fullscreen Space that swallows Cmd-Tab and stops delivering keys (so ESC could
+// never reach the menu). A borderless normal window stays a normal window: Cmd-Tab
+// works and ESC opens the menu. on=1 cover the monitor, on=0 restore 1280x720.
+static void ApplyFullscreen(int on){
+    int mon=GetCurrentMonitor();
+    int mw=GetMonitorWidth(mon), mh=GetMonitorHeight(mon);
+    if (on){
+        SetWindowState(FLAG_WINDOW_UNDECORATED);
+        SetWindowSize(mw, mh);
+        SetWindowPosition(0, 0);
+    } else {
+        ClearWindowState(FLAG_WINDOW_UNDECORATED);
+        SetWindowSize(1280, 720);
+        SetWindowPosition((mw-1280)/2, (mh-720)/2);   // re-centre on the monitor
+    }
+}
+
+// Bring the player back after death: full health, back to the spawn point. The
+// field is left as-is -- the enemies that killed you are still out there.
+static void RespawnPlayer(void){
+    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f;
+    g_dead=0; g_deadT=0.0f;
+    g_pos = g_hasMap ? g_spawnResetPos : (Vector3){0,EYE_H,6};
+    g_vy=0.0f; g_grounded=0; g_eyeSmooth=0.0f;
+    DebugLog("respawn","\"pos\":[%.1f,%.1f,%.1f]", g_pos.x,g_pos.y,g_pos.z);
+}
 
 static void Update(void) {
     float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
+
+    // While P-paused, ANY of P / ESC / click resumes (handled here, before ESC would
+    // otherwise open the options menu). Stays captured so play resumes seamlessly.
+    if (g_paused){
+        if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
+            g_paused=0; DebugLog("pause","\"paused\":false");
+        }
+        return;
+    }
 
     // ESC toggles the options/pause menu. While open the cursor is freed for
     // clicking and the whole gameplay update is skipped (early return), so the
@@ -927,7 +1368,7 @@ static void Update(void) {
             Vector2 mp=GetMousePosition();
             for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))){
                 if (i==0){                                  // Fullscreen toggle
-                    ToggleBorderlessWindowed(); g_fullscreen=!g_fullscreen; SaveOptions();
+                    g_fullscreen=!g_fullscreen; ApplyFullscreen(g_fullscreen); SaveOptions();
                     EnableCursor();                         // the toggle can re-grab; keep it free for the menu
                     DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
                 } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Select Map -> back to the picker
@@ -946,6 +1387,16 @@ static void Update(void) {
         DebugLog("pause","\"paused\":%s", g_paused?"true":"false");
     }
     if (g_paused) return;
+
+    // Dead: the world is frozen (no move/fire, enemies stop too) behind the "YOU
+    // DIED" overlay. After a short beat, ENTER or a click respawns you at spawn.
+    if (g_dead){
+        g_deadT += dt;
+        if (g_hurt>0) g_hurt=fmaxf(0.0f, g_hurt-dt*1.2f);
+        if (g_deadT>1.0f && (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
+            RespawnPlayer();
+        return;
+    }
 
     // Keep the mouse captured the whole time we're playing. macOS releases the
     // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
@@ -1038,18 +1489,108 @@ static void Update(void) {
     int lmb=IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     int firingNow=0;                                       // looped fire sound active this frame?
 
-    if (IsKeyPressed(KEY_R)) StartReload();
+    if (IsKeyPressed(KEY_R)){
+        if (cw->grenade){ g_reloading=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=(float)GL_RELOAD_FROM; }  // GL: play the reload frame slice of 'allanims'
+        else StartReload();
+    }
     else if (!g_reloading){
         if (cw->burst>0){                                  // rifle: one 3-round burst per trigger pull
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_burstLeft==0) g_burstLeft=cw->burst;
             if (g_burstLeft>0){ firingNow=1; if (g_fireCd<=0.0f){ Fire(g_cam); g_burstLeft--; } }
-        } else if (!cw->spinUp && !cw->soundGated && lmb){ // full-auto / one-shot (shotgun, sawnoff)
+        } else if (cw->grenade){                            // grenade launcher: lob one grenade per click
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_fireCd<=0.0f){
+                g_fireCd=GL_FIRE_CD; g_recoil=1.0f;
+                if (g_audio && cw->hasSnd) PlaySound(cw->fireSnd);
+                LaunchGrenade(g_cam);
+            }
+        } else if (!cw->spinUp && !cw->soundGated && !cw->flame && !cw->melee && !cw->grenade && lmb){ // full-auto / one-shot (shotgun, sawnoff)
             int willFire=(g_fireCd<=0.0f);
             firingNow=1; Fire(g_cam);
             if (willFire && cw->autoReload){               // shotgun: pump (reload anim) + cock sound between shots
                 StartReload();
                 if (g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd);
             }
+        }
+    }
+
+    // Flamethrower (slot 7): hold the trigger -> a continuous cone of fire. Spews
+    // flame billboards along the aim and burns every alive enemy inside the cone +
+    // range (LOS-checked on a map so it can't burn through walls). No per-shot cd.
+    if (cw->flame){
+        int firing = lmb && !g_reloading;
+        if (firing){
+            g_flameHeat += dt;                                           // warm up while held
+            firingNow=1;                                                 // the roar plays through the whole warm-up
+            // Emit from the GUN'S NOZZLE, not screen centre: offset right + a hair down
+            // (where the viewmodel barrel tip sits) and forward past the barrel, then the
+            // jet flies out along the aim. Built from the camera basis so it tracks the gun.
+            Vector3 upv=Vector3CrossProduct(right,fwd);                  // camera up
+            Vector3 muzzle=Vector3Add(g_pos, Vector3Add(Vector3Add(
+                Vector3Scale(fwd,   0.95f),                              // out at the barrel tip
+                Vector3Scale(right,  0.20f)),                            // to the right (held off-centre)
+                Vector3Scale(upv,   -0.12f)));                           // barely below the view axis -> at the tip
+            if (g_flameHeat < FLAME_WARMUP){                             // NOT lit yet: spit raw fuel, no damage
+                for (int q=0;q<2;q++) SpawnLiquid(muzzle, fwd);
+            } else {                                                     // ignited: flame + burn
+                for (int q=0;q<5;q++) SpawnFlame(muzzle, fwd);          // a dense, wide gout streaming from the nozzle
+                for (int i=0;i<MAX_ENEMIES;i++){
+                    if (g_enemies[i].state!=1) continue;
+                    Vector3 cen=(Vector3){g_enemies[i].pos.x, g_enemies[i].pos.y+ENEMY_HEIGHT*0.5f, g_enemies[i].pos.z};
+                    Vector3 to=Vector3Subtract(cen, muzzle); float dist=Vector3Length(to);
+                    if (dist>FLAME_RANGE || dist<1e-3f) continue;
+                    Vector3 tn=Vector3Scale(to, 1.0f/dist);
+                    if (Vector3DotProduct(tn, fwd) < FLAME_COS) continue;          // outside the cone
+                    if (g_hasMap && g_mapCol.ready){                                // wall between -> shielded
+                        float wd=MapRayNearest(muzzle, tn, dist); if (wd>0 && wd<dist-0.3f) continue; }
+                    // Char ONLY where the flame actually licks the body: the ray's height
+                    // at the enemy's distance -> a local mark that grows the longer you hold
+                    // it there. Sweeping the stream leaves several marks; a tap leaves one small one.
+                    Enemy *be=&g_enemies[i];
+                    float ch=muzzle.y + fwd.y*dist - be->pos.y;                     // contact height above the feet
+                    if (ch<0.15f) ch=0.15f; if (ch>ENEMY_HEIGHT-0.15f) ch=ENEMY_HEIGHT-0.15f;
+                    int m=-1; for (int k=0;k<be->burnN;k++) if (fabsf(be->burnY[k]-ch)<0.30f){ m=k; break; }
+                    if (m<0 && be->burnN<MAX_BURN){ m=be->burnN++; be->burnY[m]=ch; be->burnR[m]=0.08f; }
+                    if (m>=0) be->burnR[m]=fminf(0.34f, be->burnR[m]+dt*0.7f);      // darkens/spreads with sustained flame
+                    HurtEnemy(i, FLAME_DPS*dt, 0, tn, cen, 0);                      // burning: no blood spurt
+                }
+                // Scorch whatever the stream lands on (floor/wall/prop), throttled so marks
+                // build up steadily rather than every frame. Map rays give distance only, so
+                // the decal faces back along the aim (~the wall normal when you flame it head-on).
+                g_scorchT += dt;
+                if (g_scorchT >= 0.04f){
+                    Vector3 sp, sn; int landed=0;
+                    if (g_hasMap && g_mapCol.ready){
+                        float wd=MapRayNearest(muzzle, fwd, FLAME_RANGE);
+                        if (wd>0){ sp=Vector3Add(muzzle, Vector3Scale(fwd,wd)); sn=Vector3Scale(fwd,-1.0f); landed=1; }
+                    } else { Vector3 hp,hn;
+                        if (RaycastWorld(muzzle, fwd, &hp,&hn)){ if (Vector3Distance(muzzle,hp)<=FLAME_RANGE){ sp=hp; sn=hn; landed=1; } } }
+                    if (landed){ g_scorchT=0.0f; AddScorch(sp, sn, 0.40f+GetRandomValue(0,35)/100.0f); }
+                }
+            }
+        } else {
+            g_flameHeat = fmaxf(0.0f, g_flameHeat - dt*2.0f);           // cools off when you release -> warms up again next time
+        }
+    }
+
+    // Knife (slot 8): a wide melee slash on each click. Hits the nearest enemy in a
+    // short frontal arc; reuses the model's Shot clip as the swing if it has one.
+    if (cw->melee && !g_reloading && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_fireCd<=0.0f){
+        g_fireCd=KNIFE_CD; g_recoil=1.0f;                                  // a swing kick
+        if (g_aShoot!=g_aIdle && g_aShoot<g_gunAnimN){ g_curAnim=g_aShoot; g_animOnce=1; g_animT=0.0f; }
+        if (g_audio && cw->hasSnd) PlaySound(cw->fireSnd);
+        int bestE=-1; float bestD=KNIFE_RANGE;
+        for (int i=0;i<MAX_ENEMIES;i++){
+            if (g_enemies[i].state!=1) continue;
+            Vector3 cen=(Vector3){g_enemies[i].pos.x, g_enemies[i].pos.y+ENEMY_HEIGHT*0.5f, g_enemies[i].pos.z};
+            Vector3 to=Vector3Subtract(cen, g_pos); float d=Vector3Length(to);
+            if (d>KNIFE_RANGE || d<1e-3f) continue;
+            Vector3 tn=Vector3Scale(to, 1.0f/d);
+            if (Vector3DotProduct(tn, fwd) < KNIFE_COS) continue;          // outside the slash arc
+            if (d<bestD){ bestD=d; bestE=i; }                              // nearest in-arc enemy
+        }
+        if (bestE>=0){
+            Vector3 cen=(Vector3){g_enemies[bestE].pos.x, g_enemies[bestE].pos.y+ENEMY_HEIGHT*0.6f, g_enemies[bestE].pos.z};
+            HurtEnemy(bestE, KNIFE_DMG, 0, fwd, cen, 1);
         }
     }
 
@@ -1110,22 +1651,44 @@ static void Update(void) {
 
     UpdateEnemies(dt);
     UpdateSmoke(dt);
+    UpdateGrenades(dt);
 
     // advance weapon animation. idle = HOLD the last frame of Take (static ready
     // pose, no wandering). One-shot clips (Shoot/Reload) play through, then snap
     // back to the held idle.
     if (g_gunAnimN>0 && g_curAnim<g_gunAnimN){
         int nf=ANIM_FRAMES(g_gunAnim[g_curAnim]);
-        if (g_weapons[g_curWeapon].spinUp && g_curAnim==g_aIdle && !g_animOnce){
+        if (cw->grenade){
+            // grenade launcher: one baked 'allanims' clip. HOLD the idle frame between
+            // shots; R scrubs the reload sub-range (GL_RELOAD_FROM..TO) then snaps back.
+            float hold = (cw->idleHold>=0)?(float)cw->idleHold:(float)GL_IDLE_FRAME;   // Z/X-tuned grip frame
+            if (g_reloading){
+                g_animT += dt*30.0f;
+                if (g_animT >= (float)GL_RELOAD_TO){ g_reloading=0; g_animT=hold; }
+            } else g_animT = (nf>0) ? hold : 0.0f;
+        } else if (g_weapons[g_curWeapon].spinUp && g_curAnim==g_aIdle && !g_animOnce){
             // minigun: the barrel mesh is rigid (not skinned) and 'allanims' only
             // animates the arms -- so scrubbing it just flails the hands. Instead
             // HOLD the arms at a static grip and spin the barrel geometrically
             // (DrawViewmodel rotates the barrel mesh by g_mgBarrelAngle).
-            g_animT = (nf>0) ? (float)MG_IDLE_FRAME : 0.0f;
+            // Z/X-tuned idleHold overrides the default grip frame.
+            g_animT = (cw->idleHold>=0) ? (float)cw->idleHold : ((nf>0) ? (float)MG_IDLE_FRAME : 0.0f);
             g_mgBarrelAngle += dt*g_spin*42.0f;            // ~6.7 rev/s at full spin-up
             if (g_mgBarrelAngle>2.0f*PI) g_mgBarrelAngle-=2.0f*PI;
-        } else if (g_curAnim==g_aIdle && !g_animOnce){
-            g_animT = nf>0 ? (float)(nf-1) : 0.0f;   // freeze on the drawn/ready frame
+        } else if (!g_animOnce && (g_curAnim==g_aIdle || g_curAnim==g_aWalk)){
+            // locomotion: if the rig has a Walk clip, loop it while moving; otherwise
+            // (or when standing still) HOLD the idle clip on its ready frame.
+            if (g_aWalk>=0 && moving){
+                if (g_curAnim!=g_aWalk){ g_curAnim=g_aWalk; g_animT=0.0f; }
+                int wf=ANIM_FRAMES(g_gunAnim[g_curAnim]);
+                g_animT += dt*30.0f; if (wf>0 && g_animT>=wf) g_animT-=wf;   // loop the walk cycle
+            } else {
+                if (g_curAnim!=g_aIdle){ g_curAnim=g_aIdle; g_animT=0.0f; }
+                int idf=ANIM_FRAMES(g_gunAnim[g_curAnim]);
+                if (cw->idleHold>=0) g_animT=(float)cw->idleHold;                 // Z/X-tuned grip frame wins
+                else if (g_aWalk>=0){ g_animT+=dt*30.0f; if (idf>0 && g_animT>=idf) g_animT-=idf; }  // real FPS rig (has Walk): LOOP the idle -- it grips in every frame
+                else g_animT = idf>0 ? (float)(idf-1) : 0.0f;                     // legacy rigs: freeze on the ready frame
+            }
         } else {
             g_animT += dt*30.0f;
             // nf<=0 (empty/malformed clip) counts as instantly finished, so a
@@ -1158,22 +1721,19 @@ static void Update(void) {
         if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);  // bring the wave back
         DebugLog("mode","\"noEnemies\":%s", g_noEnemies?"true":"false");
     }
-    if (IsKeyPressed(KEY_ONE)) SwitchWeapon(0);
-    if (IsKeyPressed(KEY_TWO)) SwitchWeapon(1);
-    if (IsKeyPressed(KEY_THREE)) SwitchWeapon(2);
-    if (IsKeyPressed(KEY_FOUR)) SwitchWeapon(3);
-    if (IsKeyPressed(KEY_FIVE)) SwitchWeapon(4);
-    if (IsKeyPressed(KEY_SIX)) SwitchWeapon(5);
-    if (IsKeyPressed(KEY_SEVEN)) SwitchWeapon(6);
-    if (IsKeyPressed(KEY_EIGHT)) SwitchWeapon(7);
-    if (IsKeyPressed(KEY_NINE)) SwitchWeapon(8);
+    // Number keys -> weapon slots. Custom order so the two showpieces lead: 1=minigun,
+    // 2=flamethrower, 3=grenade launcher, then the rest. (g_weapons indices: 0 grenade
+    // launcher,1 remington,2 minigun,3 LMG,4 AK,5 MP5,6 Benelli,7 flamethrower,8 knife.)
+    static const int kSlotForKey[9]={2,7,0,1,3,4,5,6,8};
+    for (int k=0;k<9;k++) if (IsKeyPressed(KEY_ONE+k)) SwitchWeapon(kSlotForKey[k]);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
     // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
     // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
     // an on-screen confirmation so you KNOW it wrote.
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_F5)){
         StashActiveTuning();
-        SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);
+        SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll,g_weapons[g_curWeapon].idleHold);
+        if (g_weapons[g_curWeapon].pinGun || g_weapons[g_curWeapon].spinUp){ Weapon *w=&g_weapons[g_curWeapon]; SavePin(w->tunePath,w->pinOff,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll,w->armsROff); }
         g_savedMsg=2.0f;   // seconds to show "SAVED"
         DebugLog("vmsave","\"slot\":%d,\"label\":\"%s\",\"path\":\"%s\",\"saved\":true",
                  g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].tunePath);
@@ -1193,13 +1753,55 @@ static void Update(void) {
     float ns=dt*(g_noEnemies?3.0f:0.5f);
     float rs=dt*(g_noEnemies?120.0f:60.0f);
     float ss=g_noEnemies?3.0f:1.0f;
-    if (IsKeyDown(KEY_I)) g_vmOff.y+=ns;  if (IsKeyDown(KEY_K)) g_vmOff.y-=ns;
-    if (IsKeyDown(KEY_L)) g_vmOff.x+=ns;  if (IsKeyDown(KEY_J)) g_vmOff.x-=ns;
-    if (IsKeyDown(KEY_O)) g_vmOff.z+=ns;  if (IsKeyDown(KEY_U)) g_vmOff.z-=ns;
-    if (IsKeyDown(KEY_EQUAL)) g_vmScale*=(1.0f+dt*ss);  if (IsKeyDown(KEY_MINUS)) g_vmScale*=(1.0f-dt*ss);
-    if (IsKeyDown(KEY_RIGHT_BRACKET)) g_vmYaw+=rs;  if (IsKeyDown(KEY_LEFT_BRACKET)) g_vmYaw-=rs;
-    if (IsKeyDown(KEY_APOSTROPHE)) g_vmPitch+=rs;   if (IsKeyDown(KEY_SEMICOLON)) g_vmPitch-=rs;
-    if (IsKeyDown(KEY_PERIOD)) g_vmRoll+=rs;        if (IsKeyDown(KEY_COMMA)) g_vmRoll-=rs;
+    Weapon *cwp=&g_weapons[g_curWeapon];
+    int bStates = cwp->spinUp ? 3 : (cwp->pinGun ? 2 : 1);   // minigun: VIEWMODEL/ARMS/RIGHT-HAND; pinned gun: VIEWMODEL/GRIP; rest: viewmodel only
+    if (IsKeyPressed(KEY_B) && bStates>1) g_tuneTarget=(g_tuneTarget+1)%bStates;
+    if (g_tuneTarget>=bStates) g_tuneTarget=0;
+    if (g_tuneTarget==2){                                                        // minigun: nudge the RIGHT hand independently (baked into the verts)
+        Weapon *w=cwp;
+        float np=ns/fmaxf(g_vmScale,1e-6f)*0.07f;
+        Vector3 dv={0,0,0};
+        if (IsKeyDown(KEY_I)) dv.y+=np;  if (IsKeyDown(KEY_K)) dv.y-=np;
+        if (IsKeyDown(KEY_L)) dv.x+=np;  if (IsKeyDown(KEY_J)) dv.x-=np;
+        if (IsKeyDown(KEY_O)) dv.z+=np;  if (IsKeyDown(KEY_U)) dv.z-=np;
+        if (fabsf(dv.x)+fabsf(dv.y)+fabsf(dv.z)>0.0f){
+            ApplyArmsRDelta(w,dv);
+            w->armsROff=Vector3Add(w->armsROff,dv);
+        }
+    } else if (g_tuneTarget==1){                                                 // tune the gun grip (pinned) / whole-arms nudge (minigun)
+        Weapon *w=cwp;
+        float np=ns/fmaxf(g_vmScale,1e-6f)*0.07f;   // pinOff is in MODEL (bind-space) units -> convert the view-space step
+        if (IsKeyDown(KEY_I)) w->pinOff.y+=np;  if (IsKeyDown(KEY_K)) w->pinOff.y-=np;
+        if (IsKeyDown(KEY_L)) w->pinOff.x+=np;  if (IsKeyDown(KEY_J)) w->pinOff.x-=np;
+        if (IsKeyDown(KEY_O)) w->pinOff.z+=np;  if (IsKeyDown(KEY_U)) w->pinOff.z-=np;
+        if (IsKeyDown(KEY_EQUAL)) w->pinScale*=(1.0f+dt*ss);  if (IsKeyDown(KEY_MINUS)) w->pinScale*=(1.0f-dt*ss);
+        if (IsKeyDown(KEY_RIGHT_BRACKET)) w->pinYaw+=rs;  if (IsKeyDown(KEY_LEFT_BRACKET)) w->pinYaw-=rs;
+        if (IsKeyDown(KEY_APOSTROPHE)) w->pinPitch+=rs;   if (IsKeyDown(KEY_SEMICOLON)) w->pinPitch-=rs;
+        if (IsKeyDown(KEY_PERIOD)) w->pinRoll+=rs;        if (IsKeyDown(KEY_COMMA)) w->pinRoll-=rs;
+    } else {
+        if (IsKeyDown(KEY_I)) g_vmOff.y+=ns;  if (IsKeyDown(KEY_K)) g_vmOff.y-=ns;
+        if (IsKeyDown(KEY_L)) g_vmOff.x+=ns;  if (IsKeyDown(KEY_J)) g_vmOff.x-=ns;
+        if (IsKeyDown(KEY_O)) g_vmOff.z+=ns;  if (IsKeyDown(KEY_U)) g_vmOff.z-=ns;
+        if (IsKeyDown(KEY_EQUAL)) g_vmScale*=(1.0f+dt*ss);  if (IsKeyDown(KEY_MINUS)) g_vmScale*=(1.0f-dt*ss);
+        if (IsKeyDown(KEY_RIGHT_BRACKET)) g_vmYaw+=rs;  if (IsKeyDown(KEY_LEFT_BRACKET)) g_vmYaw-=rs;
+        if (IsKeyDown(KEY_APOSTROPHE)) g_vmPitch+=rs;   if (IsKeyDown(KEY_SEMICOLON)) g_vmPitch-=rs;
+        if (IsKeyDown(KEY_PERIOD)) g_vmRoll+=rs;        if (IsKeyDown(KEY_COMMA)) g_vmRoll-=rs;
+    }
+    // Z / X scrub the ready-pose HOLD frame for the current weapon (find the frame where
+    // the hands grip the gun). SHIFT = coarse (x10). Held key auto-repeats. ENTER saves it.
+    {
+        int xup=(IsKeyPressed(KEY_X)||IsKeyPressedRepeat(KEY_X)), xdn=(IsKeyPressed(KEY_Z)||IsKeyPressedRepeat(KEY_Z));
+        if (xup||xdn){
+            Weapon *w=&g_weapons[g_curWeapon];
+            int clip = w->grenade ? 0 : g_aIdle;
+            int maxf = (g_gunAnimN>0 && clip<g_gunAnimN) ? ANIM_FRAMES(g_gunAnim[clip]) : 1;
+            if (w->idleHold<0) w->idleHold = w->grenade ? GL_IDLE_FRAME : (maxf>0?maxf-1:0);
+            int step=(IsKeyDown(KEY_LEFT_SHIFT)||IsKeyDown(KEY_RIGHT_SHIFT))?10:1;
+            w->idleHold += xup?step:-step;
+            if (w->idleHold<0) w->idleHold=0;  if (maxf>0 && w->idleHold>=maxf) w->idleHold=maxf-1;
+            DebugLog("idlehold","\"slot\":%d,\"frame\":%d,\"maxf\":%d", g_curWeapon, w->idleHold, maxf);
+        }
+    }
     if (IsKeyPressed(KEY_P))
         DebugLog("vmxform","\"off\":[%.3f,%.3f,%.3f],\"scale\":%.4f,\"yaw\":%.1f,\"pitch\":%.1f,\"roll\":%.1f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);
@@ -1231,6 +1833,17 @@ static void Update(void) {
                 else if (sp->life<0.5f) sp->life=0.5f;             // brief impact glow
             }
         }
+    }
+
+    // Damage feedback + death (after every hp change this frame: enemy melee, void).
+    if (g_playerHp < g_prevHp-0.01f)                                // took a hit -> punch the red flash
+        g_hurt = fminf(1.0f, g_hurt + (g_prevHp-g_playerHp)*0.04f + 0.12f);
+    g_prevHp = g_playerHp;
+    if (g_hurt>0) g_hurt = fmaxf(0.0f, g_hurt - dt*1.5f);
+    if (!g_godMode && !g_noEnemies && g_playerHp<=0.0f && !g_dead){ // killed -> enter the death/respawn loop
+        g_dead=1; g_deadT=0.0f;
+        if (g_audio && cw->hasSnd && IsSoundPlaying(cw->fireSnd)) StopSound(cw->fireSnd);
+        DebugLog("death","\"kills\":%d,\"headshots\":%d", g_kills, g_headshots);
     }
 }
 
@@ -1310,6 +1923,22 @@ static void DrawWorld(void) {
             DrawSphereEx(sp->pos, sz*0.6f, 6, 6, c);
         }
     }
+    DrawScorch();                                          // flamethrower soot, laid on the surfaces it touched
+    for (int i=0;i<MAX_GREN;i++) if (g_gren[i].active)     // in-flight grenades: a small dark sphere
+        DrawSphereEx(g_gren[i].pos, 0.13f, 8, 8, (Color){45,50,42,255});
+}
+
+// Soot smudges on a body: one soft dark billboard per flame-char mark, at its height
+// up the body, nudged just outside the near surface (toward the camera) so the model
+// doesn't occlude it. vscale compresses the heights for a prone corpse. base = feet.
+static void DrawBurnMarks(Vector3 base, float vscale, const float *by, const float *br, int n){
+    if (!g_hasSmokeTex) return;
+    for (int k=0;k<n;k++){
+        Vector3 bp={base.x, base.y + by[k]*vscale, base.z};
+        float hx=g_cam.position.x-bp.x, hz=g_cam.position.z-bp.z, L=sqrtf(hx*hx+hz*hz);
+        if (L>1e-3f){ bp.x+=hx*0.52f/L; bp.z+=hz*0.52f/L; }      // sit on the near surface, not the body axis
+        DrawBillboard(g_cam, g_smokeTex, bp, br[k]*2.2f, (Color){14,11,9,230});
+    }
 }
 
 // Draw all alive/dying enemies. The shared model is posed to each enemy's own
@@ -1340,6 +1969,7 @@ static void DrawEnemies(void){
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
         DrawModelEx(g_enemy, dpos, (Vector3){0,1,0}, yaw,     // no sink: dying body falls onto the floor, not through
                     (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
+        if (e->burnN>0) DrawBurnMarks(dpos, 1.0f, e->burnY, e->burnR, e->burnN);   // localised char where the flame touched
         if (e->state==1 && e->hp<ENEMY_HP){                   // HP bar above damaged enemies
             Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/ENEMY_HP), 0.08f, 0.02f, (Color){230,60,60,255});
@@ -1348,9 +1978,14 @@ static void DrawEnemies(void){
     // lasting corpses: the shared model posed at the death clip's settle frame, lying where each enemy fell
     if (g_enemyAnimN>0){
         ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], (float)g_eDeathFrame);
-        for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active)
+        for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active){
             DrawModelEx(g_enemy, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
                         (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
+            if (g_corpses[c].burnN>0){   // prone body: compress the mark heights so soot sits on it, not floating above
+                Vector3 b={g_corpses[c].pos.x, g_corpses[c].pos.y+0.05f, g_corpses[c].pos.z};
+                DrawBurnMarks(b, 0.30f, g_corpses[c].burnY, g_corpses[c].burnR, g_corpses[c].burnN);
+            }
+        }
     }
 }
 
@@ -1380,11 +2015,69 @@ static void DrawInspect(void){
 // Draw a weapon model but spin ONE rigid mesh about its local Z axis. The minigun
 // barrel cluster isn't rigged, so we rotate its geometry directly. Mirrors how
 // DrawModelEx composes its transform so every other mesh draws byte-identically.
-static void DrawGunSpinMesh(Model model, Vector3 pos, float scale, int spinMesh, float angle){
+static void DrawGunSpinMesh(Model model, Vector3 pos, float scale, int spinMesh, float angle,
+                            unsigned long long gunMask, Vector3 armsOff){
     Matrix mt = MatrixMultiply(model.transform, MatrixMultiply(MatrixScale(scale,scale,scale), MatrixTranslate(pos.x,pos.y,pos.z)));
     Matrix spun = MatrixMultiply(MatrixRotateZ(angle), mt);   // spin in local space (barrels run along local Z, centred on X=Y=0)
-    for (int i=0;i<model.meshCount;i++)
-        DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], (i==spinMesh)?spun:mt);
+    // The skinned ARMS (meshes not in gunMask) can be slid as a rigid unit onto the
+    // grips (this rig only renders sanely at its baked pose -- see gun-pin memory --
+    // so the hands can't be re-posed per frame; a model-space nudge seats them).
+    Matrix armsM = MatrixMultiply(MatrixTranslate(armsOff.x,armsOff.y,armsOff.z), mt);
+    for (int i=0;i<model.meshCount;i++){
+        int isGun = (i<64) && ((gunMask>>i)&1ULL);
+        Matrix m = (i==spinMesh)?spun:(isGun?mt:armsM);
+        DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], m);
+    }
+}
+
+// Compose a raylib Transform (S, R quat, T) into a matrix exactly the way raylib's own
+// skinning does (scale, then rotate, then translate).
+static Matrix XformToMatrix(Transform t){
+    return MatrixMultiply(MatrixMultiply(MatrixScale(t.scale.x,t.scale.y,t.scale.z),
+                                         QuaternionToMatrix(t.rotation)),
+                          MatrixTranslate(t.translation.x,t.translation.y,t.translation.z));
+}
+// Draw a weapon whose gun meshes are STATIC and detached from the skinned arms (the
+// grenade launcher: 'allanims' moves only the arm bones; the launcher was authored
+// loose at the model root). The arms pose normally. For the gun meshes we build the
+// hand bone's bind->pose matrix FROM THE ANIMATION KEYFRAME DATA (the model's runtime
+// boneMatrices are NOT reliably populated by this raylib build -- which is why the
+// first pin attempt didn't move the gun at all) and ride the gun on it:
+//   recentre gun on its own bind centre -> grip trim (rot/scale about the gun, offset
+//   in hand-bind space so it turns WITH the hand) -> seat at the palm -> skin -> view.
+// Default trim (zero) = the gun's centre sits exactly in the palm.
+static void DrawPinnedGun(Model model, ModelAnimation *anim, float frameF, Vector3 pos, float scale,
+                          int handBone, Vector3 gunC, Matrix align, Vector3 seat, unsigned long long gunMask, int authored,
+                          Vector3 pinOff, float pinScale, float pinYaw, float pinPitch, float pinRoll){
+    Matrix mt = MatrixMultiply(model.transform, MatrixMultiply(MatrixScale(scale,scale,scale), MatrixTranslate(pos.x,pos.y,pos.z)));
+    Matrix gunMat = mt;
+    if (handBone>=0 && anim && anim->keyframePoses && anim->keyframeCount>0){
+        int kf=(int)frameF; if (kf<0) kf=0; if (kf>=anim->keyframeCount) kf=anim->keyframeCount-1;
+        Matrix bindM = XformToMatrix(model.skeleton.bindPose[handBone]);
+        Matrix poseM = XformToMatrix(anim->keyframePoses[kf][handBone]);
+        Matrix skin  = MatrixMultiply(MatrixInvert(bindM), poseM);      // bind space -> posed space (raylib's skinning product)
+        Matrix trim  = MatrixMultiply(MatrixScale(pinScale,pinScale,pinScale),
+                       MatrixMultiply(MatrixRotateZ(DEG2RAD*pinRoll),
+                       MatrixMultiply(MatrixRotateX(DEG2RAD*pinPitch), MatrixRotateY(DEG2RAD*pinYaw))));
+        Matrix pre;
+        if (authored){
+            // The bake already places the gun exactly where the hand animation was
+            // authored to grip it -> KEEP that placement (identity at zero trim); the
+            // user trim only pivots about the gun's own centre for fine nudges.
+            pre = MatrixMultiply(MatrixMultiply(MatrixTranslate(-gunC.x,-gunC.y,-gunC.z), trim),
+                                 MatrixTranslate(gunC.x+pinOff.x, gunC.y+pinOff.y, gunC.z+pinOff.z));
+        } else {
+            // recentre on the gun -> auto-align its long axis to the palm axis -> user
+            // trim -> seat at the palm midpoint (+offset) -> ride the hand -> viewmodel
+            pre = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixTranslate(-gunC.x,-gunC.y,-gunC.z), align), trim),
+                                 MatrixTranslate(seat.x+pinOff.x, seat.y+pinOff.y, seat.z+pinOff.z));
+        }
+        gunMat = MatrixMultiply(MatrixMultiply(pre, skin), mt);
+    }
+    for (int i=0;i<model.meshCount;i++){
+        int isGun = (i<64) && ((gunMask>>i)&1ULL);                    // arms (blended skin) pose at mt; gun parts ride the hand
+        DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], isGun?gunMat:mt);
+    }
 }
 
 static void DrawViewmodel(void){
@@ -1406,9 +2099,15 @@ static void DrawViewmodel(void){
 #endif
     BeginMode3D(g_vmCam);
         g_gun.transform=rot;
-        if (g_weapons[g_curWeapon].spinUp)               // minigun: spin the barrel mesh, hands held static
-            DrawGunSpinMesh(g_gun, vpos, g_vmScale, MG_BARREL_MESH, g_mgBarrelAngle);
-        else
+        if (g_weapons[g_curWeapon].spinUp)               // minigun: spin the barrel mesh, hands held static (+ B-tuned arms nudge)
+            DrawGunSpinMesh(g_gun, vpos, g_vmScale, MG_BARREL_MESH, g_mgBarrelAngle,
+                            g_weapons[g_curWeapon].gunMask, g_weapons[g_curWeapon].pinOff);
+        else if (g_weapons[g_curWeapon].pinGun){          // grenade launcher: ride the static gun on the animated hand
+            Weapon *w=&g_weapons[g_curWeapon];
+            ModelAnimation *an=(g_gunAnimN>0 && g_curAnim<g_gunAnimN)?&g_gunAnim[g_curAnim]:NULL;
+            DrawPinnedGun(g_gun, an, g_animT, vpos, g_vmScale, w->handBone, w->gunBindC, w->pinAlign, w->pinSeat, w->gunMask, w->pinAuthored,
+                          w->pinOff, w->pinScale, w->pinYaw, w->pinPitch, w->pinRoll);
+        } else
             DrawModelEx(g_gun,vpos,(Vector3){0,1,0},0,(Vector3){g_vmScale,g_vmScale,g_vmScale},WHITE);
     EndMode3D();
     g_gun.transform=MatrixIdentity();
@@ -1446,7 +2145,17 @@ static void DrawHUD(void) {
     DrawRectangle(22, H-42, (int)(220*g_playerHp/100.0f), 20, (Color){200,40,40,255});
     DrawText(TextFormat("HP %d", (int)g_playerHp), 28, H-40, 16, RAYWHITE);
     if (g_godMode) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (dev)
-    if (g_playerHp<=0 && !g_noEnemies && !g_godMode) DrawText("YOU DIED - press ESC", W/2-120, H/2+30, 24, (Color){255,80,80,255});
+    if (g_dead){                                                   // death overlay
+        const char *t="YOU DIED"; int fs=72, tw=MeasureText(t,fs);
+        DrawText(t, W/2-tw/2+3, H/2-58+3, fs, (Color){0,0,0,200});
+        DrawText(t, W/2-tw/2,   H/2-58,   fs, (Color){220,40,40,255});
+        char sub[64]; snprintf(sub,sizeof sub,"%d kills", g_kills);
+        int sw=MeasureText(sub,28); DrawText(sub, W/2-sw/2, H/2+20, 28, (Color){235,210,150,255});
+        if (g_deadT>1.0f){                                         // respawn prompt fades in after the beat
+            const char *p="ENTER or click to respawn"; int pw=MeasureText(p,22);
+            DrawText(p, W/2-pw/2, H/2+60, 22, (Color){200,200,210,255});
+        }
+    }
     // Big unmistakable mode banner so "floating" can be diagnosed: INSPECT mode
     // intentionally floats the gun in front of you; press V to get back to FP.
     if (g_inspect)
@@ -1456,8 +2165,8 @@ static void DrawHUD(void) {
         DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
         DrawText(TextFormat("%s  [%s]  1-9=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
-            DrawRectangle(6,96,600,392,(Color){0,0,0,215});
-            DrawRectangleLines(6,96,600,392,(Color){255,210,60,255});
+            DrawRectangle(6,96,600,430,(Color){0,0,0,215});
+            DrawRectangleLines(6,96,600,430,(Color){255,210,60,255});
             TextSh("ORIENT MODE  (N = back to play)",18,104,28,YELLOW);
             TextSh(TextFormat("weapon:  %s",g_weapons[g_curWeapon].label),18,142,24,(Color){120,230,255,255});
             TextSh(TextFormat("off [%.2f %.2f %.2f]  scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),18,176,20,RAYWHITE);
@@ -1470,8 +2179,16 @@ static void DrawHUD(void) {
             TextSh("[ / ]      yaw    left / right",18,340,20,kc);
             TextSh("; / '      pitch  down / up",18,366,20,kc);
             TextSh(", / .      roll   twist left / right",18,392,20,kc);
-            TextSh("0 reset      ENTER save  (or F5)",18,422,20,(Color){170,255,170,255});
-            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].tunePath),18,448,20,(Color){90,255,90,255});
+            TextSh(TextFormat("Z / X      pose-hold frame: %d  (SHIFT=x10)", g_weapons[g_curWeapon].idleHold), 18,410,19,(Color){255,200,120,255});
+            if (g_weapons[g_curWeapon].pinGun || g_weapons[g_curWeapon].spinUp){
+                Weapon *w=&g_weapons[g_curWeapon];
+                const char *what = (g_tuneTarget==2) ? "RIGHT HAND" : (g_tuneTarget==1 ? (w->pinGun?"GUN GRIP":"BOTH ARMS") : "VIEWMODEL");
+                TextSh(TextFormat("B          tuning: %s   %s", what, g_tuneTarget?"(IJKL/UO move)":""), 18,432,19,(Color){120,230,255,255});
+                if (g_tuneTarget==1) TextSh(TextFormat("   off %.2f %.2f %.2f  scale %.2f  yaw %.0f pit %.0f rol %.0f", w->pinOff.x,w->pinOff.y,w->pinOff.z,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll), 18,452,18,(Color){200,220,255,255});
+                if (g_tuneTarget==2) TextSh(TextFormat("   right-hand off %.3f %.3f %.3f", w->armsROff.x,w->armsROff.y,w->armsROff.z), 18,452,18,(Color){200,220,255,255});
+            }
+            TextSh("0 reset      ENTER save  (or F5)",18,474,19,(Color){170,255,170,255});
+            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].tunePath),18,498,20,(Color){90,255,90,255});
         }
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
@@ -1520,7 +2237,7 @@ static void DrawPaused(void){
     DrawRectangle(0,0,W,H,(Color){0,0,0,120});
     const char *t="PAUSED"; int ts=64, tw=MeasureText(t,ts);
     TextSh(t, W/2-tw/2, H/2-ts/2, ts, (Color){255,210,60,255});
-    const char *h="press P to resume"; int hs=22, hw=MeasureText(h,hs);
+    const char *h="press P, ESC, or click to resume"; int hs=22, hw=MeasureText(h,hs);
     TextSh(h, W/2-hw/2, H/2+ts/2+12, hs, RAYWHITE);
 }
 
@@ -1538,6 +2255,24 @@ static void DrawVignette(float k){
     DrawRectangleGradientV(0,H-bh,W,bh, clear, edge);       // bottom
 }
 
+// Red screen feedback: a punch on taking damage (g_hurt) plus a steady glow when
+// health is low, drawn as red edge bands. On death the whole screen washes dark red.
+static void DrawDamageOverlay(void){
+    int W=GetScreenWidth(), H=GetScreenHeight();
+    float lowhp = (!g_godMode && !g_dead && g_playerHp>0 && g_playerHp<35.0f) ? (1.0f-g_playerHp/35.0f) : 0.0f;
+    float k = fmaxf(g_hurt, lowhp*0.45f);
+    if (k>0.001f){
+        unsigned char a=(unsigned char)(fminf(1.0f,k)*150.0f);
+        Color edge={150,0,0,a}, clear={150,0,0,0};
+        int bw=W/4, bh=H/4;
+        DrawRectangleGradientH(0,0,bw,H, edge, clear);          // left
+        DrawRectangleGradientH(W-bw,0,bw,H, clear, edge);       // right
+        DrawRectangleGradientV(0,0,W,bh, edge, clear);          // top
+        DrawRectangleGradientV(0,H-bh,W,bh, clear, edge);       // bottom
+    }
+    if (g_dead) DrawRectangle(0,0,W,H,(Color){45,0,0,(unsigned char)(fminf(1.0f,g_deadT*1.2f)*170.0f)});
+}
+
 static void Frame(void) {
     static int frameNo=0;
     Update();
@@ -1552,6 +2287,7 @@ static void Frame(void) {
         if (g_inspect && !g_noEnemies) DrawInspect();
         DrawViewmodel();
         DrawVignette(g_shake);                    // minigun: blurred/darkened edges while it rips
+        DrawDamageOverlay();                       // red edge flash on damage / low hp / death wash
         DrawHUD();
         if (g_menu) DrawMenu();
         else if (g_paused) DrawPaused();
@@ -1836,7 +2572,7 @@ int main(int argc, char **argv) {
     // the HUD and 3D views adapt to whatever resolution we land on.
     LoadOptions();
     if (g_fullscreen && g_shotFrame<=0){
-        ToggleBorderlessWindowed();
+        ApplyFullscreen(1);
         DebugLog("window","\"borderless\":true,\"w\":%d,\"h\":%d,\"monitor\":%d",
                  GetScreenWidth(), GetScreenHeight(), GetCurrentMonitor());
     }
@@ -1896,10 +2632,12 @@ int main(int argc, char **argv) {
 
     g_vmCam=(Camera3D){ (Vector3){0,0,0}, (Vector3){0,0,-1}, (Vector3){0,1,0}, 55.0f, CAMERA_PERSPECTIVE };  // g_cam is set per-map in StartSelectedMap
 
-    LoadWeapon(0, "assets/rifle.glb", "../assets/rifle.glb", "M16A3 Rifle", "vm_tune.txt",
-               VM_OFF0, VM_SCALE0, VM_YAW0, VM_PITCH0, 0.0f);
-    LoadWeapon(1, "assets/shotgun.glb", "../assets/shotgun.glb", "Shotgun", "vm_tune_shotgun.txt",
-               (Vector3){ -0.00216f, -0.19537f, -0.58625f }, 0.000068f, 106.89f, -18.45f, 88.0f);  // dialed in
+    g_posedBasis[0]=1;   // grenade launcher: animated rig -> frame from the posed idle, not the bind pose
+    LoadWeapon(0, "assets/grenadelauncher.glb", "../assets/grenadelauncher.glb", "Grenade Launcher", "vm_tune_grenade.txt",
+               (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);   // auto-framed; tune live with N
+    g_posedBasis[1]=1;   // remington: animated FPS rig
+    LoadWeapon(1, "assets/remington.glb", "../assets/remington.glb", "Remington", "vm_tune_remington.txt",
+               (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);   // auto-framed; tune live with N
     LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
                (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f, 0.0f);  // dialed in
     LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
@@ -1915,28 +2653,33 @@ int main(int argc, char **argv) {
     LoadWeapon(7, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt",   (Vector3){0.05045f,-0.37347f,-0.43725f}, 0.021775f, -330.04f, 52.32f, 134.41f);
     LoadWeapon(8, "assets/knife.glb",        "../assets/knife.glb",        "Knife",        "vm_tune_knife.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
     g_numWeapons=9;
-    ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // park on the rifle (or --weapon N for tuning)
+    ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // boot on slot 0 / grenade launcher (or --weapon N for tuning)
     if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
 
     // Per-weapon fire sounds. The two automatics loop while the trigger is held;
     // the shotgun fires one blast per shot.
-    LoadWeaponSound(0, "assets/rifle_fire.mp3",   "../assets/rifle_fire.mp3",   1);  // M16A3 (machine gun)
-    LoadWeaponSound(1, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // shotgun: one-shot
+    LoadWeaponSound(0, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // grenade launcher: a one-shot launch thunk (stand-in)
+    LoadWeaponSound(1, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // remington shotgun: one-shot
     LoadWeaponSound(2, "assets/minigun_fire.mp3", "../assets/minigun_fire.mp3", 1);  // minigun
     LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (biggun)
-    LoadWeaponSound(4, "assets/ak74_fire.mp3",    "../assets/ak74_fire.mp3",    0);  // AK-74M: one-shot per bullet
+    LoadWeaponSound(4, "assets/ak74_fire_single.mp3", "../assets/ak74_fire_single.mp3", 0);  // AK-74M: one clean shot per bullet (first crack trimmed out of the burst clip)
     LoadWeaponSound(5, "assets/rifle_fire.mp3",   "../assets/rifle_fire.mp3",   1);  // MP5: reuse the MG loop
     LoadWeaponSound(6, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // Benelli M4: one-shot per shot
-    LoadWeaponAux(1, "assets/shotgun_cock.mp3",     "../assets/shotgun_cock.mp3");     // shotgun cock between shots
     LoadWeaponAux(2, "assets/minigun_cooldown.mp3", "../assets/minigun_cooldown.mp3"); // minigun spin-down
     if (g_weapons[2].hasAuxSnd) SetSoundVolume(g_weapons[2].auxSnd, 0.4f);  // spin-down was too loud/abrupt -> soften it
-    g_weapons[0].burst=3;        // rifle:   3-round burst per trigger pull
-    g_weapons[1].autoReload=1;   // shotgun: pump (reload anim) + cock sound after each shot
+    g_weapons[0].grenade=1;      // grenade launcher: lobs an arcing grenade, explodes on impact
+    g_weapons[0].pinGun=1;       // its launcher mesh is detached from the arms -> ride it on the hand bone
+    DebugPinProbe(&g_weapons[0]);   // boot ActivateWeapon ran BEFORE these flags -> probe explicitly now
+    g_weapons[1].playShoot=1; g_weapons[1].fireCd=0.7f;   // remington: plays Shot clip per blast, semi-auto cadence; R plays Reload
     g_weapons[2].spinUp=1;       // minigun: 5s fire cap -> cooldown sound + lockout
     g_weapons[3].soundGated=1;   // LMG:     fire while the sound plays, then a 0.75s pause
     g_weapons[4].playShoot=1;    // AK-74M:  plays its Shot clip on fire; R plays AK_Reload
     g_weapons[5].playShoot=1;    // MP5:     plays its Shoot clip on fire; R plays Reload
     g_weapons[6].playShoot=1;    // Benelli: plays its Fire clip on fire; R plays Reload
+    g_weapons[7].flame=1;        // Flamethrower: continuous fire cone while held
+    g_weapons[8].melee=1;        // Knife:        wide melee slash per click
+    LoadWeaponSound(7, "assets/flame_fire.mp3", "../assets/flame_fire.mp3", 1);  // flamethrower: looped roar (silent if asset absent)
+    LoadWeaponSound(8, "assets/knife_swing.mp3","../assets/knife_swing.mp3", 0); // knife: one-shot swing (silent if asset absent)
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
@@ -2007,7 +2750,7 @@ int main(int argc, char **argv) {
 #endif
 
     StashActiveTuning();
-    for (int i=0;i<g_numWeapons;i++) SaveTune(g_weapons[i].tunePath,g_weapons[i].off,g_weapons[i].scale,g_weapons[i].yaw,g_weapons[i].pitch,g_weapons[i].roll);
+    for (int i=0;i<g_numWeapons;i++) SaveTune(g_weapons[i].tunePath,g_weapons[i].off,g_weapons[i].scale,g_weapons[i].yaw,g_weapons[i].pitch,g_weapons[i].roll,g_weapons[i].idleHold);
     DebugLog("shutdown","\"ok\":true");
     for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].has){
         if (g_weapons[i].anim) UnloadModelAnimations(g_weapons[i].anim,g_weapons[i].animN);

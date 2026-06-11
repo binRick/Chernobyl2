@@ -4,6 +4,7 @@ vendor/raylib/
 
 # large/binary game assets (kept local, not versioned)
 *.glb
+*.glb.bak
 *.mp3
 *.map
 maps/
@@ -11,6 +12,7 @@ maps/
 # per-machine live state
 vm_tune.txt
 vm_tune_*.txt
+vm_tune*.txt.pin
 options.txt
 chernobyl2-debug.log
 chernobyl2-shot.png

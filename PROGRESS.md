@@ -111,9 +111,58 @@ weapon's `LoadWeapon(...)` call **and** write `vm_tune_<name>.txt`.
 game's models/sounds/maps live only on this machine; the committed framing is
 whatever's in `LoadWeapon`.
 
+## Recently added (2026-06)
+
+- **Multi-storey enemy nav**: the nav grid is now layered — each `(x,z)` column
+  holds up to `NAV_MAXL` stacked floors as distinct nodes, so enemies on an upper
+  storey path down to the player (the old single-layer grid hid every floor above
+  the spawn). See the `enemy-multistorey-nav` memory.
+- **Ledge drops**: a chasing enemy will drop off a balcony up to `NAV_MAXFALL`
+  (~one storey) to reach you — threaded through the flow field, the steering
+  gradient, `EnemyMoveOK`, and a gravity-driven fall animation (`fallV`).
+- **Flamethrower (slot 7)**: continuous fire cone while held — additive flame
+  billboards + cone/LOS damage (`FLAME_*`). Reuses the smoke particle pool.
+- **Knife (slot 8)**: wide melee slash per click (`KNIFE_*`); nearest enemy in a
+  frontal arc, plays the model's Shot clip as the swing.
+- **Death / respawn loop**: `g_playerHp<=0` (god off) → frozen "YOU DIED" screen
+  → ENTER/click respawns at spawn. Red damage vignette on hit + low-hp glow.
+  God mode (`G`) is still ON by default — press `G` to enable death.
+- Shared `HurtEnemy()` now centralises the flinch/kill/tally path for all weapons.
+- Flame/knife fire sounds load from `assets/flame_fire.mp3` / `knife_swing.mp3`
+  (silent if those per-machine assets are absent).
+
+- **Weapon roster rework**: slot 0 = Grenade Launcher (`grenadelauncher.glb`, arcing
+  projectile + radial explosion + scorch), slot 1 = Remington (`remington.glb`, real
+  Idle/Walk/Shot/Reload clips). Key order remapped: 1=minigun 2=flamethrower
+  3=grenade launcher 4=remington 5=LMG 6=AK 7=MP5 8=Benelli 9=knife.
+- **Flamethrower warm-up**: spits unignited fuel for `FLAME_WARMUP` before the
+  flame catches; wider cone; scorch decals on surfaces; localized char marks on
+  enemies (`burnY/burnR`, not a whole-body tint); corpses keep their soot.
+- **Walk clips**: rigs with a Walk anim loop it while moving, loop Idle when still
+  (`aWalk`); legacy rigs keep the frozen ready frame.
+- **Viewmodel rig surgery** (see the `gun-pin-hand-bone` memory — three different
+  Sketchfab rig pathologies):
+  1. Grenade launcher: gun detached from arms → `DrawPinnedGun` rides the static
+     gun meshes on the hand bone (skin matrix from keyframe data; raylib's
+     `model.boneMatrices`-free path). Authored gun-in-hands placement auto-detected.
+  2. GL + Remington: **binding stance ≠ node stance** (raylib ignores IBMs) →
+     `tools/fix_gltf_bindpose.py` re-skins verts into node space + rewrites IBMs.
+  3. Minigun: the OPPOSITE — binding stance is the correct pose (do NOT re-skin;
+     restored from .bak). Hands seated via rigid arms nudges instead.
+- **Grip tuning** (orient mode `N`): `B` cycles tuning targets — VIEWMODEL →
+  GUN GRIP (pinned guns) or BOTH ARMS → RIGHT HAND (minigun). `Z`/`X` scrub the
+  held ready-pose frame (`idleHold`). ENTER saves; pins live in `vm_tune_*.txt.pin`
+  (10 values incl. the right-hand offset).
+- **Untextured-mesh cull**: white default-material morph helpers (M16's
+  `shape_pose`) are hidden at load; tinted flat-colour parts are kept.
+- **Fixes**: AK fires a single trimmed crack per shot; pause resumes on P/ESC/click;
+  fullscreen is a plain undecorated window (Cmd-Tab and ESC work, no macOS Space);
+  death overlay + respawn prompt; `pinprobe`/`gunpin` debug events for rig forensics.
+
 ## Next / deferred
 
-- Flamethrower (slot 7) flame mechanic; Knife (slot 8) melee mechanic — both are
-  framed/wired but have no special attack yet.
-- Shotgun (slot 1) arm framing was flagged as imperfect.
 - Keyboard navigation for the options menu (currently mouse-click only).
+- Drop in `flame_fire.mp3` / `knife_swing.mp3` assets for audio on those weapons.
+- Grenade launcher: real reload frame range is a guess (120–185 of `allanims`);
+  refine when it matters. Launch sound is a shotgun-boom stand-in.
+- Old shotgun (`shotgun.glb`) and rifle (`rifle.glb`) are unwired but still on disk.
