@@ -2,12 +2,9 @@
 build/
 vendor/raylib/
 
-# large/binary game assets (kept local, not versioned)
-*.glb
+# Game content (models/sounds/maps) IS versioned so a fresh clone is playable.
+# Only the working-copy .glb backups stay local.
 *.glb.bak
-*.mp3
-*.map
-maps/
 
 # per-machine live state
 vm_tune.txt
