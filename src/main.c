@@ -211,7 +211,8 @@ typedef struct {
     Vector3         pinSeat;                     // bind-space point the gun centre is seated at: the PALM MIDPOINT (so it spans both hands), else the right palm
     Matrix          pinAlign;                    // auto-rotation: gun's principal (long) axis -> the palm-to-palm axis
     Vector3         pinOff; float pinScale, pinYaw, pinPitch, pinRoll;  // grip trim on top of the auto-seat, in hand-bind space (B-mode tunes it; saved to <tune>.pin)
-    Vector3         armsROff;                    // minigun-style rigs: extra nudge applied to RIGHT-arm vertices only (baked into mesh.vertices; B-mode state 2)
+    Vector3         armsROff;                    // extra nudge applied to RIGHT-arm vertices only (baked into mesh.vertices; B-mode)
+    Vector3         armsLOff;                    // same for the LEFT arm -- each hand seats independently
     unsigned long long gunMask;                  // bit k = mesh k is a GUN part (unskinned OR rigid-bound to one bone) vs blended-skinned arms
     int             pinAuthored;                 // 1: raylib's bake reproduces the file's authored gun-in-hands placement -> keep it (no re-seat), just ride the hand
     int             playShoot;                   // 1: play the model's Shot clip on each shot (AK has a good one)
@@ -244,18 +245,20 @@ static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, fl
 }
 // Gun-pin grip tune (gun pose relative to the hand bone) -- kept in a sibling "<tune>.pin"
 // file so it's separate from the whole-viewmodel transform.
-static void SavePin(const char *tunePath, Vector3 off, float scale, float yaw, float pitch, float roll, Vector3 rOff){
+static void SavePin(const char *tunePath, Vector3 off, float scale, float yaw, float pitch, float roll, Vector3 rOff, Vector3 lOff){
     char p[280]; snprintf(p,sizeof p,"%s.pin",tunePath);
     FILE *f=fopen(p,"w"); if(!f) return;
-    fprintf(f,"%.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f\n", off.x,off.y,off.z,scale,yaw,pitch,roll,rOff.x,rOff.y,rOff.z); fclose(f);
+    fprintf(f,"%.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.5f %.5f\n",
+            off.x,off.y,off.z,scale,yaw,pitch,roll,rOff.x,rOff.y,rOff.z,lOff.x,lOff.y,lOff.z); fclose(f);
 }
-static void LoadPin(const char *tunePath, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll, Vector3 *rOff){
+static void LoadPin(const char *tunePath, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll, Vector3 *rOff, Vector3 *lOff){
     char p[280]; snprintf(p,sizeof p,"%s.pin",tunePath);
     FILE *f=fopen(p,"r"); if(!f) return;
-    float ox,oy,oz,sc,yw,pt,rl,rx=0,ry=0,rz=0;
-    int n=fscanf(f,"%f %f %f %f %f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt,&rl,&rx,&ry,&rz); fclose(f);
+    float ox,oy,oz,sc,yw,pt,rl,rx=0,ry=0,rz=0,lx=0,ly=0,lz=0;
+    int n=fscanf(f,"%f %f %f %f %f %f %f %f %f %f %f %f %f",&ox,&oy,&oz,&sc,&yw,&pt,&rl,&rx,&ry,&rz,&lx,&ly,&lz); fclose(f);
     if(n>=7){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; *roll=rl; }
-    if(rOff) *rOff = (n>=10) ? (Vector3){rx,ry,rz} : (Vector3){0,0,0};   // optional right-hand nudge (old 7-value pins keep zero)
+    if(rOff) *rOff = (n>=10) ? (Vector3){rx,ry,rz} : (Vector3){0,0,0};   // optional per-hand nudges (older pins keep zero)
+    if(lOff) *lOff = (n>=13) ? (Vector3){lx,ly,lz} : (Vector3){0,0,0};
 }
 // Custom player spawn (F2 saves your current pose; loaded at startup to override the
 // map's spawn). Per-machine local content, like the weapon tune files. The save is
@@ -299,23 +302,47 @@ static int BoneSide(Model *m, int b){
     }
     return 0;
 }
-// Shift only the RIGHT-arm vertices of the skinned arms meshes by dv (model space,
-// baked straight into mesh.vertices -- the per-frame skinning pass re-uploads from
-// there, so the edit shows immediately and composes with the whole-arms nudge).
-// Used by minigun-style rigs where the two hands need seating independently.
-static void ApplyArmsRDelta(Weapon *w, Vector3 dv){
+// Shift ONE side's arm vertices by dv (side: +1 right, -1 left; model space, baked
+// straight into mesh.vertices -- the per-frame skinning pass re-uploads from there,
+// so the edit shows immediately). Each vertex moves PROPORTIONALLY to its summed
+// skin weight on that side's bones: full inside the hand, tapering smoothly at
+// blend boundaries -- an all-or-nothing dominant-bone cutoff tears the mesh
+// (stretched fingers) wherever neighbours land on opposite sides of the cut.
+static void ApplyArmsSideDelta(Weapon *w, Vector3 dv, int side){
     if (fabsf(dv.x)+fabsf(dv.y)+fabsf(dv.z) < 1e-9f) return;
+    int nb=w->model.skeleton.boneCount; if (nb<=0 || nb>256) return;
+    signed char sideOf[256];
+    for (int b=0;b<nb;b++) sideOf[b]=(signed char)BoneSide(&w->model,b);
     for (int k=0;k<w->model.meshCount && k<64;k++){
         Mesh *ms=&w->model.meshes[k];
         if ((w->gunMask>>k)&1ULL) continue;                       // arms meshes only
         if (!ms->boneIndices || !ms->boneWeights || !ms->vertices) continue;
         for (int v=0;v<ms->vertexCount;v++){
-            int best=-1; float bw=0.0f;
-            for (int c=0;c<4;c++){ float wt=ms->boneWeights[v*4+c]; if (wt>bw){ bw=wt; best=(int)ms->boneIndices[v*4+c]; } }
-            if (best<0 || BoneSide(&w->model,best)!=1) continue;  // right-side verts only
-            ms->vertices[v*3]+=dv.x; ms->vertices[v*3+1]+=dv.y; ms->vertices[v*3+2]+=dv.z;
+            float ws=0.0f;                                        // weight mass on the requested side
+            for (int c=0;c<4;c++){
+                int b=(int)ms->boneIndices[v*4+c];
+                if (b<nb && sideOf[b]==side) ws+=ms->boneWeights[v*4+c];
+            }
+            if (ws<=0.001f) continue;
+            ms->vertices[v*3]+=dv.x*ws; ms->vertices[v*3+1]+=dv.y*ws; ms->vertices[v*3+2]+=dv.z*ws;
         }
     }
+}
+static Matrix XformToMatrix(Transform t);      // fwd decl (defined near DrawPinnedGun)
+// Convert a view-axis nudge into bind space (the verts live PRE-skin) by counter-
+// rotating with the given hand bone's skin transform at the currently held frame.
+// Identity-frame rigs (minigun) pass through unchanged.
+static Vector3 NudgeToBindSpace(Weapon *w, int bone, Vector3 dv){
+    if (bone>=0 && g_gunAnimN>0 && g_curAnim<g_gunAnimN && g_gunAnim[g_curAnim].keyframePoses){
+        ModelAnimation *an=&g_gunAnim[g_curAnim];
+        int kf=(int)g_animT; int nf=ANIM_FRAMES(*an); if(kf<0)kf=0; if(nf>0&&kf>=nf)kf=nf-1;
+        Matrix skin=MatrixMultiply(MatrixInvert(XformToMatrix(w->model.skeleton.bindPose[bone])),
+                                   XformToMatrix(an->keyframePoses[kf][bone]));
+        Matrix invs=MatrixInvert(skin);
+        Vector3 o=Vector3Transform((Vector3){0,0,0},invs);
+        dv=Vector3Subtract(Vector3Transform(dv,invs),o);          // direction only (no translation)
+    }
+    return dv;
 }
 
 // One-shot diagnostic for the pinned-gun path: after posing the model at the held
@@ -323,7 +350,6 @@ static void ApplyArmsRDelta(Weapon *w, Vector3 dv){
 // (b) where MY keyframe-derived skin matrix sends it, (c) where the most wrist-bound
 // ARM VERTEX actually landed (mesh.animVertices = the rendered ground truth). If
 // (a)==(b)==(c), gun and hand must coincide on screen; whichever differs is the lie.
-static Matrix XformToMatrix(Transform t);      // fwd decl (defined near DrawPinnedGun)
 static void DebugPinProbe(Weapon *w){
     if (!w->pinGun) return;                                       // only instrumented weapons
     if (w->handBone<0 || w->animN<=0 || !w->model.boneMatrices){  // log WHY it can't probe -- a NULL boneMatrices means arms never animate at all
@@ -528,8 +554,9 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
       DebugLog("gunpin","\"slot\":%d,\"gunMeshes\":%d,\"mask\":%llu,\"handR\":%d,\"handL\":%d,\"authored\":%d,\"gunC\":[%.1f,%.1f,%.1f],\"seat\":[%.1f,%.1f,%.1f]",
                slot, nstat, w->gunMask, w->handBone, w->handBoneL, w->pinAuthored, w->gunBindC.x, w->gunBindC.y, w->gunBindC.z, w->pinSeat.x, w->pinSeat.y, w->pinSeat.z);
     }
-    LoadPin(w->tunePath,&w->pinOff,&w->pinScale,&w->pinYaw,&w->pinPitch,&w->pinRoll,&w->armsROff);
-    ApplyArmsRDelta(w, w->armsROff);   // bake the saved right-hand nudge into the arm verts (no-op when zero)
+    LoadPin(w->tunePath,&w->pinOff,&w->pinScale,&w->pinYaw,&w->pinPitch,&w->pinRoll,&w->armsROff,&w->armsLOff);
+    ApplyArmsSideDelta(w, w->armsROff, 1);    // bake the saved per-hand nudges into the arm verts (no-op when zero)
+    ApplyArmsSideDelta(w, w->armsLOff, -1);
     // Resolve clips by name with priorities (first match wins per role): a real
     // "idle" beats take/draw/hold; "shot" counts as a fire clip; the plain
     // "reload" beats variants like reload_full. Handles e.g. AK_Idle/Shot/Reload.
@@ -1733,7 +1760,7 @@ static void Update(void) {
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_F5)){
         StashActiveTuning();
         SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll,g_weapons[g_curWeapon].idleHold);
-        if (g_weapons[g_curWeapon].pinGun || g_weapons[g_curWeapon].spinUp){ Weapon *w=&g_weapons[g_curWeapon]; SavePin(w->tunePath,w->pinOff,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll,w->armsROff); }
+        { Weapon *w=&g_weapons[g_curWeapon]; SavePin(w->tunePath,w->pinOff,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll,w->armsROff,w->armsLOff); }   // grip/hand tunes save for every weapon
         g_savedMsg=2.0f;   // seconds to show "SAVED"
         DebugLog("vmsave","\"slot\":%d,\"label\":\"%s\",\"path\":\"%s\",\"saved\":true",
                  g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].tunePath);
@@ -1750,27 +1777,34 @@ static void Update(void) {
 
     // live viewmodel tuning (faster in orient mode so a mispositioned weapon is
     // easy to sweep back into frame)
-    float ns=dt*(g_noEnemies?3.0f:0.5f);
-    float rs=dt*(g_noEnemies?120.0f:60.0f);
-    float ss=g_noEnemies?3.0f:1.0f;
+    // Fine steps by default; hold SHIFT for coarse (5x). The same base feeds the
+    // hands-manager nudges, so their net speeds are unchanged by this slowdown.
+    float fine=(IsKeyDown(KEY_LEFT_SHIFT)||IsKeyDown(KEY_RIGHT_SHIFT))?5.0f:1.0f;
+    float ns=dt*(g_noEnemies?0.9f:0.15f)*fine;
+    float rs=dt*(g_noEnemies?36.0f:18.0f)*fine;
+    float ss=(g_noEnemies?0.9f:0.3f)*fine;
     Weapon *cwp=&g_weapons[g_curWeapon];
-    int bStates = cwp->spinUp ? 3 : (cwp->pinGun ? 2 : 1);   // minigun: VIEWMODEL/ARMS/RIGHT-HAND; pinned gun: VIEWMODEL/GRIP; rest: viewmodel only
+    int bStates = cwp->pinGun ? 2 : 3;   // pinned gun: VIEWMODEL/GUN GRIP; every other weapon: VIEWMODEL/LEFT HAND/RIGHT HAND ("hands manager")
     if (IsKeyPressed(KEY_B) && bStates>1) g_tuneTarget=(g_tuneTarget+1)%bStates;
     if (g_tuneTarget>=bStates) g_tuneTarget=0;
-    if (g_tuneTarget==2){                                                        // minigun: nudge the RIGHT hand independently (baked into the verts)
+    if (g_tuneTarget>=1 && !cwp->pinGun){                                        // hands manager: nudge ONE hand (1=left, 2=right), baked into the verts
         Weapon *w=cwp;
-        float np=ns/fmaxf(g_vmScale,1e-6f)*0.07f;
+        int side = (g_tuneTarget==2) ? 1 : -1;
+        int bone = (side==1) ? w->handBone : w->handBoneL;
+        float np=ns/fmaxf(g_vmScale,1e-6f)*0.0667f;   // SHIFT-coarse comes via ns
         Vector3 dv={0,0,0};
         if (IsKeyDown(KEY_I)) dv.y+=np;  if (IsKeyDown(KEY_K)) dv.y-=np;
         if (IsKeyDown(KEY_L)) dv.x+=np;  if (IsKeyDown(KEY_J)) dv.x-=np;
         if (IsKeyDown(KEY_O)) dv.z+=np;  if (IsKeyDown(KEY_U)) dv.z-=np;
         if (fabsf(dv.x)+fabsf(dv.y)+fabsf(dv.z)>0.0f){
-            ApplyArmsRDelta(w,dv);
-            w->armsROff=Vector3Add(w->armsROff,dv);
+            dv=NudgeToBindSpace(w, bone, dv);          // keys track view axes even on held-frame rigs
+            ApplyArmsSideDelta(w, dv, side);
+            if (side==1) w->armsROff=Vector3Add(w->armsROff,dv);
+            else         w->armsLOff=Vector3Add(w->armsLOff,dv);
         }
-    } else if (g_tuneTarget==1){                                                 // tune the gun grip (pinned) / whole-arms nudge (minigun)
+    } else if (g_tuneTarget==1){                                                 // pinned gun: tune the gun's grip on the hand bone
         Weapon *w=cwp;
-        float np=ns/fmaxf(g_vmScale,1e-6f)*0.07f;   // pinOff is in MODEL (bind-space) units -> convert the view-space step
+        float np=ns/fmaxf(g_vmScale,1e-6f)*0.0667f;   // model-unit step; SHIFT-coarse comes via ns, net speed unchanged
         if (IsKeyDown(KEY_I)) w->pinOff.y+=np;  if (IsKeyDown(KEY_K)) w->pinOff.y-=np;
         if (IsKeyDown(KEY_L)) w->pinOff.x+=np;  if (IsKeyDown(KEY_J)) w->pinOff.x-=np;
         if (IsKeyDown(KEY_O)) w->pinOff.z+=np;  if (IsKeyDown(KEY_U)) w->pinOff.z-=np;
@@ -2107,8 +2141,9 @@ static void DrawViewmodel(void){
             ModelAnimation *an=(g_gunAnimN>0 && g_curAnim<g_gunAnimN)?&g_gunAnim[g_curAnim]:NULL;
             DrawPinnedGun(g_gun, an, g_animT, vpos, g_vmScale, w->handBone, w->gunBindC, w->pinAlign, w->pinSeat, w->gunMask, w->pinAuthored,
                           w->pinOff, w->pinScale, w->pinYaw, w->pinPitch, w->pinRoll);
-        } else
-            DrawModelEx(g_gun,vpos,(Vector3){0,1,0},0,(Vector3){g_vmScale,g_vmScale,g_vmScale},WHITE);
+        } else   // everything else: same per-mesh draw with the arms nudge (spinMesh=-1 -> nothing spins; zero offset = plain draw)
+            DrawGunSpinMesh(g_gun, vpos, g_vmScale, -1, 0.0f,
+                            g_weapons[g_curWeapon].gunMask, g_weapons[g_curWeapon].pinOff);
     EndMode3D();
     g_gun.transform=MatrixIdentity();
 }
@@ -2180,11 +2215,12 @@ static void DrawHUD(void) {
             TextSh("; / '      pitch  down / up",18,366,20,kc);
             TextSh(", / .      roll   twist left / right",18,392,20,kc);
             TextSh(TextFormat("Z / X      pose-hold frame: %d  (SHIFT=x10)", g_weapons[g_curWeapon].idleHold), 18,410,19,(Color){255,200,120,255});
-            if (g_weapons[g_curWeapon].pinGun || g_weapons[g_curWeapon].spinUp){
+            {   // hands manager: B cycles what the tuning keys drive, on every weapon
                 Weapon *w=&g_weapons[g_curWeapon];
-                const char *what = (g_tuneTarget==2) ? "RIGHT HAND" : (g_tuneTarget==1 ? (w->pinGun?"GUN GRIP":"BOTH ARMS") : "VIEWMODEL");
+                const char *what = (g_tuneTarget==2) ? "RIGHT HAND" : (g_tuneTarget==1 ? (w->pinGun?"GUN GRIP":"LEFT HAND") : "VIEWMODEL");
                 TextSh(TextFormat("B          tuning: %s   %s", what, g_tuneTarget?"(IJKL/UO move)":""), 18,432,19,(Color){120,230,255,255});
-                if (g_tuneTarget==1) TextSh(TextFormat("   off %.2f %.2f %.2f  scale %.2f  yaw %.0f pit %.0f rol %.0f", w->pinOff.x,w->pinOff.y,w->pinOff.z,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll), 18,452,18,(Color){200,220,255,255});
+                if (g_tuneTarget==1 && w->pinGun) TextSh(TextFormat("   off %.2f %.2f %.2f  scale %.2f  yaw %.0f pit %.0f rol %.0f", w->pinOff.x,w->pinOff.y,w->pinOff.z,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll), 18,452,18,(Color){200,220,255,255});
+                if (g_tuneTarget==1 && !w->pinGun) TextSh(TextFormat("   left-hand off %.3f %.3f %.3f", w->armsLOff.x,w->armsLOff.y,w->armsLOff.z), 18,452,18,(Color){200,220,255,255});
                 if (g_tuneTarget==2) TextSh(TextFormat("   right-hand off %.3f %.3f %.3f", w->armsROff.x,w->armsROff.y,w->armsROff.z), 18,452,18,(Color){200,220,255,255});
             }
             TextSh("0 reset      ENTER save  (or F5)",18,474,19,(Color){170,255,170,255});

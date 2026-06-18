@@ -150,9 +150,10 @@ whatever's in `LoadWeapon`.
   3. Minigun: the OPPOSITE — binding stance is the correct pose (do NOT re-skin;
      restored from .bak). Hands seated via rigid arms nudges instead.
 - **Grip tuning** (orient mode `N`): `B` cycles tuning targets — VIEWMODEL →
-  GUN GRIP (pinned guns) or BOTH ARMS → RIGHT HAND (minigun). `Z`/`X` scrub the
-  held ready-pose frame (`idleHold`). ENTER saves; pins live in `vm_tune_*.txt.pin`
-  (10 values incl. the right-hand offset).
+  GUN GRIP (pinned guns) or LEFT HAND → RIGHT HAND (every other weapon; per-hand
+  vertex nudges via the bone-ancestry side split). `Z`/`X` scrub the held
+  ready-pose frame (`idleHold`). SHIFT = coarse steps. ENTER saves; pins live in
+  `vm_tune_*.txt.pin` (13 values incl. both per-hand offsets).
 - **Untextured-mesh cull**: white default-material morph helpers (M16's
   `shape_pose`) are hidden at load; tinted flat-colour parts are kept.
 - **Fixes**: AK fires a single trimmed crack per shot; pause resumes on P/ESC/click;
