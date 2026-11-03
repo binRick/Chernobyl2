@@ -1123,6 +1123,18 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
 // enemy isn't jammed in a corner where it can't move (the random point can sit nearer
 // a wall than the nav cell centre, so re-check the actual sphere here).
+// Where to start the downward floor-probe for a spawn at (x,z): up to 8 above the
+// player, but never above a ceiling -- probe UP from just over the player's feet first.
+// Without this, an arena with a roof (maps/chernobyl.map) dropped enemies onto the
+// underside of the ceiling: they walked the nav mesh at 5.1 m and were culled as
+// "behind the ceiling" -- invisible, but still landing hits.
+static float SpawnProbeTop(float x, float z){
+    float top=g_pos.y+8.0f;
+    Vector3 o={x, g_pos.y-EYE_H+0.6f, z};
+    float up=MapRayNearest(o,(Vector3){0,1,0},top-o.y);
+    if (up>0.0f) top=o.y+up-0.05f;
+    return top;
+}
 static int EnemySpawnOK(float x, float fy, float z){
     return fabsf(fy-(g_pos.y-EYE_H))<6.0f
         && MapNavReachable((Vector3){x,fy,z})
@@ -1139,14 +1151,14 @@ static void SpawnEnemyMap(int i, int type, int behind){
         float ang = ahead + GetRandomValue(-115,115)/100.0f; // within ~±66 deg of the arc centre
         float dist=6.0f+GetRandomValue(0,90)/10.0f;          // 6..15 units out
         float x=g_pos.x+cosf(ang)*dist, z=g_pos.z+sinf(ang)*dist;
-        float top=g_pos.y+8.0f;
+        float top=SpawnProbeTop(x,z);
         float fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
         if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z},type); return; } }
     }
     // ring failed: scan outward from the player for any reachable, roomy cell.
     for (int rad=2; rad<14; rad++) for (int a=0;a<16;a++){
         float ang=a*0.3927f, x=g_pos.x+cosf(ang)*rad, z=g_pos.z+sinf(ang)*rad;
-        float top=g_pos.y+8.0f, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
+        float top=SpawnProbeTop(x,z), fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
         if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z},type); return; } }
     }
     // nothing valid near the player (e.g. player is off the nav mesh in a tight nook):
