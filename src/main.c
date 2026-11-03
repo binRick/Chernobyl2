@@ -1197,8 +1197,9 @@ static void StartWave(int w){
 // What to spend budget on: cooks are the staple; line cooks + liquidators join from
 // wave 2, butchers from wave 3 (the head chef is the between-waves BOSS) -- all weighted heavier as
 // waves rise. Falls back to a cook when the budget can't afford the pick.
-static int g_forceEnemy = -1;   // --enemy NAME: every spawn is this type (demo / testing a single enemy)
+static int g_forceEnemy = -1;   // --enemy NAME: every spawn is this type (demo / testing a single enemy); -2 = "all"
 static int WavePickType(void){
+    if (g_forceEnemy==-2) return (g_waveBudget>0) ? GetRandomValue(0,EN_NTYPES-1) : -1;   // --enemy all: the whole roster, evenly
     if (g_forceEnemy>=0) return (kEnemy[g_forceEnemy].cost<=g_waveBudget) ? g_forceEnemy : -1;
     int r=GetRandomValue(0,99), t=EN_COOK;
     if      (g_wave>=3 && r<14+g_wave*2)    t=EN_BUTCHER;
@@ -1312,7 +1313,7 @@ static void UpdateWaves(float dt){
     if (!g_hasEnemy || g_noEnemies) return;
     int alive=0; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state!=0) alive++;  // dying bodies still hold the field
     if (g_stress){                                     // perf gate: saturate the field, no wave logic
-        for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0) SpawnEnemyT(i,(g_forceEnemy>=0)?g_forceEnemy:EN_COOK,i&1);
+        for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0) SpawnEnemyT(i,(g_forceEnemy>=0)?g_forceEnemy:(g_forceEnemy==-2?GetRandomValue(0,EN_NTYPES-1):EN_COOK),i&1);
         return;
     }
     if (g_waveBreather>0.0f){
@@ -1331,13 +1332,13 @@ static void UpdateWaves(float dt){
             if (slot>=0){
                 int behind = GetRandomValue(0,99)<35;  // flank bias: ~a third of every wave comes from behind
                 SpawnEnemyT(slot,t,behind);
-                g_waveBudget-=kEnemy[t].cost;
+                g_waveBudget-=(g_forceEnemy==-2)?2:kEnemy[t].cost;   // --enemy all: flat cost so a wave holds the whole roster
                 float tick=0.9f-g_wave*0.045f; if (tick<0.45f) tick=0.45f;   // trickle speeds up with the waves
                 g_spawnTick=tick;
                 DebugLog("spawn","\"wave\":%d,\"type\":\"%s\",\"behind\":%d,\"budget\":%d", g_wave, kEnemy[t].name, behind, g_waveBudget);
             }
         }
-    } else if (alive==0 && !g_bossThisWave && g_forceEnemy<0){   // field clear -> BOSS interlude (../chernobyl)
+    } else if (alive==0 && !g_bossThisWave && g_forceEnemy<=-1){  // field clear -> BOSS interlude (../chernobyl); not in single-type demos
         g_bossThisWave=1;
         int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
         if (slot>=0){
@@ -3541,7 +3542,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--enemy") && i+1<argc){                   // only spawn this enemy type (cook/linecook/butcher/liquidator/headchef)
             const char *nm=argv[++i];
             for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) g_forceEnemy=t;
-            if (g_forceEnemy<0){ fprintf(stderr,"--enemy: unknown type '%s' (cook|linecook|butcher|liquidator|headchef)\n",nm); return 1; }
+            if (!strcmp(nm,"all")) g_forceEnemy=-2;
+            if (g_forceEnemy==-1){ fprintf(stderr,"--enemy: unknown type '%s' (all|cook|linecook|butcher|liquidator|headchef)\n",nm); return 1; }
         }
         else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
         else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
