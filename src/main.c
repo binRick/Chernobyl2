@@ -990,7 +990,7 @@ static Matrix XformMat(Transform t){
 // the skinning shader. The position VBO keeps the bind pose raylib uploaded at load.
 static void EnemyRigGPU(EnemyRig *rg){
     Model *m=&rg->model; int nb=m->skeleton.boneCount;
-    if (EnemySkinInit()!=1 || nb<=0 || nb>ENEMY_MAX_BONES || !m->skeleton.bindPose) return;
+    if (EnemySkinInit()!=1 || nb<=0 || nb>ENEMY_MAX_BONES || !m->skeleton.bindPose || !m->boneMatrices) return;
     for (int i=0;i<m->meshCount;i++){ Mesh *ms=&m->meshes[i];
         if (!ms->boneIndices || !ms->boneWeights || ms->vertexCount<=0 || !ms->vaoId) return;   // all-or-nothing
     }
@@ -1005,7 +1005,7 @@ static void EnemyRigGPU(EnemyRig *rg){
         rlDisableVertexArray();
     }
     for (int i=0;i<m->materialCount;i++) m->materials[i].shader=g_skinShader;
-    rg->invBind=(Matrix*)MemAlloc(sizeof(Matrix)*nb); rg->bones=(Matrix*)MemAlloc(sizeof(Matrix)*nb);
+    rg->invBind=(Matrix*)MemAlloc(sizeof(Matrix)*nb); rg->bones=NULL;   // the pose lives in model.boneMatrices
     for (int b=0;b<nb;b++) rg->invBind[b]=MatrixInvert(XformMat(m->skeleton.bindPose[b]));   // once, not per frame
     rg->gpu=1;
 }
@@ -1022,10 +1022,10 @@ static void RigPose(EnemyRig *rg, ModelAnimation *an, float frame){
         t.translation=Vector3Lerp(a.translation,c.translation,bl);
         t.rotation=QuaternionSlerp(a.rotation,c.rotation,bl);
         t.scale=Vector3Lerp(a.scale,c.scale,bl);
-        rg->bones[b]=MatrixMultiply(rg->invBind[b], XformMat(t));
+        rg->model.boneMatrices[b]=MatrixMultiply(rg->invBind[b], XformMat(t));
     }
-    rlEnableShader(g_skinShader.id);
-    rlSetUniformMatrices(g_skinBonesLoc, rg->bones, nb);
+    // No manual upload: DrawModelEx already sends model.boneMatrices to the shader's
+    // "boneMatrices" uniform (rmodels.c) -- an upload here would just be overwritten.
 }
 // Load an enemy model + clips into a rig, resolving clip ROLES by name and the
 // death clip's settle frame. Returns 1 if the model has geometry.
