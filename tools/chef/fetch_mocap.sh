@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 mkdir -p build/cmu
 BASE=https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data
-for c in 120/120_22 104/104_41 009/09_01 079/79_01 090/90_18; do
+for c in 120/120_22 104/104_41 009/09_01 079/79_01 090/90_18 079/79_96 080/80_03 124/124_01 120/120_03; do
   f=build/cmu/$(basename $c).bvh
   [[ -s $f ]] || curl -sSL --fail -o "$f" "$BASE/$c.bvh"
   echo "$f"

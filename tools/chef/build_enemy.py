@@ -90,6 +90,41 @@ SPECS = {
         recolor={"worksuit": ((0.96, 0.95, 0.92), 18, 14, 6)},
         props="headchef", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
 }
+AIM_RIFLE = ("79_96", 58, 100, True, 6)            # two-handed steady aim, held (looped while engaged)
+AIM_HEAVY = ("80_03", 40, 96, True, 6)
+THROW     = ("124_01", 76, 118, False, 0)          # wind-up + hurl (radiation bolt)
+CAST      = ("120_03", 92, 150, False, 0)          # arms thrust out over the dead
+SPECS.update({
+    "rifleman": dict(   # militia rifleman: aimed single shots
+        phenotype=dict(gender=1.0, age=0.5, muscle=0.7, weight=0.45, proportions=0.6, height=0.6),
+        targets={},
+        skin="young_caucasian_male2", eyebrows="eyebrow003",
+        clothes=["male_worksuit01", "shoes03"],
+        recolor={"worksuit": ((0.40, 0.43, 0.29), 4, 3, 10)},
+        props="rifleman", clips=dict(BASE_CLIPS, attack=AIM_RIFLE)),
+    "gunner": dict(   # machine-gunner: heavy, bursts
+        phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.8, proportions=0.3, height=0.62),
+        targets={"measure-neck-circ-incr": 0.6, "torso-scale-horiz-incr": 0.35},
+        skin="middleage_caucasian_male", eyebrows="eyebrow010",
+        clothes=["male_worksuit01", "shoes03"],
+        recolor={"worksuit": ((0.30, 0.32, 0.26), 6, 4, 14)},
+        props="gunner", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, attack=AIM_HEAVY)),
+    "mutant": dict(   # glowing mutant: irradiated skin, throws radiation bolts
+        phenotype=dict(gender=1.0, age=0.5, muscle=0.75, weight=0.3, proportions=0.4, height=0.58),
+        targets={"stomach-pregnant-decr": 0.5, "torso-muscle-dorsi-incr": 0.5},
+        skin="young_caucasian_male", eyebrows="eyebrow001",
+        clothes=["male_casualsuit06", "shoes02"],
+        recolor={"casualsuit06": ((0.42, 0.40, 0.33), 12, 8, 22)},
+        skin_tint=((0.70, 0.95, 0.62), 26),        # sickly green + glowing lesions
+        props="mutant", clips=dict(BASE_CLIPS, attack=THROW)),
+    "priest": dict(   # irradiated priest: hooded robe, lantern; raises the dead
+        phenotype=dict(gender=1.0, age=0.92, muscle=0.35, weight=0.35, proportions=0.4, height=0.6),
+        targets={},
+        skin="old_caucasian_male", eyebrows="eyebrow005",
+        clothes=["male_worksuit01", "shoes02"],
+        recolor={"worksuit": ((0.10, 0.10, 0.11), 0, 0, 6)},
+        props="priest", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK, attack=CAST)),
+})
 SPEC = SPECS[ENEMY]
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -208,6 +243,16 @@ for o in meshes:
     src = first_image(o.data.materials[0] if o.data.materials else None)
     if src is not None and max(src.size) > SIZE:
         src.scale(SIZE, SIZE)
+    if SPEC.get("skin_tint") and ("male_generic" in o.name or "male1591" in o.name) and src is not None:
+        tint, n_les = SPEC["skin_tint"]
+        a = to_np(src)
+        for ch in range(3):
+            a[..., ch] = np.clip(a[..., ch] * tint[ch], 0, 1)
+        splatter(a, n_les, 0.006, 0.02, (0.55, 1.0, 0.30), seed=31, alpha=0.9)     # weeping lesions
+        splatter(a, n_les // 2, 0.015, 0.04, (0.25, 0.32, 0.12), seed=32, alpha=0.5)  # necrotic bruising
+        img = from_np(f"{ENEMY}_skin", a)
+        o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6))
+        continue
     rule = next((v for k, v in SPEC["recolor"].items() if k in o.name), None)
     if rule is not None and src is not None:
         # recolour the garment, keeping its luminance (folds, seams), then dirty it up
@@ -656,7 +701,192 @@ def jacket_buttons():
                 blob(f"button_{xo}_{k}", hit[0] + Vector((0, -0.022, 0)), 0.011, M_dark, "Spine1", scale=(1, 0.5, 1))
 
 
+def forearm_frame(side):
+    """Grip point + barrel axis along the forearm (guns hang low at rest, point ahead when aiming)."""
+    pb = rig.data.bones
+    el = rig.matrix_world @ pb[f"{side}ForeArm"].head_local
+    wr = rig.matrix_world @ pb[f"{side}Hand"].head_local
+    fb = rig.matrix_world @ pb[f"{side}FingerBase"].head_local
+    d = (wr - el).normalized()
+    up = (Vector((0, 0, 1)) - d * d.z).normalized()
+    side_v = d.cross(up).normalized()
+    return wr.lerp(fb, 0.5), d, up, side_v
+
+
+def rifle(scale=1.0, heavy=False):
+    g, d, up, sv = forearm_frame("Right")
+    M_gun = paint("gunmetal", (0.12, 0.12, 0.13), grime=0.3, seed=21)
+    M_furn = paint("furniture", (0.34, 0.20, 0.10), grime=0.4, seed=22)
+    S = scale
+    box_basis("receiver", g + d * 0.10 * S + up * 0.04 * S, d, sv, up, (0.30 * S, 0.05 * S, 0.075 * S), M_gun, "RightHand")
+    box_basis("dust_cover", g + d * 0.11 * S + up * 0.083 * S, d, sv, up, (0.26 * S, 0.044 * S, 0.012 * S), M_gun, "RightHand")
+    box_basis("pistol_grip", g + up * -0.02 * S, d, sv, up, (0.04 * S, 0.035 * S, 0.10 * S), M_furn, "RightHand")
+    box_basis("stock", g - d * 0.20 * S + up * 0.02 * S, d, sv, up, (0.26 * S, 0.042 * S, 0.09 * S), M_furn, "RightHand")
+    box_basis("handguard", g + d * 0.33 * S + up * 0.045 * S, d, sv, up, (0.20 * S, 0.055 * S, 0.06 * S), M_furn, "RightHand")
+    blen = 0.62 if heavy else 0.42
+    cyl("barrel", g + d * 0.25 * S + up * 0.05 * S, g + d * (0.25 + blen) * S + up * 0.05 * S, 0.012 * S, M_gun, "RightHand", verts=12)
+    cyl("muzzle", g + d * (0.25 + blen) * S + up * 0.05 * S, g + d * (0.29 + blen) * S + up * 0.05 * S, 0.018 * S, M_gun, "RightHand", verts=12)
+    cyl("front_sight", g + d * (0.20 + blen) * S + up * 0.06 * S, g + d * (0.20 + blen) * S + up * 0.10 * S, 0.005 * S, M_gun, "RightHand", verts=6)
+    if heavy:   # drum + bipod + carry handle
+        cyl("drum", g + d * 0.10 * S - up * 0.05 * S - sv * 0.06 * S, g + d * 0.10 * S - up * 0.05 * S + sv * 0.06 * S, 0.11 * S, M_gun, "RightHand", verts=28)
+        for k in (-1, 1):
+            cyl(f"bipod_{k}", g + d * (0.25 + blen * 0.8) * S + up * 0.04 * S, g + d * (0.32 + blen * 0.8) * S - up * 0.22 * S + sv * 0.07 * k * S, 0.006 * S, M_gun, "RightHand", verts=6)
+        cyl("handle", g + d * 0.05 * S + up * 0.12 * S, g + d * 0.20 * S + up * 0.12 * S, 0.01 * S, M_gun, "RightHand", verts=8)
+    else:       # the curved magazine: three stacked, increasingly-angled boxes
+        for k in range(3):
+            a = 0.18 * k
+            dd = (d * math.sin(a) - up * math.cos(a)).normalized()
+            box_basis(f"mag_{k}", g + d * (0.16 + 0.03 * k) * S + dd * (0.06 + 0.055 * k) * S, d.cross(sv).cross(sv) * -1 if False else (dd.cross(sv)).normalized(), sv, -dd,
+                      (0.05 * S, 0.03 * S, 0.06 * S), M_gun, "RightHand", bevel=0.002)
+
+
+def steel_helmet():
+    c, rx, ry = skull_slice(brow_z + 0.01)
+    M_helm = paint("helmet", (0.30, 0.34, 0.22), grime=0.35, seed=23)
+    h = blob("helmet", (c.x, c.y + 0.008, brow_z - 0.005), 1.0, M_helm, "Head", scale=(rx + 0.03, ry + 0.035, crown - brow_z + 0.07), sub=4)
+    import bmesh as _bm
+    bm = _bm.new(); bm.from_mesh(h.data)
+    _bm.ops.delete(bm, geom=[v for v in bm.verts if v.co.z < -0.12], context="VERTS")   # open dome (local coords, unit sphere)
+    bm.to_mesh(h.data); bm.free()
+    for v in h.data.vertices:            # flared skirt at the rim, SSh-68 style
+        if v.co.z < 0.25:
+            k = 1.0 + (0.25 - v.co.z) * 0.35
+            v.co.x *= k; v.co.y *= k
+    m = h.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.008
+    bpy.context.view_layer.objects.active = h; bpy.ops.object.modifier_apply(modifier="solid")
+    bpy.ops.mesh.primitive_torus_add(major_radius=1, minor_radius=0.004 / max(rx, ry), major_segments=48, minor_segments=6, location=(c.x, c.y, mouth_z + 0.005))
+    st = bpy.context.active_object; st.name = "chinstrap"; st.scale = (rx + 0.004, ry * 0.6, max(rx, ry))
+    st.rotation_euler = (0, math.pi / 2 * 0, 0)
+    st.data.materials.append(M_dark); props.append((st, "Head"))
+
+
+def bandolier():
+    sp1 = rig.matrix_world @ rig.data.bones["Spine1"].head_local
+    M_belt = paint("ammo_belt", (0.32, 0.26, 0.14), grime=0.4, seed=24)
+    bpy.ops.mesh.primitive_torus_add(major_radius=0.24, minor_radius=0.025, major_segments=40, minor_segments=8,
+                                     location=(sp1.x, sp1.y - 0.01, sp1.z + 0.02), rotation=(0, math.radians(35), 0))
+    t = bpy.context.active_object; t.name = "bandolier"; t.scale = (1.15, 0.85, 1.0)
+    t.data.materials.append(M_belt); props.append((t, "Spine1"))
+    R = Matrix.Rotation(math.radians(35), 4, "Y")
+    for k in range(26):                   # a row of brass cartridges along the front half of the belt
+        a = math.pi * (0.15 + 0.7 * k / 25) + math.pi    # y<0 = the side facing out
+        p0 = Vector((math.cos(a) * 0.24 * 1.15, math.sin(a) * 0.24 * 0.85, 0))
+        n = Vector((math.cos(a), math.sin(a), 0)) * 0.03
+        q0 = (R @ p0.to_4d()).to_3d() + Vector((sp1.x, sp1.y - 0.01, sp1.z + 0.02))
+        ax = (R @ Vector((0, 0, 1, 0))).to_3d()
+        cyl(f"cartridge_{k}", q0 + (R @ n.to_4d()).to_3d() - ax * 0.03, q0 + (R @ n.to_4d()).to_3d() + ax * 0.03, 0.007, M_brass, "Spine1", verts=8)
+
+
+def growths():
+    M_tum = paint("growth", (0.62, 0.70, 0.45), grime=0.5, blood=3, seed=25)
+    rnd = random.Random(9)
+    sh = rig.matrix_world @ rig.data.bones["LeftShoulder"].tail_local
+    for k in range(5):                    # clustered on the skull + one shoulder
+        if k < 3:
+            p = Vector((hc.x + rnd.uniform(-0.05, 0.06), hc.y + rnd.uniform(0.0, 0.05), crown - rnd.uniform(0.0, 0.05)))
+            bone = "Head"
+        else:
+            p = sh + Vector((rnd.uniform(-0.04, 0.04), rnd.uniform(-0.02, 0.04), rnd.uniform(0.0, 0.05)))
+            bone = "LeftShoulder"
+        blob(f"growth_{k}", p, rnd.uniform(0.025, 0.045), M_tum, bone, scale=(1, 0.85, 0.8), sub=3, noise=0.18, seed=k)
+
+
+def robe():
+    """Hooded robe: a flared tube shaped by radial ray-casts round the body (chest down),
+    plus a cowl moulded from the back/top of the head (as the gas-mask hood)."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    trees = [(BVHTree.FromObject(o, dg), o.matrix_world.copy()) for o in meshes if "low-poly" not in o.name]
+    def radius_at(cx, cy, z, ang):
+        org = Vector((cx + math.cos(ang) * 1.0, cy + math.sin(ang) * 1.0, z)); dirn = Vector((-math.cos(ang), -math.sin(ang), 0))
+        best = 0.08
+        for t, mw in trees:
+            inv = mw.inverted()
+            h = t.ray_cast(inv @ org, (inv.to_3x3() @ dirn).normalized())
+            if h[0] is not None:
+                w = mw @ h[0]; r = math.hypot(w.x - cx, w.y - cy)
+                best = max(best, r)
+        return best
+    bz = lambda n: (rig.matrix_world @ rig.data.bones[n].head_local)
+    hips = bz("Hips"); top = bz("Spine1").z + 0.22; bot = 0.06
+    cx, cy = hips.x, hips.y
+    NA, NZ = 40, 30
+    R = [[0.0] * NA for _ in range(NZ + 1)]
+    for j in range(NZ + 1):
+        z = top + (bot - top) * j / NZ
+        for i in range(NA):
+            ang = 2 * math.pi * i / NA
+            zz = max(z, hips.z - 0.05)
+            r = min(radius_at(cx, cy, zz, ang), 0.24 if z > hips.z else 0.30) + 0.035   # torso only: the A-posed arms don't count
+            if z < hips.z - 0.05:
+                r += 0.06 + (hips.z - 0.05 - z) * 0.12       # gentle flare below the hips (legs swing inside)
+            R[j][i] = r
+    for _ in range(6):                    # smooth into cloth
+        R = [[(R[j][i] * 2 + R[j][(i + 1) % NA] + R[j][i - 1] + (R[j - 1][i] if j > 0 else R[j][i]) + (R[j + 1][i] if j < NZ else R[j][i])) / 6
+              for i in range(NA)] for j in range(NZ + 1)]
+    bm = bmesh.new(); uvl = bm.loops.layers.uv.new()
+    rings = []
+    for j in range(NZ + 1):
+        z = top + (bot - top) * j / NZ
+        rings.append([bm.verts.new((cx + math.cos(2 * math.pi * i / NA) * R[j][i] * (1 + 0.02 * math.sin(7 * i) * j / NZ),
+                                    cy + math.sin(2 * math.pi * i / NA) * R[j][i], z)) for i in range(NA)])
+    for j in range(NZ):
+        for i in range(NA):
+            i2 = (i + 1) % NA
+            f = bm.faces.new((rings[j][i], rings[j][i2], rings[j + 1][i2], rings[j + 1][i]))
+            for lp, (u, w) in zip(f.loops, ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))):
+                lp[uvl].uv = (u / NA, 1 - w / NZ)
+    me = bpy.data.meshes.new("robe"); bm.to_mesh(me); bm.free()
+    o = bpy.data.objects.new("robe", me); bpy.context.collection.objects.link(o)
+    bpy.context.view_layer.objects.active = o
+    m = o.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.01
+    bpy.ops.object.modifier_apply(modifier="solid"); bpy.ops.object.shade_smooth()
+    o.data.materials.append(paint("robe", (0.07, 0.07, 0.08), grime=0.45, blood=4, seed=26))
+    sp = bz("Spine").z; sp1 = bz("Spine1").z
+    g = {n: o.vertex_groups.new(name=n) for n in ("Spine1", "Spine", "Hips")}
+    for v in o.data.vertices:
+        z = v.co.z
+        if z >= sp1: g["Spine1"].add([v.index], 1.0, "REPLACE")
+        elif z >= sp:
+            t = (z - sp) / (sp1 - sp); g["Spine1"].add([v.index], t, "REPLACE"); g["Spine"].add([v.index], 1 - t, "REPLACE")
+        else:
+            t = max(0.0, min(1.0, (z - hips.z) / (sp - hips.z))); g["Spine"].add([v.index], t, "REPLACE"); g["Hips"].add([v.index], 1 - t, "REPLACE")
+    props.append((o, None))
+    # cowl: a smooth hood shaped round the head -- open face, deep at the back, falling to
+    # the shoulders (copying the scalp surface came out as a ragged frame)
+    c, rx, ry = skull_slice(eye_c.z)
+    hood = blob("cowl", (c.x, c.y + 0.03, (crown + mouth_z) / 2 - 0.01), 1.0, o.data.materials[0], "Head",
+                scale=(rx + 0.05, ry + 0.07, (crown - mouth_z) / 2 + 0.09), sub=4)
+    bmh = bmesh.new(); bmh.from_mesh(hood.data)
+    bmesh.ops.delete(bmh, geom=[v for v in bmh.verts if (v.co.y < -0.25 and v.co.z < 0.55) or v.co.z < -0.80], context="VERTS")
+    bmh.to_mesh(hood.data); bmh.free()
+    rnd = random.Random(5)
+    for v in hood.data.vertices:          # soft cloth folds + the drape pooling at the back of the neck
+        v.co *= 1.0 + 0.03 * math.sin(9 * math.atan2(v.co.y, v.co.x)) * max(0.0, -v.co.z)
+        if v.co.z < -0.3 and v.co.y > 0: v.co.y += 0.12 * (-v.co.z - 0.3)
+    mm = hood.modifiers.new("solid", "SOLIDIFY"); mm.thickness = 0.012
+    bpy.context.view_layer.objects.active = hood; bpy.ops.object.modifier_apply(modifier="solid")
+    bpy.ops.object.shade_smooth()
+
+
+def lantern():
+    f, w = hand_frame("Left")
+    M_iron = paint("iron", (0.10, 0.10, 0.10), grime=0.4, seed=27)
+    top = f + Vector((0, 0, -0.03)); body_c = top + Vector((0, 0, -0.17))
+    cyl("lantern_bail", f + Vector((0, 0, 0.01)), top, 0.004, M_iron, "LeftHand", verts=6)
+    cyl("lantern_cap", top, top + Vector((0, 0, -0.04)), 0.045, M_iron, "LeftHand", verts=16, r2=0.06)
+    cyl("lantern_glass", top + Vector((0, 0, -0.04)), body_c + Vector((0, 0, -0.05)), 0.05, M_lens, "LeftHand", verts=16)
+    cyl("lantern_base", body_c + Vector((0, 0, -0.05)), body_c + Vector((0, 0, -0.08)), 0.06, M_iron, "LeftHand", verts=16)
+    for k in range(4):
+        a = k * math.pi / 2
+        o2 = Vector((math.cos(a) * 0.052, math.sin(a) * 0.052, 0))
+        cyl(f"lantern_bar_{k}", top + Vector((0, 0, -0.04)) + o2, body_c + Vector((0, 0, -0.05)) + o2, 0.004, M_iron, "LeftHand", verts=6)
+
+
 PROPS = {
+    "rifleman": lambda: (steel_helmet(), respirator(), rifle()),
+    "gunner": lambda: (steel_helmet(), bandolier(), rifle(1.15, heavy=True)),
+    "mutant": lambda: (growths(),),
+    "priest": lambda: (robe(), lantern()),
     "cook": lambda: (toque(), respirator(), cleaver("Right", "RightHand"), meat_hook("Left", "LeftHand")),
     "linecook": lambda: (kitchen_cap(), respirator(), knife("Right", "RightHand")),
     "butcher": lambda: (apron(None, None, 0.25, paint("rubber_apron", (0.22, 0.10, 0.08), grime=0.35, blood=10, drops=14, seed=9), bib=True),

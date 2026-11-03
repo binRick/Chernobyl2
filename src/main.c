@@ -923,17 +923,27 @@ static void DrawScorch(void){
 // budget points. The NAV/collision radii (NAV_WALLR/ENEMY_MOVE_R) stay IDENTICAL
 // for every type -- that tuning is fragile and afterslime-calibrated -- only the
 // drawn model and the hitscan hitbox scale per type.
-typedef enum { EN_COOK=0, EN_LINECOOK=1, EN_BUTCHER=2, EN_LIQUIDATOR=3, EN_HEADCHEF=4, EN_NTYPES } EnemyKind;
+typedef enum { EN_COOK=0, EN_LINECOOK=1, EN_BUTCHER=2, EN_LIQUIDATOR=3, EN_HEADCHEF=4,
+               EN_RIFLEMAN=5, EN_GUNNER=6, EN_MUTANT=7, EN_PRIEST=8, EN_NTYPES } EnemyKind;
+// attack kinds: melee swing on the clip's strike frame / hitscan shots / slow dodgeable
+// radiation bolt / raise the dead (priest). range+rate+burst only matter for ranged kinds.
+enum { AK_MELEE=0, AK_HITSCAN=1, AK_BOLT=2, AK_RAISE=3 };
 // Each type draws its own model, assets/<name>.glb (tools/chef/build_all.sh). Enemies are
 // lit per pixel by the arena lamps (EnemyLightUpload), so tints stay near white.
-static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; const char *name; } kEnemy[EN_NTYPES]={
-    {  2,  80.0f, 4.6f, 16.0f, 1.00f, {238,236,232,255}, "cook"       },   // canteen cook: the wave-1 staple
-    {  3,  50.0f, 6.4f, 10.0f, 1.00f, {238,236,232,255}, "linecook"   },   // wiry, knife, outruns a backpedal -- kiting dies
-    {  6, 260.0f, 2.6f, 30.0f, 1.05f, {238,236,232,255}, "butcher"    },   // slow wall of meat, hits like a truck
-    {  4, 140.0f, 3.8f, 22.0f, 1.00f, {238,236,232,255}, "liquidator" },   // gas mask + shovel: tough mid-liner
-    { 14, 800.0f, 3.2f, 40.0f, 1.35f, {238,236,232,255}, "headchef"   },   // the giant: rare capstone, twin cleavers
+static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; const char *name;
+                     int kind; float range, rate, shotDmg; int burst; } kEnemy[EN_NTYPES]={
+    //  cost   hp    spd  melee  scale  tint               name          kind        range rate  dmg  burst
+    {  2,  80.0f, 4.6f, 16.0f, 1.00f, {238,236,232,255}, "cook",       AK_MELEE,    0, 0,    0, 0 },   // canteen cook: the wave-1 staple
+    {  3,  50.0f, 6.4f, 10.0f, 1.00f, {238,236,232,255}, "linecook",   AK_MELEE,    0, 0,    0, 0 },   // wiry, knife, outruns a backpedal
+    {  6, 260.0f, 2.6f, 30.0f, 1.05f, {238,236,232,255}, "butcher",    AK_MELEE,    0, 0,    0, 0 },   // slow wall of meat, hits like a truck
+    {  4, 140.0f, 3.8f, 22.0f, 1.00f, {238,236,232,255}, "liquidator", AK_MELEE,    0, 0,    0, 0 },   // gas mask + shovel: tough mid-liner
+    { 14, 800.0f, 3.2f, 40.0f, 1.35f, {238,236,232,255}, "headchef",   AK_MELEE,    0, 0,    0, 0 },   // the giant: between-waves BOSS
+    {  4, 110.0f, 4.2f, 12.0f, 1.00f, {238,236,232,255}, "rifleman",   AK_HITSCAN, 26, 1.6f, 12, 1 },   // militia rifleman: aimed single shots
+    {  6, 140.0f, 3.6f, 14.0f, 1.00f, {238,236,232,255}, "gunner",     AK_HITSCAN, 22, 2.8f,  6, 5 },   // machine-gunner: 5-round bursts
+    {  4, 100.0f, 4.6f, 14.0f, 1.00f, {238,236,232,255}, "mutant",     AK_BOLT,    24, 2.2f, 16, 1 },   // glowing mutant: slow radiation bolts
+    {  8, 220.0f, 3.0f, 10.0f, 1.00f, {238,236,232,255}, "priest",     AK_RAISE,   15, 7.0f,  0, 0 },   // irradiated priest: raises the dead
 };
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
 typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
@@ -1152,6 +1162,7 @@ static int             g_cheatUsed = 0;         // god mode was enabled this run
 static int             g_meleeDrain = 0;        // --melee-drain: legacy untimed contact damage, kept for A/B
 static int             g_reloadAt = 0;          // --reload-at N: force a reload at update frame N (dev: inspect reload anims)
 static int             g_shotEvery = 0;         // --shot-every K: numbered screenshot every K frames (dev)
+static int             g_devCorpses = 0;        // --corpses N: lay out N cook corpses at run start (dev: test the priest)
 static int             g_devBoss = 0;           // --boss: jump straight to wave 1's boss interlude (dev)
 static int             g_mute = 0;              // --mute (or CHERNOBYL_MUTE=1): master volume 0 -- headless tests stay silent
 static int             g_autoFire = 0;          // --autofire: hold the trigger every frame (dev: screenshot muzzle FX)
@@ -1184,6 +1195,8 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
     g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun; g_enemies[i].roarT=0; g_enemies[i].drawY=pos.y;
     g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f; g_enemies[i].atkCd=0.0f; g_enemies[i].burnN=0;
+    g_enemies[i].fireT=kEnemy[type].rate*0.5f; g_enemies[i].losT=0; g_enemies[i].los=0; g_enemies[i].burstLeft=0;
+    g_enemies[i].raiseC=-1; g_enemies[i].chanT=0;
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
@@ -1265,10 +1278,13 @@ static void StartWave(int w){
 // waves rise. Falls back to a cook when the budget can't afford the pick.
 static int g_forceEnemy = -1;   // --enemy NAME: every spawn is this type (demo / testing a single enemy); -2 = "all"
 static int WavePickType(void){
-    if (g_forceEnemy==-2) return (g_waveBudget>0) ? GetRandomValue(0,EN_NTYPES-1) : -1;   // --enemy all: the whole roster, evenly
+    if (g_forceEnemy==-2){ if (g_waveBudget<=0) return -1; int t; do t=GetRandomValue(0,EN_NTYPES-1); while (t==EN_HEADCHEF && GetRandomValue(0,2)); return t; }   // --enemy all (boss rarer)
     if (g_forceEnemy>=0) return (kEnemy[g_forceEnemy].cost<=g_waveBudget) ? g_forceEnemy : -1;
     int r=GetRandomValue(0,99), t=EN_COOK;
-    if      (g_wave>=3 && r<14+g_wave*2)    t=EN_BUTCHER;
+    if      (g_wave>=4 && r<6+g_wave)       t=EN_PRIEST;
+    else if (g_wave>=3 && r<14+g_wave*2)    t=EN_BUTCHER;
+    else if (g_wave>=3 && r<24+g_wave*2)    t=EN_GUNNER;
+    else if (g_wave>=2 && r<34+g_wave*2)    t=(GetRandomValue(0,1)?EN_RIFLEMAN:EN_MUTANT);
     else if (g_wave>=2 && r<30+g_wave*2)    t=EN_LIQUIDATOR;
     else if (g_wave>=2 && r<55+g_wave*2)    t=EN_LINECOOK;
     if (kEnemy[t].cost>g_waveBudget) t=EN_COOK;
@@ -1292,7 +1308,8 @@ static void PickupSpawn(Vector3 pos, int type){
     for (int i=0;i<MAX_PICKUPS;i++){ if (!g_pk[i].active){ slot=i; break; } if (g_pk[i].life<oldest){ oldest=g_pk[i].life; slot=i; } }
     g_pk[slot]=(Pickup){ (Vector3){pos.x, pos.y, pos.z}, type, 1, 25.0f, (float)GetRandomValue(0,100)/10.0f };
 }
-static void PickupsReset(void){ memset(g_pk,0,sizeof g_pk); g_quadT=g_speedT=g_pkMsgT=0.0f; }
+static void BoltsReset(void);
+static void PickupsReset(void){ memset(g_pk,0,sizeof g_pk); g_quadT=g_speedT=g_pkMsgT=0.0f; BoltsReset(); }
 // a random reachable floor spot (nav grid, BFS-reached from the player) -- for wave seeding
 static int PickupRandomSpot(Vector3 *out){
     if (!g_navOK || g_navNX<=0) return 0;
@@ -1368,6 +1385,7 @@ static void DrawPickups(void){
         rlPopMatrix();
     }
 }
+void PickupOnKillAt(int ei);
 void PickupOnKillAt(int ei){ PickupOnKill(g_enemies[ei].pos, g_enemies[ei].boss); }
 void SeedWavePickups(void){
     Vector3 p;
@@ -1386,6 +1404,12 @@ static void UpdateWaves(float dt){
         g_waveBreather-=dt;
         if (g_waveBreather<=0.0f) StartWave(g_wave+1);
         return;
+    }
+    if (g_wave==0 && g_devCorpses>0){                 // --corpses: scatter test bodies for the priest
+        for (int n=0;n<g_devCorpses && n<MAX_CORPSES;n++){ Vector3 p; if (!PickupRandomSpot(&p)) break;
+            Corpse *cp=&g_corpses[g_corpseNext]; *cp=(Corpse){0}; cp->pos=p; cp->yaw=(float)GetRandomValue(0,359); cp->active=1; cp->type=EN_COOK;
+            g_corpseNext=(g_corpseNext+1)%MAX_CORPSES; }
+        g_devCorpses=0;
     }
     if (g_wave==0 && g_devBoss){ StartWave(1); g_waveBudget=0; return; }   // --boss: empty wave -> boss next frame
     if (g_wave==0){ g_waveBreather=3.0f; return; }     // run just started: a 3 s grace, then wave 1
@@ -1742,6 +1766,146 @@ static void EnemyNudge(int i, float mx, float mz){
 }
 
 // Walk alive enemies toward the player; advance death timers; melee on contact.
+
+// ---- Ranged + support enemies ------------------------------------------------
+// Bolts: slow glowing radiation shots aimed where the player WAS (dodge by moving);
+// hitscan: instant, but accuracy falls with distance and while the player moves; raise:
+// the priest channels a beam into a corpse and it stands back up.
+typedef struct { Vector3 pos, vel; float life, dmg; int active; } Bolt;
+#define MAX_BOLTS 32
+static Bolt  g_bolts[MAX_BOLTS];
+typedef struct { Vector3 a, b; float t; } Beam;     // priest raise beam (t: seconds left)
+#define MAX_BEAMS 8
+static Beam  g_beams[MAX_BEAMS];
+static Sound g_eShotSnd, g_eBoltSnd, g_eRaiseSnd; static int g_hasEShot=0, g_hasEBolt=0, g_hasERaise=0;
+static float g_playerMoveAmt=0.0f;                   // 0..1 how fast the player is moving (spoils hitscan aim)
+static void EnemySfx(Sound snd, int has, float d){
+    if (!g_audio || !has) return;
+    float v=1.0f-d/45.0f; if (v<0.12f) v=0.12f;
+    SetSoundVolume(snd, v); PlaySound(snd);
+}
+static Vector3 EnemyMuzzle(const Enemy *e){            // gun/hand height, a little toward the player
+    Vector3 to=Vector3Subtract(g_pos,e->pos); to.y=0; float l=Vector3Length(to); if (l>1e-3f) to=Vector3Scale(to,1.0f/l);
+    float sc=kEnemy[e->type].scale;
+    return (Vector3){ e->pos.x+to.x*0.55f, e->drawY+1.42f*sc, e->pos.z+to.z*0.55f };
+}
+// Line of sight is judged from the enemy's OWN EYES -- never from the offset muzzle. The
+// muzzle sits 0.55 m toward the player, so an enemy hidden just behind a wall's edge could
+// poke it round the corner and shoot (unseen, the tracer leaving the wall).
+static Vector3 EnemyEye(const Enemy *e){ return (Vector3){ e->pos.x, e->drawY+1.45f*kEnemy[e->type].scale, e->pos.z }; }
+static int EnemyClearShot(const Enemy *e){              // fresh, uncached: eye -> player's eye
+    if (!(g_hasMap && g_mapCol.ready)) return 1;
+    Vector3 a=EnemyEye(e), d=Vector3Subtract(g_cam.position,a); float L=Vector3Length(d);
+    if (L<0.3f) return 1;
+    float h=MapRayNearest(a,Vector3Scale(d,1.0f/L),L);
+    return (h<=0.0f || h>=L-0.3f);
+}
+static int EnemySeesPlayer(Enemy *e, float dt){        // cached LOS for the ENGAGE decision, re-tested ~5x a second
+    e->losT-=dt; if (e->losT>0) return e->los;
+    e->losT=0.2f+GetRandomValue(0,10)/100.0f;
+    e->los=EnemyClearShot(e);
+    return e->los;
+}
+// Where tracers/bolts leave from: the gun -- unless the gun is inside a wall, then the body.
+static Vector3 EnemyShotOrigin(const Enemy *e){
+    Vector3 eye=EnemyEye(e), m=EnemyMuzzle(e);
+    if (g_hasMap && g_mapCol.ready){ Vector3 d=Vector3Subtract(m,eye); float L=Vector3Length(d);
+        if (L>1e-3f){ float h=MapRayNearest(eye,Vector3Scale(d,1.0f/L),L); if (h>0.0f && h<L) return eye; } }
+    return m;
+}
+static void EnemyHitscan(Enemy *e, float d){
+    if (!EnemyClearShot(e)){ e->los=0; e->losT=0.25f; e->burstLeft=0; return; }   // lost sight since the cached check
+    Vector3 m=EnemyShotOrigin(e);
+    float acc=0.86f-d*0.022f-0.30f*g_playerMoveAmt; if (acc<0.12f) acc=0.12f;
+    if (e->type==EN_GUNNER) acc*=0.75f;                    // the hose sprays
+    int hit = GetRandomValue(0,999) < (int)(acc*1000);
+    Vector3 tgt = Vector3Add(g_cam.position,(Vector3){0,-0.35f,0});
+    if (!hit){ tgt.x+=GetRandomValue(-150,150)/100.0f; tgt.y+=GetRandomValue(-60,90)/100.0f; tgt.z+=GetRandomValue(-150,150)/100.0f; }
+    Vector3 dir=Vector3Normalize(Vector3Subtract(tgt,m)); float L=Vector3Distance(tgt,m)+(hit?0.0f:20.0f);
+    if (g_hasMap && g_mapCol.ready){ float w=MapRayNearest(m,dir,L); if (w>0.0f && w<L){ L=w; if (hit && w<Vector3Distance(tgt,m)-0.3f) hit=0; } }
+    Vector3 end=Vector3Add(m,Vector3Scale(dir,L));
+    for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){m,end,0.06f}; break; }
+    if (hit && !g_godMode) g_playerHp-=kEnemy[e->type].shotDmg;
+    EnemySfx(g_eShotSnd,g_hasEShot,d);
+    DebugLog("eshot","\"type\":\"%s\",\"d\":%.1f,\"hit\":%d", kEnemy[e->type].name, d, hit);
+}
+static void EnemyBolt(Enemy *e, float d){
+    if (!EnemyClearShot(e)){ e->los=0; e->losT=0.25f; return; }
+    Vector3 m=EnemyShotOrigin(e), tgt=Vector3Add(g_cam.position,(Vector3){0,-0.3f,0});
+    Vector3 v=Vector3Scale(Vector3Normalize(Vector3Subtract(tgt,m)),13.0f);
+    for (int i=0;i<MAX_BOLTS;i++) if (!g_bolts[i].active){ g_bolts[i]=(Bolt){m,v,3.0f,kEnemy[e->type].shotDmg,1}; break; }
+    DebugLog("ebolt","\"d\":%.1f",d);
+    EnemySfx(g_eBoltSnd,g_hasEBolt,d);
+}
+static void BoltsReset(void){ memset(g_bolts,0,sizeof g_bolts); memset(g_beams,0,sizeof g_beams); }
+static void BoltsUpdate(float dt){
+    for (int i=0;i<MAX_BOLTS;i++){ Bolt *b=&g_bolts[i]; if (!b->active) continue;
+        b->life-=dt; if (b->life<=0){ b->active=0; continue; }
+        Vector3 step=Vector3Scale(b->vel,dt); float sl=Vector3Length(step);
+        if (g_hasMap && g_mapCol.ready && sl>1e-5f){
+            float w=MapRayNearest(b->pos,Vector3Scale(step,1.0f/sl),sl);
+            if (w>0.0f && w<=sl){ Vector3 hp=Vector3Add(b->pos,Vector3Scale(step,w/sl));
+                for (int q=0;q<10;q++) SpawnLiquid(hp,Vector3Negate(Vector3Scale(step,1.0f/sl)));
+                b->active=0; continue; }
+        }
+        b->pos=Vector3Add(b->pos,step);
+        Vector3 chest=Vector3Add(g_cam.position,(Vector3){0,-0.45f,0});
+        if (Vector3Distance(b->pos,chest)<0.6f){
+            if (!g_godMode) g_playerHp-=b->dmg;
+            DebugLog("bolthit","\"dmg\":%.0f",b->dmg);
+            b->active=0;
+        }
+    }
+    for (int i=0;i<MAX_BEAMS;i++) if (g_beams[i].t>0) g_beams[i].t-=dt;
+}
+static void DrawBolts(void){
+    float tm=(float)GetTime();
+    for (int i=0;i<MAX_BOLTS;i++){ Bolt *b=&g_bolts[i]; if (!b->active) continue;
+        DrawSphere(b->pos,0.16f,(Color){170,255,90,255});
+        DrawSphereWires(b->pos,0.28f+0.04f*sinf(tm*30.0f+i),6,8,(Color){90,255,60,140});
+        Vector3 tail=Vector3Subtract(b->pos,Vector3Scale(Vector3Normalize(b->vel),0.7f));
+        DrawLine3D(b->pos,tail,(Color){120,255,80,200});
+    }
+    for (int i=0;i<MAX_BEAMS;i++){ Beam *m=&g_beams[i]; if (m->t<=0) continue;
+        for (int k=0;k<5;k++){                              // a crackling bundle of lines, re-jittered every frame
+            Vector3 j1={GetRandomValue(-8,8)/100.0f,GetRandomValue(-8,8)/100.0f,GetRandomValue(-8,8)/100.0f};
+            Vector3 mid=Vector3Add(Vector3Lerp(m->a,m->b,0.5f),(Vector3){GetRandomValue(-25,25)/100.0f,GetRandomValue(-10,30)/100.0f,GetRandomValue(-25,25)/100.0f});
+            DrawLine3D(Vector3Add(m->a,j1),mid,(Color){140,255,110,230}); DrawLine3D(mid,Vector3Add(m->b,j1),(Color){140,255,110,230});
+        }
+        DrawSphere(m->b,0.25f+0.1f*sinf(tm*20),(Color){150,255,120,120});
+    }
+}
+// Priest: find the nearest corpse within range, channel 1.6 s, then raise it at 60% HP.
+// Returns 1 while busy raising (the caller then holds the priest still in its cast clip).
+static int PriestRaise(int idx, float dt){
+    Enemy *e=&g_enemies[idx];
+    if (e->raiseC>=0){
+        Corpse *c=&g_corpses[e->raiseC];
+        if (!c->active){ e->raiseC=-1; e->chanT=0; return 0; }
+        e->chanT-=dt;
+        for (int i=0;i<MAX_BEAMS;i++) if (g_beams[i].t<=0 || i==MAX_BEAMS-1){ g_beams[i]=(Beam){EnemyMuzzle(e),(Vector3){c->pos.x,c->pos.y+0.25f,c->pos.z},0.05f}; break; }
+        if (e->chanT<=0){
+            int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
+            if (slot>=0){
+                EnemyArm(slot,c->pos,c->type);
+                g_enemies[slot].hp=g_enemies[slot].maxHp*0.6f;
+                c->active=0;
+                EnemySfx(g_eRaiseSnd,g_hasERaise,Vector3Distance(e->pos,g_pos));
+                DebugLog("raise","\"type\":\"%s\"",kEnemy[g_enemies[slot].type].name);
+            }
+            e->raiseC=-1; e->fireT=kEnemy[e->type].rate;
+            return 0;
+        }
+        return 1;
+    }
+    if (e->fireT>0) return 0;
+    int best=-1; float bd=kEnemy[e->type].range;
+    for (int c=0;c<MAX_CORPSES;c++){ if (!g_corpses[c].active || g_corpses[c].type==EN_HEADCHEF || g_corpses[c].type==EN_PRIEST) continue;
+        float d=Vector3Distance(g_corpses[c].pos,e->pos); if (d<bd){ bd=d; best=c; } }
+    if (best<0) return 0;
+    e->raiseC=best; e->chanT=1.6f;
+    return 1;
+}
 static void UpdateEnemies(float dt){
     if (!g_hasEnemy) return;
     int prevCell = g_navPlayerCell;
@@ -1771,15 +1935,30 @@ static void UpdateEnemies(float dt){
                     SpawnEnemyT(i,ty,0); g_enemies[i].hp=keepHp; continue;
                 }
             } else e->embedT = 0.0f;
-            // clip priority: flinch > attack (in melee range) > idle-when-stuck > run (chasing)
-            int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : (stuck ? g_eIdle : g_eRun));
+            // ENGAGE: melee kinds in swing range; ranged kinds in range WITH line of sight
+            // (they stop and shoot); the priest engages while raising a corpse.
+            int kind=kEnemy[e->type].kind;
+            if (e->fireT>0) e->fireT-=dt;
+            int engage = (d<=ENEMY_ATTACK_RANGE);
+            if ((kind==AK_HITSCAN || kind==AK_BOLT) && e->hitT<=0 && d<=kEnemy[e->type].range && d>ENEMY_ATTACK_RANGE)
+                engage = EnemySeesPlayer(e,dt);
+            if (kind==AK_RAISE && e->hitT<=0 && PriestRaise(i,dt)) engage=1;
+            if (engage && e->hitT<=0 && (kind==AK_HITSCAN || kind==AK_BOLT) && d>ENEMY_ATTACK_RANGE){
+                if (e->burstLeft>0){ if (e->fireT<=0){ EnemyHitscan(e,d); e->burstLeft--; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; } }
+                else if (e->fireT<=0){
+                    if (kind==AK_BOLT){ EnemyBolt(e,d); e->fireT=kEnemy[e->type].rate; }
+                    else { EnemyHitscan(e,d); e->burstLeft=kEnemy[e->type].burst-1; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; }
+                }
+            }
+            // clip priority: flinch > attack (engaged) > idle-when-stuck > run (chasing)
+            int want = (e->hitT>0) ? g_eHit : (engage ? g_eAttack : (stuck ? g_eIdle : g_eRun));
             if (want!=e->clip){
                 if (want==g_eAttack && e->roarT<=0 && g_audio && g_hasAttackSnd){   // lunging into an attack -> roar
                     PlaySound(g_attackSnd); e->roarT=2.5f;                          // cooldown so it doesn't spam at the range edge
                 }
                 e->clip=want; e->animT=0;
             }
-            if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE && !stuck){ // chase: follow the nav flow field, else beeline
+            if (e->hitT<=0 && !engage && !stuck){            // chase: follow the nav flow field, else beeline
                 Vector3 sd; float mx=dx/d, mz=dz/d;
                 if (g_hasMap && MapNavSteer(e->pos,&sd)){ mx=sd.x; mz=sd.z; }
                 float step=e->spd*dt; Vector3 b4=e->pos;   // per-instance speed (type base + wave scaling)
@@ -1801,7 +1980,7 @@ static void UpdateEnemies(float dt){
                 float mv=(e->pos.x-b4.x)*(e->pos.x-b4.x)+(e->pos.z-b4.z)*(e->pos.z-b4.z);
                 if (mv < 0.0004f) e->stuckT += dt; else e->stuckT = 0.0f;   // 0.02 units/frame threshold
             }
-            if (g_hasMap && stuck && e->hitT<=0 && d>ENEMY_ATTACK_RANGE){
+            if (g_hasMap && stuck && e->hitT<=0 && !engage){
                 // stuck against a wall and idling -> ease back so the animated HANDS stop
                 // poking through it. Drift toward whichever directions clear a hands-radius
                 // sphere; settles once the body+arms no longer overlap the wall.
@@ -1840,7 +2019,7 @@ static void UpdateEnemies(float dt){
             } else if (e->atkCd>0) e->atkCd-=dt;
             if (RigOf(e->type)->animN>0){                      // advance current clip (looping)
                 int nf=ANIM_FRAMES(*RigClip(e->type,e->clip));
-                float spd=(e->clip==g_eAttack)?90.0f:30.0f;    // attack plays much faster
+                float spd=(e->clip==g_eAttack && kEnemy[e->type].kind==AK_MELEE)?90.0f:30.0f;    // melee swings play fast; aims/casts at pace
                 float prevT=e->animT;
                 e->animT+=dt*spd;
                 // Timed melee (default): the swing damages ONCE, when the attack clip
@@ -1849,7 +2028,7 @@ static void UpdateEnemies(float dt){
                 // of the old unreadable touch-drain.
                 if (!g_meleeDrain && e->clip==g_eAttack && nf>0 && e->atkCd<=0 && e->hitT<=0){
                     float strike=nf*ATK_STRIKE_FRAC;
-                    if (prevT<strike && e->animT>=strike && d<=ENEMY_ATTACK_RANGE*1.15f && !g_godMode){
+                    if (prevT<strike && e->animT>=strike && d<=ENEMY_ATTACK_RANGE*1.15f && !g_godMode && (kEnemy[e->type].kind==AK_MELEE || d<=ENEMY_ATTACK_RANGE)){
                         g_playerHp-=kEnemy[e->type].meleeDmg; e->atkCd=ATK_COOLDOWN;   // per-type swing damage
                     }
                 }
@@ -2097,6 +2276,7 @@ static void Update(void) {
     if (IsKeyDown(KEY_S)){wish=Vector3Subtract(wish,flat);moving=1;}
     if (IsKeyDown(KEY_D)){wish=Vector3Add(wish,right);moving=1;}
     if (IsKeyDown(KEY_A)){wish=Vector3Subtract(wish,right);moving=1;}
+    g_playerMoveAmt += ((moving?1.0f:0.0f)-g_playerMoveAmt)*fminf(1.0f,dt*6.0f);   // spoils enemy hitscan aim
     Vector3 mv={0,0,0};
     if (moving && Vector3Length(wish)>0.001f){
         wish=Vector3Scale(Vector3Normalize(wish),speed*dt);
@@ -2344,7 +2524,7 @@ static void Update(void) {
     }
 
     UpdateEnemies(dt);
-    UpdateWaves(dt); PickupsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
+    UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
     UpdateSmoke(dt);
     UpdateGrenades(dt);
 
@@ -3337,6 +3517,7 @@ static void Frame(void) {
             DrawWorld();
             DrawEnemies();
             DrawPickups();
+            DrawBolts();
             DrawSmoke(g_cam);                     // minigun muzzle smoke/steam (billboards, drawn last)
         EndMode3D();
         if (g_inspect && !g_noEnemies) DrawInspect();
@@ -3607,6 +3788,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--autofire")) g_autoFire=1;
         else if (!strcmp(argv[i],"--mute")) g_mute=1;
         else if (!strcmp(argv[i],"--boss")) g_devBoss=1;                // dev: straight to the boss interlude
+        else if (!strcmp(argv[i],"--corpses") && i+1<argc) g_devCorpses=atoi(argv[++i]);   // dev: pre-placed corpses
         else if (!strcmp(argv[i],"--enemy") && i+1<argc){                   // only spawn this enemy type (cook/linecook/butcher/liquidator/headchef)
             const char *nm=argv[++i];
             for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) g_forceEnemy=t;
@@ -3711,6 +3893,9 @@ int main(int argc, char **argv) {
           if (FileExists(p)){ g_waveSnd=LoadSound(p);  g_hasWaveSnd =(g_waveSnd.frameCount>0); } }
         { const char *p="assets/wave_clear.wav";  if (!FileExists(p)) p="../assets/wave_clear.wav";
           if (FileExists(p)){ g_clearSnd=LoadSound(p); g_hasClearSnd=(g_clearSnd.frameCount>0); SetSoundVolume(g_clearSnd,0.7f); } }
+        { const char *p="assets/ak74_fire_single.mp3"; if (FileExists(p)){ g_eShotSnd=LoadSound(p); g_hasEShot=(g_eShotSnd.frameCount>0); } }
+        { const char *p="assets/flame_fire.mp3";  if (FileExists(p)){ g_eBoltSnd=LoadSound(p); g_hasEBolt=(g_eBoltSnd.frameCount>0); } }
+        { const char *p="assets/wave_start.wav";  if (FileExists(p)){ g_eRaiseSnd=LoadSound(p); g_hasERaise=(g_eRaiseSnd.frameCount>0); } }
         { const char *p="assets/pickup.wav";      if (!FileExists(p)) p="../assets/pickup.wav";
           if (FileExists(p)){ g_pkSnd=LoadSound(p);    g_hasPkSnd   =(g_pkSnd.frameCount>0);  SetSoundVolume(g_pkSnd,0.6f); } }
     }
