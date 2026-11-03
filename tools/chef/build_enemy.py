@@ -124,6 +124,22 @@ SPECS.update({
         clothes=["male_worksuit01", "shoes02"],
         recolor={"worksuit": ((0.10, 0.10, 0.11), 0, 0, 6)},
         props="priest", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK, attack=CAST)),
+    "revenant": dict(   # burned firefighter: charred skin, brass-crested helmet, fire axe -- fast
+        phenotype=dict(gender=1.0, age=0.45, muscle=0.8, weight=0.35, proportions=0.6, height=0.66),
+        targets={"stomach-pregnant-decr": 0.6, "torso-muscle-dorsi-incr": 0.4},
+        skin="young_caucasian_male", eyebrows="eyebrow001",
+        clothes=["male_worksuit01", "shoes03"],
+        recolor={"worksuit": ((0.26, 0.20, 0.15), 3, 2, 40)},
+        skin_tint=((0.24, 0.16, 0.12), 150, (1.0, 0.42, 0.08), (0.03, 0.025, 0.02)),   # char + glowing ember cracks
+        props="revenant", clips=dict(BASE_CLIPS)),
+    "fiend": dict(   # mutated liquidator: bloated, cracked mask, four tentacles burst from the back
+        phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.75, proportions=0.3, height=0.72),
+        targets={"torso-scale-horiz-incr": 0.5, "measure-shoulder-dist-incr": 0.5, "neck-double-incr": 0.6},
+        skin="middleage_caucasian_male", eyebrows="eyebrow003",
+        clothes=["male_worksuit01", "shoes03"],
+        recolor={"worksuit": ((0.74, 0.73, 0.66), 22, 16, 26)},
+        skin_tint=((0.82, 0.66, 0.70), 30, (0.55, 0.06, 0.10), (0.30, 0.18, 0.28)),
+        props="fiend", tentacles=True, clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
 })
 SPEC = SPECS[ENEMY]
 
@@ -244,12 +260,13 @@ for o in meshes:
     if src is not None and max(src.size) > SIZE:
         src.scale(SIZE, SIZE)
     if SPEC.get("skin_tint") and ("male_generic" in o.name or "male1591" in o.name) and src is not None:
-        tint, n_les = SPEC["skin_tint"]
+        tint, n_les = SPEC["skin_tint"][:2]
+        les_c, bruise_c = (SPEC["skin_tint"][2:] or ((0.55, 1.0, 0.30), (0.25, 0.32, 0.12)))
         a = to_np(src)
         for ch in range(3):
             a[..., ch] = np.clip(a[..., ch] * tint[ch], 0, 1)
-        splatter(a, n_les, 0.006, 0.02, (0.55, 1.0, 0.30), seed=31, alpha=0.9)     # weeping lesions
-        splatter(a, n_les // 2, 0.015, 0.04, (0.25, 0.32, 0.12), seed=32, alpha=0.5)  # necrotic bruising
+        splatter(a, n_les // 2, 0.015, 0.04, bruise_c, seed=32, alpha=0.6)   # char / necrotic bruising
+        splatter(a, n_les, 0.006, 0.02, les_c, seed=31, alpha=0.9)          # weeping lesions / ember cracks
         img = from_np(f"{ENEMY}_skin", a)
         o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6))
         continue
@@ -882,6 +899,207 @@ def lantern():
         cyl(f"lantern_bar_{k}", top + Vector((0, 0, -0.04)) + o2, body_c + Vector((0, 0, -0.05)) + o2, 0.004, M_iron, "LeftHand", verts=6)
 
 
+# ---------------------------------------------------------------- revenant + fiend props
+def back_point(x, z):
+    """Where a ray from behind (+Y, the enemy faces -Y) first meets the body or clothes."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    best = None
+    for o in meshes:
+        if "low-poly" in o.name:
+            continue
+        inv = o.matrix_world.inverted()
+        org = inv @ Vector((x, 1.5, z)); d = (inv.to_3x3() @ Vector((0, -1, 0))).normalized()
+        ok, loc, nrm, _ = o.evaluated_get(dg).ray_cast(org, d)
+        if ok:
+            w = o.matrix_world @ loc
+            if best is None or w.y > best.y:
+                best = w
+    return best
+
+
+def fire_helmet():
+    """Soviet fire-brigade helmet: red-lacquered steel dome, brass comb front to back,
+    leather neck curtain."""
+    c, rx, ry = skull_slice(brow_z + 0.01)
+    M_lac = paint("fire_helmet", (0.48, 0.07, 0.04), grime=0.55, seed=41)
+    sx, sy, sz = rx + 0.03, ry + 0.035, crown - brow_z + 0.07
+    h = blob("fire_helmet", (c.x, c.y + 0.008, brow_z - 0.005), 1.0, M_lac, "Head", scale=(sx, sy, sz), sub=4)
+    bm = bmesh.new(); bm.from_mesh(h.data)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.z < -0.10], context="VERTS")
+    bm.to_mesh(h.data); bm.free()
+    for v in h.data.vertices:            # short brim, longer at the back
+        if v.co.z < 0.2:
+            k = 1.0 + (0.2 - v.co.z) * (0.5 if v.co.y > 0 else 0.3)
+            v.co.x *= k; v.co.y *= k
+    m = h.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.008
+    bpy.context.view_layer.objects.active = h; bpy.ops.object.modifier_apply(modifier="solid")
+    o = Vector((c.x, c.y + 0.008, brow_z - 0.005))
+    pts = [o + Vector((0, sy * math.sin(a) * 1.04, sz * math.cos(a) * 1.04 + 0.006))
+           for a in (math.radians(d) for d in range(-75, 80, 10))]
+    # the brass comb: a solid fin riding the dome front to back
+    vs, fs = [], []
+    for i, q in enumerate(pts):
+        nrm = (q - o); nrm.x = 0; nrm.normalize()
+        vs += [tuple(q - nrm * 0.012), tuple(q + nrm * 0.022)]
+        if i:
+            fs.append((2 * i - 2, 2 * i - 1, 2 * i + 1, 2 * i))
+    me = bpy.data.meshes.new("comb"); me.from_pydata(vs, [], fs)
+    cb = bpy.data.objects.new("comb", me); bpy.context.collection.objects.link(cb)
+    bpy.context.view_layer.objects.active = cb
+    m = cb.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.008; m.offset = 0; bpy.ops.object.modifier_apply(modifier="solid")
+    m = cb.modifiers.new("bevel", "BEVEL"); m.width = 0.002; m.segments = 2; bpy.ops.object.modifier_apply(modifier="bevel")
+    me.materials.append(M_brass); props.append((cb, "Head"))
+    cyl("badge", o + Vector((0, -sy * 0.93, sz * 0.38)), o + Vector((0, -sy * 0.99, sz * 0.40)), 0.022, M_brass, "Head", verts=16)
+    # neck curtain: leather arc behind the head, flaring down to the collar
+    M_leather = paint("leather", (0.16, 0.11, 0.07), grime=0.5, seed=42)
+    vs, fs, R, Z = [], [], 14, 5
+    z_top, z_bot = brow_z - 0.02, mouth_z - 0.075
+    for j in range(Z):
+        t = j / (Z - 1); z = z_top + (z_bot - z_top) * t; fl = 1.0 + 0.35 * t
+        for i in range(R):
+            a = math.radians(35 + 110 * i / (R - 1))
+            vs.append((c.x + math.cos(a) * sx * fl, c.y + 0.008 + math.sin(a) * sy * fl, z))
+    for j in range(Z - 1):
+        for i in range(R - 1):
+            fs.append((j * R + i, j * R + i + 1, (j + 1) * R + i + 1, (j + 1) * R + i))
+    me = bpy.data.meshes.new("curtain"); me.from_pydata(vs, [], fs)
+    cur = bpy.data.objects.new("curtain", me); bpy.context.collection.objects.link(cur)
+    bpy.context.view_layer.objects.active = cur
+    m = cur.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.006; bpy.ops.object.modifier_apply(modifier="solid")
+    bpy.ops.object.shade_smooth()
+    me.materials.append(M_leather); props.append((cur, "Head"))
+
+
+def fire_axe():
+    """Pick-head fire axe: wood haft, red head, ground steel edge."""
+    fR, wR = hand_frame("Right")
+    side_v = wR.cross(Vector((0, 0, 1))).normalized()
+    e = wR.cross(side_v).normalized()                 # the chop direction (edge points this way)
+    if e.z < 0:
+        e = -e
+    a, b = fR - wR * 0.14, fR + wR * 0.72
+    cyl("axe_haft", a, b + wR * 0.05, 0.019, M_wood, "RightHand", verts=10, r2=0.016)
+    cyl("axe_knob", a - wR * 0.03, a, 0.024, M_wood, "RightHand", verts=10)
+    M_axe = paint("axe_head", (0.60, 0.07, 0.04), grime=0.4, seed=43)
+    hd = box_basis("axe_head", b + e * 0.09, e, wR, side_v, (0.22, 0.09, 0.026), M_axe, "RightHand")
+    for v in hd.data.vertices:           # wedge to the edge, edge flares along the haft
+        t = v.co.dot(e) / 0.11
+        if t > 0:
+            s_off = v.co.dot(side_v); v.co -= side_v * s_off * min(0.85, t * 0.85)
+            h_off = v.co.dot(wR); v.co += wR * h_off * t * 0.9
+    ed = box_basis("axe_edge", b + e * 0.196, e, wR, side_v, (0.014, 0.17, 0.007), M_steel, "RightHand", bevel=0.001)
+    cyl("axe_pick", b - e * 0.01, b - e * 0.20, 0.024, M_axe, "RightHand", verts=10, r2=0.003)
+
+
+def air_tank():
+    """Breathing-apparatus cylinder strapped high on the back."""
+    sp1 = rig.matrix_world @ rig.data.bones["Spine1"].head_local
+    z0, z1 = sp1.z - 0.18, sp1.z + 0.26
+    p = back_point(sp1.x, (z0 + z1) / 2) or (sp1 + Vector((0, 0.15, 0)))
+    M_tank = paint("air_tank", (0.55, 0.53, 0.48), grime=0.55, seed=44)
+    ax = Vector((p.x, p.y + 0.085, 0))
+    cyl("tank", ax + Vector((0, 0, z0)), ax + Vector((0, 0, z1)), 0.075, M_tank, "Spine1", verts=20)
+    blob("tank_dome", ax + Vector((0, 0, z1)), 0.075, M_tank, "Spine1", scale=(1, 1, 0.55), sub=3)
+    cyl("tank_valve", ax + Vector((0, 0, z1 + 0.035)), ax + Vector((0, 0, z1 + 0.08)), 0.018, M_brass, "Spine1", verts=10)
+    cyl("tank_wheel", ax + Vector((0, 0, z1 + 0.07)), ax + Vector((0, 0, z1 + 0.085)), 0.032, M_dark, "Spine1", verts=12)
+    for z in (z0 + 0.08, z1 - 0.08):      # straps
+        bpy.ops.mesh.primitive_torus_add(major_radius=0.079, minor_radius=0.008, location=ax + Vector((0, 0, z)))
+        st = bpy.context.active_object; st.name = "tank_strap"; st.data.materials.append(M_dark); props.append((st, "Spine1"))
+
+
+TENT_N, TENT_SEG = 4, 6
+TENT_BONES = []                           # [[bone names root->tip] per tentacle]
+
+
+def tentacles():
+    """Four tentacles burst out of the back. Each is a real 6-bone chain added to the rig
+    (31 + 24 bones <= the game's 64-bone skin shader), smooth-weighted along its length,
+    so the clips can make them writhe (tentacle_motion below)."""
+    sp = rig.matrix_world @ rig.data.bones["Spine1"].head_local
+    sp2 = rig.matrix_world @ rig.data.bones["Spine1"].tail_local
+    roots = [(+0.09, sp2.z - 0.05, "Spine1", (0.9, 0.7)), (-0.09, sp2.z - 0.05, "Spine1", (-0.9, 0.7)),
+             (+0.07, sp.z - 0.02, "Spine", (0.7, -0.1)), (-0.07, sp.z - 0.02, "Spine", (-0.7, -0.1))]
+    chains = []
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode="EDIT")
+    eb = rig.data.edit_bones
+    inv = rig.matrix_world.inverted()
+    for ti, (x, z, parent, (sx, up)) in enumerate(roots):
+        p = back_point(sp.x + x, z) or Vector((sp.x + x, sp.y + 0.12, z))
+        p = p - Vector((0, 0.03, 0))      # start just inside the coverall
+        d = Vector((sx * 0.55, 1.0, up)).normalized()
+        L = 0.20 if ti < 2 else 0.16
+        pts = [p]
+        names = []
+        for k in range(TENT_SEG):
+            d = (Matrix.Rotation(math.radians(-14 if ti < 2 else 10), 3, Vector((1, 0, 0))) @ d).normalized()   # arch over / droop
+            pts.append(pts[-1] + d * L * (1.0 - 0.07 * k))
+        for k in range(TENT_SEG):
+            nm = f"Tent{ti}_{k}"
+            b = eb.new(nm); b.head = inv @ pts[k]; b.tail = inv @ pts[k + 1]
+            b.parent = eb[parent] if k == 0 else eb[names[-1]]
+            b.use_connect = k > 0; b.use_deform = True
+            names.append(nm)
+        TENT_BONES.append(names); chains.append(pts)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    M_flesh = paint("tentacle", (0.46, 0.20, 0.24), grime=0.55, blood=6, drops=10, seed=45)
+    RING, PER = 14, 6
+    for ti, pts in enumerate(chains):
+        vs, fs, uvs, wts = [], [], [], []
+        nseg = len(pts) - 1
+        rows = nseg * PER + 1
+        tot = sum((pts[i + 1] - pts[i]).length for i in range(nseg))
+        acc = 0.0
+        prev_n = None
+        for r in range(rows):
+            k = min(nseg - 1, r // PER); f = (r - k * PER) / PER if r < rows - 1 else 1.0
+            c = pts[k].lerp(pts[k + 1], f)
+            t = (k + f) / nseg
+            tan = (pts[k + 1] - pts[k]).normalized()
+            n = prev_n if prev_n is not None else tan.orthogonal().normalized()
+            n = (n - tan * n.dot(tan)).normalized(); prev_n = n; bnorm = tan.cross(n)
+            rad = (0.072 if ti < 2 else 0.058) * (1 - t) ** 0.75 + 0.007
+            rad *= 1.0 + 0.10 * math.sin(t * 38)          # ringed, segmented flesh
+            for i in range(RING):
+                a = 2 * math.pi * i / RING
+                bump = 1.0 + (0.18 if (i in (0, 1) and r % 2 == 0) else 0.0)   # sucker row on the underside
+                vs.append(c + (n * math.cos(a) + bnorm * math.sin(a)) * rad * bump)
+                uvs.append((i / RING, t * 4.0))
+                # blend between the bones whose centres bracket this ring
+                u = (k + f) - 0.5
+                k0 = max(0, min(nseg - 1, math.floor(u))); k1 = min(nseg - 1, k0 + 1); w1 = max(0.0, min(1.0, u - k0))
+                wts.append(((k0, 1 - w1), (k1, w1)))
+        for r in range(rows - 1):
+            for i in range(RING):
+                j = (i + 1) % RING
+                fs.append((r * RING + i, r * RING + j, (r + 1) * RING + j, (r + 1) * RING + i))
+        tip = len(vs); vs.append(pts[-1] + (pts[-1] - pts[-2]).normalized() * 0.02); uvs.append((0.5, 4.0)); wts.append(((nseg - 1, 1.0),))
+        for i in range(RING):
+            fs.append(((rows - 1) * RING + i, (rows - 1) * RING + (i + 1) % RING, tip))
+        me = bpy.data.meshes.new(f"tentacle_{ti}"); me.from_pydata([tuple(v) for v in vs], [], fs)
+        uvl = me.uv_layers.new(name="UVMap")
+        for poly in me.polygons:
+            for li in poly.loop_indices:
+                uvl.data[li].uv = uvs[me.loops[li].vertex_index]
+        ob = bpy.data.objects.new(f"tentacle_{ti}", me); bpy.context.collection.objects.link(ob)
+        groups = [ob.vertex_groups.new(name=nm) for nm in TENT_BONES[ti]]
+        for vi, ws in enumerate(wts):
+            for (k, w) in ws:
+                if w > 0:
+                    groups[k].add([vi], w, "ADD")
+        bpy.context.view_layer.objects.active = ob; bpy.ops.object.shade_smooth()
+        me.materials.append(M_flesh); props.append((ob, None))
+        # torn-open wound where it bursts out of the back
+        blob(f"wound_{ti}", pts[0] + (pts[1] - pts[0]) * 0.2, 0.07 if ti < 2 else 0.06, M_flesh, roots[ti][2],
+             scale=(1.0, 0.55, 0.85), sub=3, noise=0.22, seed=50 + ti)
+
+
+PROPS_EXTRA = {
+    "revenant": lambda: (fire_helmet(), fire_axe(), air_tank()),
+    "fiend": lambda: (gas_mask(), growths(), tentacles()),
+}
+
+
 PROPS = {
     "rifleman": lambda: (steel_helmet(), respirator(), rifle()),
     "gunner": lambda: (steel_helmet(), bandolier(), rifle(1.15, heavy=True)),
@@ -895,6 +1113,7 @@ PROPS = {
     "headchef": lambda: (toque(0.20, 1.25), respirator(), neckerchief(), jacket_buttons(),
                          cleaver("Right", "RightHand", 1.25), cleaver("Left", "LeftHand", 1.25)),
 }
+PROPS.update(PROPS_EXTRA)
 PROPS[SPEC["props"]]()
 
 for o, bone in props:
@@ -1068,6 +1287,43 @@ for i in range(14):
     p["Hips"][1] = p["Hips"][1] + Vector((0, -0.04 * env, 0))
     hit.append(p)
 
+# tentacles (fiend): a travelling wave down each chain on every clip -- loops close exactly
+# (whole cycles per clip), the attack whips them all forward over the shoulders, death
+# lets them thrash then go limp. Rotations are about WORLD axes mapped into each bone's
+# rest frame, so "forward" means forward whatever the chain's rest direction.
+def tentacle_motion(poses, role):
+    if not TENT_BONES:
+        return poses
+    n = len(poses)
+    loop = role in ("idle", "walk", "run")
+    cycles = max(1, round(n / 30.0 * (0.55 if role == "idle" else 0.9)))
+    X, Z = Vector((1, 0, 0)), Vector((0, 0, 1))
+    for i, p in enumerate(poses):
+        t = i / max(1, n - 1)
+        ph = 2 * math.pi * (i / n if loop else t * max(1, n / 30.0) * 0.9) * (cycles if loop else 1)
+        amp = {"idle": 0.13, "walk": 0.17, "run": 0.20, "hit": 0.30, "attack": 0.16, "death": 0.30}[role]
+        if role == "death":
+            amp *= max(0.0, 1.0 - t * 1.3)
+        lash = 0.0
+        if role == "attack":                # coil back, then whip forward, then recover
+            lash = -0.22 * math.sin(math.pi * min(1, t / 0.35)) if t < 0.35 else 0.62 * math.sin(math.pi * min(1.0, (t - 0.35) / 0.5))
+        for ti, chain in enumerate(TENT_BONES):
+            side = 1 if ti % 2 == 0 else -1
+            for k, bn in enumerate(chain):
+                lag = k * 0.75 + ti * 1.7
+                ax = amp * math.sin(ph - lag) + lash * (0.6 + 0.12 * k)
+                az = side * amp * 0.8 * math.cos(ph * (1 if loop else 1.3) - lag * 0.8)
+                if role == "death":
+                    ax -= 0.10 * t                       # sag to the floor
+                R0 = Rt0[bn]
+                q = (Quaternion(R0.inverted() @ X, ax) @ Quaternion(R0.inverted() @ Z, az))
+                p[bn][0] = p[bn][0] @ q
+    return poses
+
+
+idle, walk, run, attack, hit, death = (tentacle_motion(ps, r) for ps, r in
+    ((idle, "idle"), (walk, "walk"), (run, "run"), (attack, "attack"), (hit, "hit"), (death, "death")))
+
 for name, poses, step in (("idle", idle, 1), ("walk", walk, 1), ("run", run, 1),
                           ("attack", attack, 2), ("hit", hit, 1), ("death", death, 2)):
     clips.append(bake(name, poses, step))
@@ -1110,6 +1366,48 @@ if PREVIEW:
         tr.mute = False
 
 # =============================================================== 6. export
+# One mesh object for the whole enemy (body + clothes + every prop): glTF then holds one
+# primitive per MATERIAL instead of one per object -- a cook drops from 35 draws to 12,
+# a gunner (26 cartridges) from 45 to 10. Bake any non-armature modifiers first so the
+# join can't drop them.
+parts = [o for o in bpy.data.objects if o.type == "MESH"]
+for o in parts:
+    bpy.context.view_layer.objects.active = o
+    for md in list(o.modifiers):
+        if md.type != "ARMATURE":
+            try:
+                bpy.ops.object.modifier_apply(modifier=md.name)
+            except RuntimeError as ex:
+                print("enemy: could not apply", md.name, "on", o.name, ex); o.modifiers.remove(md)
+# join merges UV layers BY NAME: the MakeHuman meshes and the props name theirs
+# differently, so unify (one layer each, same name) or most parts lose their UVs
+for o in parts:
+    uv = o.data.uv_layers
+    if not uv:
+        uv.new(name="UVMap")
+    keep = uv.active or uv[0]
+    for l in list(uv):
+        if l != keep:
+            uv.remove(l)
+    keep.name = "UVMap"
+bpy.ops.object.select_all(action="DESELECT")
+for o in parts:
+    o.select_set(True)
+bpy.context.view_layer.objects.active = body
+bpy.ops.object.join()
+arms = [md for md in body.modifiers if md.type == "ARMATURE"]
+for md in arms[1:]:
+    body.modifiers.remove(md)
+if not arms:
+    md = body.modifiers.new("rig", "ARMATURE"); md.object = rig
+else:
+    arms[0].object = rig
+if os.environ.get("ENEMY_DECIMATE"):
+    dm = body.modifiers.new("lod", "DECIMATE"); dm.ratio = float(os.environ["ENEMY_DECIMATE"])
+    bpy.context.view_layer.objects.active = body
+    bpy.ops.object.modifier_move_to_index(modifier="lod", index=0)
+    bpy.ops.object.modifier_apply(modifier="lod")
+    print("enemy: decimated to", len(body.data.polygons), "faces")
 bpy.ops.object.select_all(action="DESELECT")
 for o in bpy.data.objects:
     if o.type in ("MESH", "ARMATURE"):

@@ -484,9 +484,12 @@ static void MapNavBuild(Vector3 seed){
     if (!g_navNL||!g_navFloor||!g_navDist||!g_navQueue) return;
     int scx=(int)((seed.x-g_navMn.x)/g_navCS), scz=(int)((seed.z-g_navMn.z)/g_navCS);
     if (scx<0||scz<0||scx>=g_navNX||scz>=g_navNZ) return;
-    float fd=MapRayNearest((Vector3){seed.x,seed.y+4.0f,seed.z},(Vector3){0,-1,0},80.0f);
+    // probe from just above the seed (the player's EYE): +4 m started above the roof slab
+    // of low arenas (chernobyl.map is 5.1 m tall) -> the whole nav grid flooded the ROOF,
+    // no enemy ever had a flow field there and they all beelined into walls.
+    float fd=MapRayNearest((Vector3){seed.x,seed.y+0.3f,seed.z},(Vector3){0,-1,0},80.0f);
     if (fd<=0) return;
-    int sc=scz*g_navNX+scx; g_navFloor[sc*NAV_MAXL+0]=seed.y+4.0f-fd; g_navNL[sc]=1;
+    int sc=scz*g_navNX+scx; g_navFloor[sc*NAV_MAXL+0]=seed.y+0.3f-fd; g_navNL[sc]=1;
     int head=0,tail=0; g_navQueue[tail++]=sc*NAV_MAXL+0;          // queue holds NODE indices (ci*NAV_MAXL+layer)
     const int DX[4]={1,-1,0,0}, DZ[4]={0,0,1,-1};
     while (head<tail){

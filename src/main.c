@@ -924,7 +924,7 @@ static void DrawScorch(void){
 // for every type -- that tuning is fragile and afterslime-calibrated -- only the
 // drawn model and the hitscan hitbox scale per type.
 typedef enum { EN_COOK=0, EN_LINECOOK=1, EN_BUTCHER=2, EN_LIQUIDATOR=3, EN_HEADCHEF=4,
-               EN_RIFLEMAN=5, EN_GUNNER=6, EN_MUTANT=7, EN_PRIEST=8, EN_NTYPES } EnemyKind;
+               EN_RIFLEMAN=5, EN_GUNNER=6, EN_MUTANT=7, EN_PRIEST=8, EN_REVENANT=9, EN_FIEND=10, EN_NTYPES } EnemyKind;
 // attack kinds: melee swing on the clip's strike frame / hitscan shots / slow dodgeable
 // radiation bolt / raise the dead (priest). range+rate+burst only matter for ranged kinds.
 enum { AK_MELEE=0, AK_HITSCAN=1, AK_BOLT=2, AK_RAISE=3 };
@@ -942,7 +942,11 @@ static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; co
     {  6, 140.0f, 3.6f, 14.0f, 1.00f, {238,236,232,255}, "gunner",     AK_HITSCAN, 22, 2.8f,  6, 5 },   // machine-gunner: 5-round bursts
     {  4, 100.0f, 4.6f, 14.0f, 1.00f, {238,236,232,255}, "mutant",     AK_BOLT,    24, 2.2f, 16, 1 },   // glowing mutant: slow radiation bolts
     {  8, 220.0f, 3.0f, 10.0f, 1.00f, {238,236,232,255}, "priest",     AK_RAISE,   15, 7.0f,  0, 0 },   // irradiated priest: raises the dead
+    {  5, 120.0f, 6.8f, 24.0f, 1.00f, {238,236,232,255}, "revenant",   AK_MELEE,    0, 0,    0, 0 },   // burned firefighter: sprints in with a fire axe
+    {  8, 340.0f, 3.4f, 28.0f, 1.06f, {238,236,232,255}, "fiend",      AK_MELEE,  2.8f, 0,   0, 0 },   // tentacled liquidator: tanky, tentacles out-reach a swing
 };
+// melee reach: the tentacled fiend lashes from further out (range doubles as reach for AK_MELEE)
+#define ENEMY_REACH(t) ((kEnemy[t].kind==AK_MELEE && kEnemy[t].range>0) ? kEnemy[t].range : ENEMY_ATTACK_RANGE)
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
@@ -1273,7 +1277,7 @@ static void StartWave(int w){
     if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
     DebugLog("wave","\"start\":%d,\"budget\":%d,\"cap\":%d", w, g_waveBudget, g_aliveCap);
 }
-// What to spend budget on: cooks are the staple; line cooks + liquidators join from
+// What to spend budget on (revenants from wave 3, fiends from 5): cooks are the staple; line cooks + liquidators join from
 // wave 2, butchers from wave 3 (the head chef is the between-waves BOSS) -- all weighted heavier as
 // waves rise. Falls back to a cook when the budget can't afford the pick.
 static int g_forceEnemy = -1;   // --enemy NAME: every spawn is this type (demo / testing a single enemy); -2 = "all"
@@ -1281,12 +1285,15 @@ static int WavePickType(void){
     if (g_forceEnemy==-2){ if (g_waveBudget<=0) return -1; int t; do t=GetRandomValue(0,EN_NTYPES-1); while (t==EN_HEADCHEF && GetRandomValue(0,2)); return t; }   // --enemy all (boss rarer)
     if (g_forceEnemy>=0) return (kEnemy[g_forceEnemy].cost<=g_waveBudget) ? g_forceEnemy : -1;
     int r=GetRandomValue(0,99), t=EN_COOK;
-    if      (g_wave>=4 && r<6+g_wave)       t=EN_PRIEST;
-    else if (g_wave>=3 && r<14+g_wave*2)    t=EN_BUTCHER;
-    else if (g_wave>=3 && r<24+g_wave*2)    t=EN_GUNNER;
-    else if (g_wave>=2 && r<34+g_wave*2)    t=(GetRandomValue(0,1)?EN_RIFLEMAN:EN_MUTANT);
-    else if (g_wave>=2 && r<30+g_wave*2)    t=EN_LIQUIDATOR;
-    else if (g_wave>=2 && r<55+g_wave*2)    t=EN_LINECOOK;
+    // cumulative bands (each threshold must exceed the last, or a band is unreachable)
+    if      (g_wave>=4 && r<5+g_wave)       t=EN_PRIEST;
+    else if (g_wave>=5 && r<9+g_wave*2)     t=EN_FIEND;
+    else if (g_wave>=3 && r<15+g_wave*2)    t=EN_BUTCHER;
+    else if (g_wave>=3 && r<22+g_wave*3)    t=EN_GUNNER;
+    else if (g_wave>=3 && r<29+g_wave*3)    t=EN_REVENANT;
+    else if (g_wave>=2 && r<38+g_wave*3)    t=(GetRandomValue(0,1)?EN_RIFLEMAN:EN_MUTANT);
+    else if (g_wave>=2 && r<46+g_wave*3)    t=EN_LIQUIDATOR;
+    else if (g_wave>=2 && r<62+g_wave*3)    t=EN_LINECOOK;
     if (kEnemy[t].cost>g_waveBudget) t=EN_COOK;
     if (kEnemy[t].cost>g_waveBudget) return -1;        // can't even afford a cook -> budget is spent
     return t;
@@ -1924,6 +1931,7 @@ static void UpdateEnemies(float dt){
             // when it curves around, so this never false-flags it. flowChanged resets it.
             if (flowChanged) e->stuckT=0.0f;
             int stuck = (g_hasMap && e->stuckT > 1.0f);
+            if (stuck){ e->stuckT += dt; if (e->stuckT > 2.5f) e->stuckT = 0.0f; }   // idle ~1.5 s, then try again
             // self-heal: if the body is wedged INSIDE wall geometry (spawned/pushed into an
             // impossible spot, e.g. clipping through a wall) it can never free itself ->
             // respawn it somewhere valid. Tracked independently of chase state, so it also
@@ -1939,7 +1947,7 @@ static void UpdateEnemies(float dt){
             // (they stop and shoot); the priest engages while raising a corpse.
             int kind=kEnemy[e->type].kind;
             if (e->fireT>0) e->fireT-=dt;
-            int engage = (d<=ENEMY_ATTACK_RANGE);
+            int engage = (d<=ENEMY_REACH(e->type));
             if ((kind==AK_HITSCAN || kind==AK_BOLT) && e->hitT<=0 && d<=kEnemy[e->type].range && d>ENEMY_ATTACK_RANGE)
                 engage = EnemySeesPlayer(e,dt);
             if (kind==AK_RAISE && e->hitT<=0 && PriestRaise(i,dt)) engage=1;
@@ -1978,7 +1986,10 @@ static void UpdateEnemies(float dt){
                 // tried to chase this frame: if it barely moved, it's grinding a wall; if it
                 // moved at all (even sliding/curving), it's making its way -> not stuck.
                 float mv=(e->pos.x-b4.x)*(e->pos.x-b4.x)+(e->pos.z-b4.z)*(e->pos.z-b4.z);
-                if (mv < 0.0004f) e->stuckT += dt; else e->stuckT = 0.0f;   // 0.02 units/frame threshold
+                // threshold = a quarter of this frame's intended step: frame-rate and speed
+                // independent (a fixed 0.02/frame flagged slow enemies sliding along walls at
+                // high fps as "stuck" -- they then idled forever while the player stood still)
+                if (mv < 0.0625f*step*step) e->stuckT += dt; else e->stuckT = 0.0f;
             }
             if (g_hasMap && stuck && e->hitT<=0 && !engage){
                 // stuck against a wall and idling -> ease back so the animated HANDS stop
@@ -2028,7 +2039,7 @@ static void UpdateEnemies(float dt){
                 // of the old unreadable touch-drain.
                 if (!g_meleeDrain && e->clip==g_eAttack && nf>0 && e->atkCd<=0 && e->hitT<=0){
                     float strike=nf*ATK_STRIKE_FRAC;
-                    if (prevT<strike && e->animT>=strike && d<=ENEMY_ATTACK_RANGE*1.15f && !g_godMode && (kEnemy[e->type].kind==AK_MELEE || d<=ENEMY_ATTACK_RANGE)){
+                    if (prevT<strike && e->animT>=strike && d<=ENEMY_REACH(e->type)*1.15f && !g_godMode && (kEnemy[e->type].kind==AK_MELEE || d<=ENEMY_ATTACK_RANGE)){
                         g_playerHp-=kEnemy[e->type].meleeDmg; e->atkCd=ATK_COOLDOWN;   // per-type swing damage
                     }
                 }
@@ -3531,6 +3542,11 @@ static void Frame(void) {
     if (g_debug && (frameNo%30==0))
         DebugLog("frame","\"n\":%d,\"fps\":%d,\"anim\":%d,\"pos\":[%.1f,%.1f,%.1f]",
                  frameNo,GetFPS(),g_curAnim,g_pos.x,g_pos.y,g_pos.z);
+    if (g_debug && frameNo%60==0) for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state){   // where every live enemy is + what it is doing
+        const Enemy *e=&g_enemies[i]; Vector3 sd={0}; int nav=g_hasMap?MapNavSteer(e->pos,&sd):0;
+        DebugLog("epos","\"nav\":%d,\"steer\":[%.2f,%.2f],\"reach\":%d,\"i\":%d,\"type\":\"%s\",\"st\":%d,\"clip\":%d,\"pos\":[%.1f,%.1f,%.1f],\"drawY\":%.2f,\"d\":%.1f,\"stuck\":%.1f,\"embed\":%.1f",
+                 nav,sd.x,sd.z,g_hasMap?MapNavReachable(e->pos):0,i,kEnemy[e->type].name,e->state,e->clip,e->pos.x,e->pos.y,e->pos.z,e->drawY,Vector3Distance(e->pos,g_cam.position),e->stuckT,e->embedT);
+    }
     if (g_shotEvery>0 && frameNo>0 && frameNo%g_shotEvery==0){
         const char *fn=TextFormat("build/shots/f%04d.png", frameNo);
         TakeScreenshot(fn);
