@@ -102,7 +102,7 @@ human = {
                       race={"asian": 0.0, "african": 0.0, "caucasian": 1.0}),
     "targets": [{"target": t, "value": v} for t, v in SPEC["targets"].items()],
     "rig": "cmu_mb",                 # CMU MotionBuilder skeleton == the BVH joint names
-    "proxy": "male1591.proxy",       # 1.6k-vert game body
+    "proxy": "male_generic.proxy",   # 13.6k-vert body (GPU-skinned in game, so detail is cheap)
     "eyes": "low-poly.mhclo", "eyebrows": "", "eyelashes": "",   # alpha cards -> black bars unlit
     "teeth": "", "tongue": "", "hair": "",
     "skin_mhmat": SPEC["skin"] + ".mhmat", "skin_material_type": "GAMEENGINE",
@@ -117,7 +117,7 @@ basemesh = HumanService.deserialize_from_dict(human, settings)
 rig = next(o for o in bpy.data.objects if o.type == "ARMATURE")
 bpy.data.objects.remove(basemesh, do_unlink=True)          # the proxy is the visible body
 meshes = [o for o in bpy.data.objects if o.type == "MESH"]
-body = next(o for o in meshes if "male1591" in o.name)
+body = next(o for o in meshes if "male_generic" in o.name or "male1591" in o.name)
 print("enemy: rig", rig.name, "meshes", [o.name for o in meshes])
 
 # =============================================================== 2. materials -> plain, exportable, recoloured
@@ -203,7 +203,7 @@ def splatter(arr, n, rmin, rmax, color, seed, alpha=0.9):
                 arr[y0:y1, x0:x1, ch] = arr[y0:y1, x0:x1, ch] * (1 - m) + color[ch] * m * (0.75 + 0.25 * arr[y0:y1, x0:x1, ch])
 
 
-SIZE = 1024
+SIZE = 2048
 for o in meshes:
     src = first_image(o.data.materials[0] if o.data.materials else None)
     if src is not None and max(src.size) > SIZE:
@@ -313,7 +313,7 @@ def skull_slice(z, band=0.012):
 print("enemy: eyes", tuple(round(x, 3) for x in eye_c), "nose", tuple(round(x, 3) for x in nose), "crown", round(crown, 3))
 
 # ---------------------------------------------------------------- painted prop textures
-def paint(name, base, grime=0.25, blood=0, drops=0, size=256, seed=1, stripes=None):
+def paint(name, base, grime=0.25, blood=0, drops=0, size=1024, seed=1, stripes=None):
     a = np.zeros((size, size, 4), np.float32); a[..., 3] = 1
     n1 = smooth_noise(size, size, 6, seed); n2 = smooth_noise(size, size, 23, seed + 1)
     shade = 1.0 - grime * (0.6 * n1 + 0.4 * n2)
@@ -340,6 +340,7 @@ M_blood = simple_material("blood", None, (0.34, 0.02, 0.02), 0.3)
 M_lens = simple_material("lens", None, (0.45, 1.0, 0.25), 0.15, emit=(0.45, 1.0, 0.25))
 M_dark = paint("darkcloth", (0.13, 0.13, 0.15), grime=0.3, seed=6)
 M_rust = paint("spade", (0.36, 0.24, 0.15), grime=0.6, seed=7)
+M_brass = simple_material("brass", None, (0.70, 0.52, 0.22), 0.35, metal=0.9)
 M_red = paint("neckerchief", (0.55, 0.07, 0.06), grime=0.25, seed=8, stripes=(16, (0.9, 0.85, 0.8)))
 
 
@@ -381,10 +382,22 @@ def ellipse_band(name, z0, z1, mat, pad=0.010, flare=0.022, verts=32):
 
 
 def toque(height=0.10, puff=1.0):
-    _, c, rx, ry = ellipse_band("hat_band", brow_z, brow_z + height, M_hat)
+    band, c, rx, ry = ellipse_band("hat_band", brow_z, brow_z + height, M_hat, verts=96)
+    for v in band.data.vertices:        # starched pleats: 24 vertical folds round the band
+        a = math.atan2(v.co.y, v.co.x)
+        k = 1.0 + 0.035 * abs(math.sin(12 * a))
+        v.co.x *= k; v.co.y *= k
     top = brow_z + height
-    blob("hat_puff", (c.x + 0.01, c.y + 0.012, top + 0.035 * puff), 1.0, M_hat, "Head",
-         scale=((rx + 0.045) * puff, (ry + 0.04) * puff, 0.075 * puff), sub=3, noise=0.06, seed=4)
+    p = blob("hat_puff", (c.x + 0.01, c.y + 0.012, top + 0.035 * puff), 1.0, M_hat, "Head",
+             scale=((rx + 0.045) * puff, (ry + 0.04) * puff, 0.075 * puff), sub=4, noise=0.0)
+    for v in p.data.vertices:           # soft gathered folds radiating from the crown
+        a = math.atan2(v.co.y, v.co.x)
+        v.co *= 1.0 + 0.05 * math.sin(9 * a + 2.0 * v.co.z) * (1.0 - abs(v.co.z))
+    # piping seam where puff meets band
+    bpy.ops.mesh.primitive_torus_add(major_radius=1, minor_radius=0.006 / max(rx, ry), major_segments=64, minor_segments=8,
+                                     location=(c.x, c.y, top))
+    t = bpy.context.active_object; t.name = "hat_seam"; t.scale = (rx + 0.03, ry + 0.03, max(rx, ry))
+    bpy.ops.object.shade_smooth(); t.data.materials.append(M_hat); props.append((t, "Head"))
 
 
 def kitchen_cap():
@@ -394,10 +407,20 @@ def kitchen_cap():
 
 def respirator():
     mc = Vector((eye_c.x, nose.y + 0.032, mouth_z + 0.012))
-    blob("mask", mc, 1.0, M_rubber, "Head", scale=(0.058, 0.045, 0.052), sub=3)
+    m = blob("mask", mc, 1.0, M_rubber, "Head", scale=(0.058, 0.045, 0.054), sub=4)
+    for v in m.data.vertices:           # contoured: nose bridge pinch at the top, chin cup below
+        if v.co.z > 0.4: v.co.x *= 1.0 - 0.45 * (v.co.z - 0.4)
+        if v.co.y > 0.2: v.co.y = 0.2 + (v.co.y - 0.2) * 0.3        # flat where it seals to the face
+    cyl("exhale_valve", mc + Vector((0, -0.035, -0.012)), mc + Vector((0, -0.05, -0.016)), 0.016, M_dark, "Head", verts=20)
+    blob("valve_cap", mc + Vector((0, -0.051, -0.016)), 0.0145, M_rubber, "Head", scale=(1, 0.45, 1), sub=2)
     for s in (-1, 1):
         a = mc + Vector((s * 0.042, -0.012, -0.008))
-        cyl(f"filter_{s}", a, a + Vector((s * 0.035, -0.03, -0.018)), 0.03, M_filter, "Head", verts=18)
+        d = Vector((s * 0.035, -0.03, -0.018)); dn = d.normalized()
+        cyl(f"filter_{s}", a, a + d, 0.03, M_filter, "Head", verts=24)
+        for r in (0.3, 0.55, 0.8):      # moulded grip rings
+            q = a + d * r
+            cyl(f"filter_ring_{s}_{r}", q - dn * 0.002, q + dn * 0.002, 0.0325, M_filter, "Head", verts=24)
+        cyl(f"filter_grille_{s}", a + d, a + d + dn * 0.003, 0.024, M_dark, "Head", verts=24)
     c, rx, ry = skull_slice(mouth_z + 0.02)
     bpy.ops.mesh.primitive_torus_add(major_radius=1, minor_radius=0.004 / max(rx, ry), major_segments=32, minor_segments=6,
                                      location=(c.x, c.y, mouth_z + 0.02))
@@ -437,10 +460,25 @@ def gas_mask():
 
 def cleaver(side, bone, scale=1.0):
     f, w = hand_frame(side)
-    cyl(f"cleaver_handle_{side}", f - w * 0.06 * scale, f + w * 0.09 * scale, 0.019 * scale, M_wood, bone, verts=10)
+    side_v = w.cross(Vector((0, 0, 1))).normalized()
+    # handle: oval wooden grip with three brass rivets, steel bolster where it meets the blade
+    h = cyl(f"cleaver_handle_{side}", f - w * 0.06 * scale, f + w * 0.08 * scale, 0.019 * scale, M_wood, bone, verts=16)
+    for v in h.data.vertices:           # oval section (flatter across the blade plane)
+        d = v.co.dot(side_v); v.co -= side_v * d * 0.35
+    for k in (-0.035, 0.0, 0.035):
+        r0 = f + w * k * scale
+        blob(f"rivet_{side}_{k}", r0 + side_v * 0.013 * scale, 0.0055 * scale, M_brass, bone, sub=2)
+        blob(f"rivet_b_{side}_{k}", r0 - side_v * 0.013 * scale, 0.0055 * scale, M_brass, bone, sub=2)
+    cyl(f"bolster_{side}", f + w * 0.08 * scale, f + w * 0.095 * scale, 0.022 * scale, M_steel, bone, verts=16)
     c = f + w * 0.22 * scale + Vector((0, 0, -0.06 * scale))
-    side_v = w.cross(Vector((0, 0, 1)))
-    box_basis(f"cleaver_blade_{side}", c, w, side_v, Vector((0, 0, 1)), (0.27 * scale, 0.008, 0.15 * scale), M_steel, bone)
+    blade = box_basis(f"cleaver_blade_{side}", c, w, side_v, Vector((0, 0, 1)), (0.27 * scale, 0.009, 0.15 * scale), M_steel, bone, bevel=0.0015)
+    for v in blade.data.vertices:       # grind: the lower 40% tapers to a sharp edge
+        t = max(0.0, (-v.co.z) / (0.075 * scale) - 0.2)
+        if t > 0:
+            v.co -= side_v * v.co.dot(side_v) * min(0.92, t)
+    # the hanging hole near the spine at the far corner
+    cyl(f"cleaver_hole_{side}", c + w * 0.105 * scale + Vector((0, 0, 0.045 * scale)) - side_v * 0.006,
+        c + w * 0.105 * scale + Vector((0, 0, 0.045 * scale)) + side_v * 0.006, 0.011 * scale, M_dark, bone, verts=16)
     box_basis(f"cleaver_gore_{side}", c + w * 0.05 * scale + Vector((0, 0, -0.03 * scale)), w, side_v, Vector((0, 0, 1)),
               (0.11 * scale, 0.0095, 0.07 * scale), M_blood, bone, bevel=0.001)
 
@@ -484,34 +522,65 @@ def shovel():
         v.co.z += 1.2 * d * d
 
 
-def apron(top_z, bottom_z, half_w, mat, pad=0.018, bib=False):
+def apron(top_z, bottom_z, half_w, mat, pad=0.03, bib=False):
     """Apron draped by ray-casting onto the body: hugs chest and belly, hangs straight below the hips."""
     dg = bpy.context.evaluated_depsgraph_get()
-    trees = [BVHTree.FromObject(o, dg) for o in meshes if "low-poly" not in o.name]
+    # BVHTree.FromObject builds in the object's LOCAL space -- rays go in local, hits come
+    # back out to world (garments sit at an offset; world-space rays silently missed them
+    # and buried the apron inside the shirt)
+    trees = [(BVHTree.FromObject(o, dg), o.matrix_world.copy()) for o in meshes if "low-poly" not in o.name]
     def front_hit(org):                 # nearest surface (body or garment) along +Y
         best = None
-        for t in trees:
-            h = t.ray_cast(org, Vector((0, 1, 0)))
-            if h[0] is not None and (best is None or h[0].y < best.y):
-                best = h[0]
+        for t, mw in trees:
+            inv = mw.inverted()
+            h = t.ray_cast(inv @ org, (inv.to_3x3() @ Vector((0, 1, 0))).normalized())
+            if h[0] is not None:
+                w = mw @ h[0]
+                if best is None or w.y < best.y:
+                    best = w
         return best
     hips_z = (rig.matrix_world @ rig.data.bones["Hips"].head_local).z
-    nx, nz = 16, 28
-    bm = bmesh.new()
-    grid = []
+    # None = derive from this body's skeleton (chest to knee): a 2.2 m butcher gets a bib on
+    # his CHEST, not a fixed-height apron that stops at his belly
+    bz = lambda n: (rig.matrix_world @ rig.data.bones[n].head_local).z
+    if top_z is None: top_z = bz("Spine1") + 0.14
+    if bottom_z is None: bottom_z = bz("LeftLeg") - 0.04
+    nx, nz = 24, 36
+    # pass 1: drape (ray-cast onto body + garments)
+    Y = [[0.0] * (nx + 1) for _ in range(nz + 1)]
+    X = [[0.0] * (nx + 1) for _ in range(nz + 1)]
     for j in range(nz + 1):
         z = top_z + (bottom_z - top_z) * j / nz
-        width = half_w * (0.62 if (bib and z > hips_z + 0.33) else 1.0)
-        row = []
+        t_bib = min(1.0, max(0.0, (z - (hips_z + 0.22)) / 0.16)) if bib else 0.0
+        width = half_w * (1.0 - 0.38 * t_bib * t_bib * (3 - 2 * t_bib))     # smoothstep taper into the bib
         for i in range(nx + 1):
             x = -width + 2 * width * i / nx
             zz = max(z, hips_z - 0.06)   # below the crotch: hang from the hip line
             hit = front_hit(Vector((x, -1.0, zz)))
             y = (hit.y - pad) if hit is not None else -0.2
             if z < hips_z - 0.06:
-                y -= 0.02 * (hips_z - 0.06 - z)       # a slight outward hang
-            row.append(bm.verts.new((x, y, z)))
-        grid.append(row)
+                y -= 0.05 + 0.06 * (hips_z - 0.06 - z)   # hangs clear of the legs (they swing under it)
+            Y[j][i], X[j][i] = y, x
+    # pass 2: relax into a smooth heavy sheet (shrink-wrapping every garment wrinkle shaded
+    # as blocky facets) -- never letting it sink behind the drape (smaller y = further forward)
+    S = [row[:] for row in Y]
+    for _ in range(10):
+        T = [row[:] for row in S]
+        for j in range(nz + 1):
+            for i in range(nx + 1):
+                acc = n = 0
+                for dj in (-1, 0, 1):
+                    for di in (-1, 0, 1):
+                        jj, ii = j + dj, i + di
+                        if 0 <= jj <= nz and 0 <= ii <= nx:
+                            acc += S[jj][ii]; n += 1
+                T[j][i] = min(acc / n, Y[j][i])
+        S = T
+    bm = bmesh.new()
+    grid = []
+    for j in range(nz + 1):
+        z = top_z + (bottom_z - top_z) * j / nz
+        grid.append([bm.verts.new((X[j][i], S[j][i], z)) for i in range(nx + 1)])
     uv = bm.loops.layers.uv.new()
     for j in range(nz):
         for i in range(nx):
@@ -525,20 +594,38 @@ def apron(top_z, bottom_z, half_w, mat, pad=0.018, bib=False):
     bpy.ops.object.modifier_apply(modifier="solid")
     bpy.ops.object.shade_smooth()
     o.data.materials.append(mat)
-    # weights: chest -> Spine1, belly -> Spine, below -> Hips (blended so it bends with the torso)
-    spine_z = (rig.matrix_world @ rig.data.bones["Spine"].head_local).z
-    chest_z = (rig.matrix_world @ rig.data.bones["Spine1"].head_local).z
-    g = {n: o.vertex_groups.new(name=n) for n in ("Spine1", "Spine", "Hips")}
+    # weights: above the hips, copy the NEAREST body vertex's skin weights so the bib rides
+    # the chest exactly (rigid spine weights let the posed belly push through it); below
+    # the hips, Hips only, so it hangs rather than stretching between the legs.
+    from mathutils.kdtree import KDTree
+    # source = the torso GARMENT the apron lies on (it deforms exactly as the apron should);
+    # only torso bones are copied -- arm/shoulder weights near the armpits dragged the bib
+    # back into the chest whenever the arms moved
+    src = next((m for m in meshes if any(k in m.name for k in ("worksuit", "casualsuit"))), body)
+    bverts = src.data.vertices
+    kd = KDTree(len(bverts))
+    for v in bverts:
+        kd.insert(src.matrix_world @ v.co, v.index)
+    kd.balance()
+    gname = {g.index: g.name for g in src.vertex_groups}
+    TORSO = ("Hips", "LowerBack", "Spine", "Spine1")
+    groups = {}
+    def grp(n):
+        if n not in groups:
+            groups[n] = o.vertex_groups.new(name=n)
+        return groups[n]
     for v in o.data.vertices:
-        z = v.co.z
-        if z >= chest_z:
-            g["Spine1"].add([v.index], 1.0, "REPLACE")
-        elif z >= spine_z:
-            t = (z - spine_z) / (chest_z - spine_z)
-            g["Spine1"].add([v.index], t, "REPLACE"); g["Spine"].add([v.index], 1 - t, "REPLACE")
-        else:
-            t = max(0.0, min(1.0, (z - hips_z) / (spine_z - hips_z)))
-            g["Spine"].add([v.index], t, "REPLACE"); g["Hips"].add([v.index], 1 - t, "REPLACE")
+        if v.co.z < hips_z:
+            grp("Hips").add([v.index], 1.0, "REPLACE")
+            continue
+        _, idx, _ = kd.find(v.co)
+        ws = [(gname[g.group], g.weight) for g in bverts[idx].groups
+              if g.weight > 0.01 and gname[g.group] in TORSO]
+        tot = sum(w for _, w in ws) or 1.0
+        if not ws:
+            ws, tot = [("Spine", 1.0)], 1.0
+        for n, w in ws:
+            grp(n).add([v.index], w / tot, "REPLACE")
     props.append((o, None))   # None = keep these weights
     return o
 
@@ -560,6 +647,7 @@ def neckerchief():
 def jacket_buttons():
     sp1 = rig.matrix_world @ rig.data.bones["Spine1"].head_local
     dg = bpy.context.evaluated_depsgraph_get(); tree = BVHTree.FromObject(body, dg)
+    assert body.matrix_world.is_identity or True   # body proxy sits at the origin
     for xo in (-0.07, 0.07):
         for k in range(4):
             z = sp1.z + 0.12 - k * 0.07
@@ -571,7 +659,7 @@ def jacket_buttons():
 PROPS = {
     "cook": lambda: (toque(), respirator(), cleaver("Right", "RightHand"), meat_hook("Left", "LeftHand")),
     "linecook": lambda: (kitchen_cap(), respirator(), knife("Right", "RightHand")),
-    "butcher": lambda: (apron(1.42, 0.40, 0.25, paint("rubber_apron", (0.22, 0.10, 0.08), grime=0.35, blood=10, drops=14, seed=9), bib=True),
+    "butcher": lambda: (apron(None, None, 0.25, paint("rubber_apron", (0.22, 0.10, 0.08), grime=0.35, blood=10, drops=14, seed=9), bib=True),
                         cleaver("Right", "RightHand", 1.35), meat_hook("Left", "LeftHand", 1.3)),
     "liquidator": lambda: (gas_mask(), shovel()),
     "headchef": lambda: (toque(0.20, 1.25), respirator(), neckerchief(), jacket_buttons(),

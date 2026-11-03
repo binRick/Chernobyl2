@@ -924,14 +924,14 @@ static void DrawScorch(void){
 // for every type -- that tuning is fragile and afterslime-calibrated -- only the
 // drawn model and the hitscan hitbox scale per type.
 typedef enum { EN_COOK=0, EN_LINECOOK=1, EN_BUTCHER=2, EN_LIQUIDATOR=3, EN_HEADCHEF=4, EN_NTYPES } EnemyKind;
-// Each type draws its own model, assets/<name>.glb (tools/chef/build_all.sh). Enemies draw
-// unlit, so the tint knocks the textures down into the arenas' baked lighting.
+// Each type draws its own model, assets/<name>.glb (tools/chef/build_all.sh). Enemies are
+// lit per pixel by the arena lamps (EnemyLightUpload), so tints stay near white.
 static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; const char *name; } kEnemy[EN_NTYPES]={
-    {  2,  80.0f, 4.6f, 16.0f, 1.00f, {178,172,162,255}, "cook"       },   // canteen cook: the wave-1 staple
-    {  3,  50.0f, 6.4f, 10.0f, 1.00f, {178,172,162,255}, "linecook"   },   // wiry, knife, outruns a backpedal -- kiting dies
-    {  6, 260.0f, 2.6f, 30.0f, 1.05f, {170,164,156,255}, "butcher"    },   // slow wall of meat, hits like a truck
-    {  4, 140.0f, 3.8f, 22.0f, 1.00f, {176,175,168,255}, "liquidator" },   // gas mask + shovel: tough mid-liner
-    { 14, 800.0f, 3.2f, 40.0f, 1.35f, {182,178,170,255}, "headchef"   },   // the giant: rare capstone, twin cleavers
+    {  2,  80.0f, 4.6f, 16.0f, 1.00f, {238,236,232,255}, "cook"       },   // canteen cook: the wave-1 staple
+    {  3,  50.0f, 6.4f, 10.0f, 1.00f, {238,236,232,255}, "linecook"   },   // wiry, knife, outruns a backpedal -- kiting dies
+    {  6, 260.0f, 2.6f, 30.0f, 1.05f, {238,236,232,255}, "butcher"    },   // slow wall of meat, hits like a truck
+    {  4, 140.0f, 3.8f, 22.0f, 1.00f, {238,236,232,255}, "liquidator" },   // gas mask + shovel: tough mid-liner
+    { 14, 800.0f, 3.2f, 40.0f, 1.35f, {238,236,232,255}, "headchef"   },   // the giant: rare capstone, twin cleavers
 };
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
@@ -956,27 +956,53 @@ static ModelAnimation *RigClip(int type, int role){ EnemyRig *r=RigOf(type); ret
 // matrix array (<= ENEMY_MAX_BONES). raylib's own GPU path is compiled out of this build.
 #define ENEMY_MAX_BONES 64
 static Shader g_skinShader; static int g_skinBonesLoc=-1, g_skinReady=-1;   // -1 untried, 0 failed, 1 ok
+static int g_skinLoc[6]={-1,-1,-1,-1,-1,-1};   // lPos lCol lR lN ambient viewPos
 static int EnemySkinInit(void){
     if (g_skinReady>=0) return g_skinReady;
+    // Skinned + LIT: position and normal skinned by the bone palette, then per-pixel
+    // lighting with the same falloff the map bakes into its vertices (ambient +
+    // colour * N.L * (1-d/R)) from the 4 strongest unoccluded arena lamps, a soft fill
+    // from the player (enemies stay readable in dark corners, as in ../chernobyl) and
+    // a faint rim so silhouettes separate from the walls.
     const char *vs="#version 330\n"
-        "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor;\n"
+        "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor; in vec3 vertexNormal;\n"
         "in vec4 vertexBoneIndices; in vec4 vertexBoneWeights;\n"
-        "uniform mat4 mvp; uniform mat4 boneMatrices[64];\n"
-        "out vec2 fragTexCoord; out vec4 fragColor;\n"
+        "uniform mat4 mvp; uniform mat4 matModel; uniform mat4 boneMatrices[64];\n"
+        "out vec2 fragTexCoord; out vec4 fragColor; out vec3 fragPos; out vec3 fragNormal;\n"
         "void main(){\n"
-        "  vec4 p=vec4(vertexPosition,1.0), s=vec4(0.0); float wsum=0.0;\n"
-        "  for (int i=0;i<4;i++){ float w=vertexBoneWeights[i]; if (w>0.0){ s+=w*(boneMatrices[int(vertexBoneIndices[i])]*p); wsum+=w; } }\n"
-        "  if (wsum<=0.0) s=p; else s/=wsum;\n"
+        "  vec4 p=vec4(vertexPosition,1.0), s=vec4(0.0); vec3 n=vec3(0.0); float wsum=0.0;\n"
+        "  for (int i=0;i<4;i++){ float w=vertexBoneWeights[i]; if (w>0.0){ mat4 B=boneMatrices[int(vertexBoneIndices[i])];\n"
+        "      s+=w*(B*p); n+=w*(mat3(B)*vertexNormal); wsum+=w; } }\n"
+        "  if (wsum<=0.0){ s=p; n=vertexNormal; } else s/=wsum;\n"
+        "  vec4 wp=matModel*vec4(s.xyz,1.0);\n"
+        "  fragPos=wp.xyz; fragNormal=normalize(mat3(matModel)*n);\n"
         "  fragTexCoord=vertexTexCoord; fragColor=vertexColor; gl_Position=mvp*vec4(s.xyz,1.0);\n"
         "}\n";
     const char *fs="#version 330\n"
-        "in vec2 fragTexCoord; in vec4 fragColor; uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
+        "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal;\n"
+        "uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
+        "uniform vec3 lPos[5]; uniform vec3 lCol[5]; uniform float lR[5]; uniform int lN;\n"
+        "uniform vec3 ambient; uniform vec3 viewPos;\n"
         "out vec4 finalColor;\n"
-        "void main(){ vec4 t=texture(texture0, fragTexCoord); finalColor=t*colDiffuse*fragColor; }\n";
+        "void main(){\n"
+        "  vec4 t=texture(texture0, fragTexCoord); if (t.a<0.35) discard;\n"
+        "  vec3 N=normalize(fragNormal); vec3 V=normalize(viewPos-fragPos);\n"
+        "  if (dot(N,V)<0.0) N=-N;\n"
+        "  vec3 lit=ambient;\n"
+        "  for (int i=0;i<5;i++){ if (i>=lN) break; vec3 dl=lPos[i]-fragPos; float d=length(dl);\n"
+        "    if (d<lR[i]){ float ndl=max(dot(N,dl/max(d,1e-4)),0.0); lit+=lCol[i]*ndl*(1.0-d/lR[i])*1.05; } }\n"
+        "  float rim=pow(1.0-max(dot(N,V),0.0),3.0);\n"
+        "  lit+=rim*0.22*vec3(0.75,0.8,0.9);\n"
+        "  vec3 c=t.rgb*colDiffuse.rgb*fragColor.rgb*clamp(lit,0.0,1.6);\n"
+        "  finalColor=vec4(c, t.a*colDiffuse.a);\n"
+        "}\n";
     g_skinShader=LoadShaderFromMemory(vs,fs);
     g_skinReady=0;
     if (g_skinShader.id>0 && g_skinShader.id!=rlGetShaderIdDefault()){
         g_skinBonesLoc=GetShaderLocation(g_skinShader,"boneMatrices");
+        g_skinLoc[0]=GetShaderLocation(g_skinShader,"lPos");  g_skinLoc[1]=GetShaderLocation(g_skinShader,"lCol");
+        g_skinLoc[2]=GetShaderLocation(g_skinShader,"lR");    g_skinLoc[3]=GetShaderLocation(g_skinShader,"lN");
+        g_skinLoc[4]=GetShaderLocation(g_skinShader,"ambient"); g_skinLoc[5]=GetShaderLocation(g_skinShader,"viewPos");
         if (g_skinBonesLoc>=0) g_skinReady=1;
     }
     DebugLog("gpuskin","\"ok\":%d,\"loc\":%d",g_skinReady,g_skinBonesLoc);
@@ -1004,10 +1030,50 @@ static void EnemyRigGPU(EnemyRig *rg){
         rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS);
         rlDisableVertexArray();
     }
-    for (int i=0;i<m->materialCount;i++) m->materials[i].shader=g_skinShader;
+    for (int i=0;i<m->materialCount;i++){
+        m->materials[i].shader=g_skinShader;
+        Texture2D *t=&m->materials[i].maps[MATERIAL_MAP_DIFFUSE].texture;   // raylib loads POINT-filtered: jaggy up close
+        if (t->id>0 && t->id!=rlGetTextureIdDefault() && t->mipmaps<=1){ GenTextureMipmaps(t); SetTextureFilter(*t, TEXTURE_FILTER_TRILINEAR); }
+    }
     rg->invBind=(Matrix*)MemAlloc(sizeof(Matrix)*nb); rg->bones=NULL;   // the pose lives in model.boneMatrices
     for (int b=0;b<nb;b++) rg->invBind[b]=MatrixInvert(XformMat(m->skeleton.bindPose[b]));   // once, not per frame
     rg->gpu=1;
+}
+// Light an enemy for this draw: the 4 strongest arena lamps that actually reach its
+// chest (one shadow ray each, so lamps behind walls don't bleed through), plus a soft
+// fill from the player. Uploaded to the skinning shader's light uniforms.
+static void EnemyLightUpload(Vector3 at){
+    if (g_skinReady!=1) return;
+    Vector3 P=(Vector3){at.x, at.y+1.1f, at.z};
+    int best[4]={-1,-1,-1,-1}; float bw[4]={0,0,0,0};
+    for (int l=0;l<g_nMapLights;l++){
+        MapLight *L=&g_mapLights[l];
+        Vector3 dl=Vector3Subtract(L->pos,P); float d=Vector3Length(dl);
+        if (d>=L->R) continue;
+        float w=(1.0f-d/L->R)*(L->color.x+L->color.y+L->color.z);
+        int k=-1; for (int j=0;j<4;j++) if (best[j]<0 || w>bw[j]){ k=j; break; }
+        if (k<0) continue;
+        if (g_hasMap && g_mapCol.ready && d>0.3f){
+            float hit=MapRayNearest(P, Vector3Scale(dl,1.0f/d), d-0.2f);
+            if (hit>0.0f && hit<d-0.3f) continue;              // a wall between enemy and lamp
+        }
+        for (int j=3;j>k;j--){ best[j]=best[j-1]; bw[j]=bw[j-1]; }
+        best[k]=l; bw[k]=w;
+    }
+    float pos[15], col[15], rad[5]; int n=0;
+    for (int j=0;j<4;j++) if (best[j]>=0){ MapLight *L=&g_mapLights[best[j]];
+        pos[n*3]=L->pos.x; pos[n*3+1]=L->pos.y; pos[n*3+2]=L->pos.z;
+        col[n*3]=L->color.x; col[n*3+1]=L->color.y; col[n*3+2]=L->color.z; rad[n]=L->R; n++; }
+    // player fill: a dim, neutral light riding just above the camera
+    pos[n*3]=g_cam.position.x; pos[n*3+1]=g_cam.position.y+0.6f; pos[n*3+2]=g_cam.position.z;
+    col[n*3]=0.42f; col[n*3+1]=0.42f; col[n*3+2]=0.45f; rad[n]=16.0f; n++;
+    float amb[3]={0.30f,0.29f,0.31f}, vp[3]={g_cam.position.x,g_cam.position.y,g_cam.position.z};
+    SetShaderValueV(g_skinShader,g_skinLoc[0],pos,SHADER_UNIFORM_VEC3,n);
+    SetShaderValueV(g_skinShader,g_skinLoc[1],col,SHADER_UNIFORM_VEC3,n);
+    SetShaderValueV(g_skinShader,g_skinLoc[2],rad,SHADER_UNIFORM_FLOAT,n);
+    SetShaderValue(g_skinShader,g_skinLoc[3],&n,SHADER_UNIFORM_INT);
+    SetShaderValue(g_skinShader,g_skinLoc[4],amb,SHADER_UNIFORM_VEC3);
+    SetShaderValue(g_skinShader,g_skinLoc[5],vp,SHADER_UNIFORM_VEC3);
 }
 // Pose a rig for drawing: GPU rigs compute their bone palette (frame-interpolated, as
 // raylib does) and upload it to the skinning shader; anything else falls back to raylib.
@@ -2627,6 +2693,7 @@ static void DrawEnemies(void){
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
         EnemyRig *rg=RigOf(e->type);
         if (rg->animN>0) RigPose(rg, RigClip(e->type, e->state==2?CL_DEATH:e->clip), e->animT);
+        if (rg->gpu) EnemyLightUpload(e->pos);
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
         float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type size: the head chef looms
         DrawModelEx(rg->model, dpos, (Vector3){0,1,0}, yaw,   // no sink: dying body falls onto the floor, not through
@@ -2643,6 +2710,7 @@ static void DrawEnemies(void){
         RigPose(rg, &rg->anim[rg->clip[CL_DEATH]], (float)rg->deathFrame);
         for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active && RigOf(g_corpses[c].type)==rg){
             float csc=ENEMY_SCALE*kEnemy[g_corpses[c].type].scale;
+            if (rg->gpu) EnemyLightUpload(g_corpses[c].pos);
             DrawModelEx(rg->model, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
                         (Vector3){csc,csc,csc}, kEnemy[g_corpses[c].type].tint);
             if (g_corpses[c].burnN>0){   // prone body: compress the mark heights so soot sits on it, not floating above
