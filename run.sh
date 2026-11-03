@@ -13,9 +13,9 @@ fi
 make all
 
 # Extra args pass through; add --debug for the JSON event stream (written by the
-# game to ./chernobyl2-debug.log, clean of raylib warnings). With no "--map", the
-# game shows its startup map picker (scans maps/*.map); pass "--map <file>" to
-# skip the picker and load that map directly.
+# game to ./chernobyl2-debug.log, clean of raylib warnings). The game boots straight
+# into the Chernobyl arena (maps/chernobyl.map, built by tools/grid2map.py); pass
+# "--map <file>" to load a different .map instead.
 # Filter raylib's harmless per-model warnings (texcoord-attribute limit) out of
 # the console. PIPESTATUS keeps the game's own exit code: grep exiting 1 only
 # means every line was filtered, not that the game failed.

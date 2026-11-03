@@ -148,6 +148,14 @@ static int MapRegGet(MapReg *R, const char *name){
     return R->n++;
 }
 
+// Max triangle edge (Quake units) when emitting faces; 0 = emit the brush polygon as-is.
+// Lighting is baked PER VERTEX, so a hand-built arena of huge flat brushes (grid2map.py)
+// needs its faces split to ~1 m or the lamps never land between the corners. Set from
+// worldspawn "_mpu"; Xonotic maps (dense already) keep 0.
+static float g_mapTessQ = 0.0f;
+static void MapBufPush(MapBuf *b, Vector3 p, Vector3 nrm, float u, float v, unsigned char r,unsigned char g,unsigned char bl);
+static void MapEmitTri(MapBuf *b, const void *fcv, int tw, int th, Vector3 A, Vector3 B, Vector3 C, Vector3 n,
+                       unsigned char cr, unsigned char cg, unsigned char cb, int depth);
 static void MapBufPush(MapBuf *b, Vector3 p, Vector3 nrm, float u, float v, unsigned char r,unsigned char g,unsigned char bl){
     if (b->n>=b->cap){ b->cap=b->cap?b->cap*2:256;
         b->pos=(float*)realloc(b->pos,(size_t)b->cap*3*sizeof(float));
@@ -163,6 +171,27 @@ static void MapBufPush(MapBuf *b, Vector3 p, Vector3 nrm, float u, float v, unsi
 
 // One brush -> triangles. All faces clip; drawable ones emit into their texture
 // buffer with computed UVs (Quake space).
+// Emit one triangle, splitting its longest edge until every edge is <= g_mapTessQ.
+static void MapEmitTri(MapBuf *b, const void *fcv, int tw, int th, Vector3 A, Vector3 B, Vector3 C, Vector3 n,
+                       unsigned char cr, unsigned char cg, unsigned char cb, int depth){
+    const MapFace *fc=(const MapFace*)fcv;
+    if (g_mapTessQ>0.0f && depth<12){
+        float ab=Vector3Distance(A,B), bc=Vector3Distance(B,C), ca=Vector3Distance(C,A);
+        float m=fmaxf(ab,fmaxf(bc,ca));
+        if (m>g_mapTessQ){
+            if (m==ab){ Vector3 M=Vector3Lerp(A,B,0.5f); MapEmitTri(b,fc,tw,th,A,M,C,n,cr,cg,cb,depth+1); MapEmitTri(b,fc,tw,th,M,B,C,n,cr,cg,cb,depth+1); }
+            else if (m==bc){ Vector3 M=Vector3Lerp(B,C,0.5f); MapEmitTri(b,fc,tw,th,A,B,M,n,cr,cg,cb,depth+1); MapEmitTri(b,fc,tw,th,A,M,C,n,cr,cg,cb,depth+1); }
+            else { Vector3 M=Vector3Lerp(C,A,0.5f); MapEmitTri(b,fc,tw,th,A,B,M,n,cr,cg,cb,depth+1); MapEmitTri(b,fc,tw,th,M,B,C,n,cr,cg,cb,depth+1); }
+            return;
+        }
+    }
+    Vector3 V[3]={A,B,C};
+    for (int q=0;q<3;q++){
+        float uu=(Vector3DotProduct(V[q],fc->stx)+fc->offx)/(float)tw;
+        float vv=(Vector3DotProduct(V[q],fc->sty)+fc->offy)/(float)th;
+        MapBufPush(b,V[q],n,uu,vv,cr,cg,cb);
+    }
+}
 static void MapEmitBrush(MapReg *R, MapFace *fc, int count){
     const float S=131072.0f, EPS=0.02f;
     for (int i=0;i<count;i++){
@@ -193,13 +222,7 @@ static void MapEmitBrush(MapReg *R, MapFace *fc, int count){
         for (int k=1;k+1<pn;k++){
             Vector3 e1=Vector3Subtract(poly[k],poly[0]), e2=Vector3Subtract(poly[k+1],poly[0]);
             if (Vector3Length(Vector3CrossProduct(e1,e2))<1.0f) continue;
-            int idx[3]={0,k,k+1};
-            for (int q=0;q<3;q++){
-                Vector3 P=poly[idx[q]];
-                float uu=(Vector3DotProduct(P,fc[i].stx)+fc[i].offx)/(float)mt->w;
-                float vv=(Vector3DotProduct(P,fc[i].sty)+fc[i].offy)/(float)mt->h;
-                MapBufPush(&mt->buf,P,n,uu,vv,cr,cg,cb);
-            }
+            MapEmitTri(&mt->buf,&fc[i],mt->w,mt->h,poly[0],poly[k],poly[k+1],n,cr,cg,cb,0);
         }
     }
 }
@@ -609,6 +632,8 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     // entity capture: per-entity origin/class/light value, plus the saved spawn
     Vector3 entO={0,0,0}, entCol={1,1,1}, spawnQ={0,0,0};
     int curSpawn=0, curLight=0, haveOrig=0, spawnSet=0; float entLi=300.0f;
+    float mpu=0.0f;     // worldspawn "_mpu" = metres per Quake unit: keep real scale (grid2map.py arenas)
+    g_mapTessQ=0.0f;
     char line[2048];
     while (fgets(line,sizeof line,f)){
         const char *p=line; while (*p==' '||*p=='\t') p++;
@@ -626,6 +651,7 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
             else if (!strncmp(p,"\"origin\"",8)){ if (sscanf(p,"\"origin\" \"%f %f %f\"",&entO.x,&entO.y,&entO.z)==3) haveOrig=1; }
             else if (!strncmp(p,"\"light\"",7)) sscanf(p,"\"light\" \"%f\"",&entLi);
             else if (!strncmp(p,"\"_color\"",8)) sscanf(p,"\"_color\" \"%f %f %f\"",&entCol.x,&entCol.y,&entCol.z);
+            else if (!strncmp(p,"\"_mpu\"",6)){ if (sscanf(p,"\"_mpu\" \"%f\"",&mpu)==1 && mpu>0.0f) g_mapTessQ=2.0f/mpu; }   // ~2 m triangles: lamps fall off over tens of metres
         }
         else if (*p=='('){
             Vector3 a,b,c; int used=0;
@@ -658,7 +684,7 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
         free(R.t[i].buf.pos);free(R.t[i].buf.nrm);free(R.t[i].buf.uv);free(R.t[i].buf.col);} free(R.t); return empty; }
     float cx=(Mnx+Mxx)*0.5f, cy=(Mny+Mxy)*0.5f;
     float ext=fmaxf(Mxx-Mnx,fmaxf(Mxy-Mny,Mxz-Mnz)); if(ext<1.0f)ext=1.0f;
-    float s=60.0f/ext;
+    float s=(mpu>0.0f)?mpu:60.0f/ext;   // Xonotic DM arenas: normalised to ~60u across; _mpu maps: true metres
     Vector3 L=Vector3Normalize((Vector3){0.45f,0.85f,0.30f});
     if (spawnSet){ g_mapSpawn=(Vector3){(spawnQ.x-cx)*s,(spawnQ.z-Mnz)*s,(spawnQ.y-cy)*s}; g_hasSpawn=1; }
     for (int l=0;l<g_nMapLights;l++){                  // lights: Quake origin -> raylib, intensity -> reach

@@ -7,9 +7,9 @@
 # TGA/JPG) and saved under <outdir>/<map-name>.png, found by the loader by name.
 #
 #   tools/fetch_map_textures.sh [map] [outdir]
-#   (defaults: maps/afterslime.map  maps/textures)
+#   (defaults: maps/chernobyl.map  maps/textures)
 set -uo pipefail
-MAP="${1:-maps/afterslime.map}"
+MAP="${1:-maps/chernobyl.map}"
 OUT="${2:-maps/textures}"
 BASE="https://gitlab.com/xonotic/xonotic-maps.pk3dir/-/raw/master"
 mkdir -p "$OUT"

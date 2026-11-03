@@ -3,7 +3,7 @@
 #   per map      map ok:true tris>0 | nav ok walkable>0 | audio ready | shutdown ok
 #   asset pass   every "assets/..." literal in src/ exists on disk (raylib load
 #                failures are silent -- a missing sound just never plays)
-#   perf gate    --stress (MAX_ENEMIES walkers): uncapped p95 < 8.3ms; 30fps run
+#   perf gate    --stress (MAX_ENEMIES cooks): uncapped p95 < 8.3ms; 30fps run
 #                (big-dt physics) reaches a clean shutdown
 #   weapon-cycle --cycle walks every slot twice; pass-2 must read back pass-1's
 #                spent ammo (Activate/Stash swap corruption check)
@@ -34,7 +34,7 @@ run_game(){   # run_game <stdout-file> <game-args...>
   local try
   for try in 1 2 3; do
     rm -f chernobyl2-debug.log
-    ./build/chernobyl2 "$@" >"$out" 2>&1
+    CHERNOBYL_MUTE=1 ./build/chernobyl2 "$@" >"$out" 2>&1
     code=$?
     grep -q '"reason":"no-gl-context"' chernobyl2-debug.log 2>/dev/null || return 0
     echo "(attempt $try lost the display -- waking + retrying)" >>"$out"
@@ -51,6 +51,10 @@ while IFS= read -r a; do
     fail=1
   fi
 done < <(grep -ohE '"assets/[A-Za-z0-9_.-]+\.(glb|mp3|wav|png)"' src/*.c src/*.h src/*.m 2>/dev/null | tr -d '"' | sort -u)
+# enemy models are loaded by name ("assets/%s.glb" from the kEnemy table) -- check each
+while IFS= read -r e; do
+  if [[ ! -f assets/$e.glb ]]; then echo "FAIL  enemy model missing: assets/$e.glb (kEnemy)"; fail=1; fi
+done < <(sed -n '/kEnemy\[EN_NTYPES\]={/,/^};/p' src/main.c | grep -oE '"[a-z]+" *}' | grep -oE '[a-z]+')
 
 # ---- per-map boot checks ----------------------------------------------------
 maps=("$@")
@@ -99,7 +103,7 @@ done
 # ---- perf gate (M2): field saturated at MAX_ENEMIES, uncapped + 30 fps ------
 for gate in "0 600 8.3" "30 240 999"; do
   set -- $gate; fps=$1; frames=$2; budget=$3
-  run_game "$LOGDIR/perf$fps.stdout" --map maps/afterslime.map --frames "$frames" --debug --seed 7 --stress --god --fps "$fps"
+  run_game "$LOGDIR/perf$fps.stdout" --map maps/chernobyl.map --frames "$frames" --debug --seed 7 --stress --god --fps "$fps"
   [[ -f chernobyl2-debug.log ]] && cp chernobyl2-debug.log "$LOGDIR/perf$fps.jsonl"
   if out=$(python3 - "$LOGDIR/perf$fps.jsonl" "$code" "$budget" <<'PYEOF'
 import json, sys
@@ -135,7 +139,7 @@ done
 # --cycle walks every slot twice (spending ammo on pass 1, reading it back on
 # pass 2); any slot-state corruption around the ActivateWeapon /
 # StashActiveTuning swap shows up as a pass-2 mismatch.
-run_game "$LOGDIR/cycle.stdout" --map maps/afterslime.map --frames 700 --debug --seed 1 --cycle --no-enemies
+run_game "$LOGDIR/cycle.stdout" --map maps/chernobyl.map --frames 700 --debug --seed 1 --cycle --no-enemies
 [[ -f chernobyl2-debug.log ]] && cp chernobyl2-debug.log "$LOGDIR/cycle.jsonl"
 if out=$(python3 - "$LOGDIR/cycle.jsonl" "$code" <<'PYEOF'
 import json, sys

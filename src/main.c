@@ -878,7 +878,7 @@ static void DrawScorch(void){
     }
 }
 
-// ---- Enemies (assets/enemy.glb - Mixamo walk rig, 37 bones, verified) -------
+// ---- Enemies (assets/<type>.glb -- MakeHuman + CMU mocap, built by tools/chef/build_enemy.py) ---
 // One shared Model drawn many times; each enemy keeps its own animation cursor
 // so they don't march in lockstep. Mixamo export is cm-scale (~185u tall) with
 // feet at the origin facing +Z, so ENEMY_SCALE shrinks to ~1.85m and we yaw
@@ -923,23 +923,158 @@ static void DrawScorch(void){
 // budget points. The NAV/collision radii (NAV_WALLR/ENEMY_MOVE_R) stay IDENTICAL
 // for every type -- that tuning is fragile and afterslime-calibrated -- only the
 // drawn model and the hitscan hitbox scale per type.
-typedef enum { EN_WALKER=0, EN_RUNNER=1, EN_BRUTE=2, EN_NTYPES } EnemyKind;
+typedef enum { EN_COOK=0, EN_LINECOOK=1, EN_BUTCHER=2, EN_LIQUIDATOR=3, EN_HEADCHEF=4, EN_NTYPES } EnemyKind;
+// Each type draws its own model, assets/<name>.glb (tools/chef/build_all.sh). Enemies draw
+// unlit, so the tint knocks the textures down into the arenas' baked lighting.
 static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; const char *name; } kEnemy[EN_NTYPES]={
-    { 2, 100.0f, 3.4f,  16.0f, 1.00f, {255,255,255,255}, "walker" },   // the horde baseline
-    { 3,  60.0f, 6.2f,  12.0f, 0.92f, {255,110,100,255}, "runner" },   // outruns a backpedal -- kiting dies
-    { 6, 250.0f, 2.55f, 28.0f, 1.25f, {165,205,150,255}, "brute"  },   // slow wall of meat, hits like a truck
+    {  2,  80.0f, 4.6f, 16.0f, 1.00f, {178,172,162,255}, "cook"       },   // canteen cook: the wave-1 staple
+    {  3,  50.0f, 6.4f, 10.0f, 1.00f, {178,172,162,255}, "linecook"   },   // wiry, knife, outruns a backpedal -- kiting dies
+    {  6, 260.0f, 2.6f, 30.0f, 1.05f, {170,164,156,255}, "butcher"    },   // slow wall of meat, hits like a truck
+    {  4, 140.0f, 3.8f, 22.0f, 1.00f, {176,175,168,255}, "liquidator" },   // gas mask + shovel: tough mid-liner
+    { 14, 800.0f, 3.2f, 40.0f, 1.35f, {182,178,170,255}, "headchef"   },   // the giant: rare capstone, twin cleavers
 };
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
 typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
 static Corpse          g_corpses[MAX_CORPSES];
 static int             g_corpseNext = 0;
-static Model           g_enemy;
-static ModelAnimation *g_enemyAnim = NULL;
-static int             g_enemyAnimN = 0;
-static int g_eWalk=0, g_eIdle=0, g_eRun=0, g_eHit=0, g_eAttack=0, g_eDeath=0; // clips resolved by name at load
-static int g_eDeathFrame=0;   // frame to freeze the death clip at: its LAST keyframe often loops back to the standing
+// Enemy rigs. Clips are addressed by ROLE (CL_*), each rig maps a role to its own
+// animation index, so models with different clip orders/frame counts coexist.
+enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_NROLES };
+typedef struct { Model model; ModelAnimation *anim; int animN; int clip[CL_NROLES]; int deathFrame; int ok;
+                 int gpu; Matrix *invBind, *bones; } EnemyRig;   // gpu: skinned in the vertex shader (EnemySkinInit)
+static EnemyRig        g_rig[EN_NTYPES];
+static EnemyRig *RigOf(int type){ return g_rig[type].ok ? &g_rig[type] : &g_rig[EN_COOK]; }   // missing model -> the cook stands in
+static ModelAnimation *RigClip(int type, int role){ EnemyRig *r=RigOf(type); return &r->anim[r->clip[role]]; }
+// ---- GPU skinning for enemies ------------------------------------------------
+// raylib's CPU skinning re-skins a model and re-uploads its vertex buffer on EVERY
+// UpdateModelAnimation. All enemies of a type share one model, so with a full field
+// that buffer was rewritten ~24x a frame between draws -- each rewrite forcing a GPU
+// sync (profiled: 72% of the frame stalled in glBufferSubData). Instead the bind-pose
+// verts stay on the GPU untouched and a vertex shader skins them from a per-draw bone
+// matrix array (<= ENEMY_MAX_BONES). raylib's own GPU path is compiled out of this build.
+#define ENEMY_MAX_BONES 64
+static Shader g_skinShader; static int g_skinBonesLoc=-1, g_skinReady=-1;   // -1 untried, 0 failed, 1 ok
+static int EnemySkinInit(void){
+    if (g_skinReady>=0) return g_skinReady;
+    const char *vs="#version 330\n"
+        "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor;\n"
+        "in vec4 vertexBoneIndices; in vec4 vertexBoneWeights;\n"
+        "uniform mat4 mvp; uniform mat4 boneMatrices[64];\n"
+        "out vec2 fragTexCoord; out vec4 fragColor;\n"
+        "void main(){\n"
+        "  vec4 p=vec4(vertexPosition,1.0), s=vec4(0.0); float wsum=0.0;\n"
+        "  for (int i=0;i<4;i++){ float w=vertexBoneWeights[i]; if (w>0.0){ s+=w*(boneMatrices[int(vertexBoneIndices[i])]*p); wsum+=w; } }\n"
+        "  if (wsum<=0.0) s=p; else s/=wsum;\n"
+        "  fragTexCoord=vertexTexCoord; fragColor=vertexColor; gl_Position=mvp*vec4(s.xyz,1.0);\n"
+        "}\n";
+    const char *fs="#version 330\n"
+        "in vec2 fragTexCoord; in vec4 fragColor; uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
+        "out vec4 finalColor;\n"
+        "void main(){ vec4 t=texture(texture0, fragTexCoord); finalColor=t*colDiffuse*fragColor; }\n";
+    g_skinShader=LoadShaderFromMemory(vs,fs);
+    g_skinReady=0;
+    if (g_skinShader.id>0 && g_skinShader.id!=rlGetShaderIdDefault()){
+        g_skinBonesLoc=GetShaderLocation(g_skinShader,"boneMatrices");
+        if (g_skinBonesLoc>=0) g_skinReady=1;
+    }
+    DebugLog("gpuskin","\"ok\":%d,\"loc\":%d",g_skinReady,g_skinBonesLoc);
+    return g_skinReady;
+}
+static Matrix XformMat(Transform t){
+    return MatrixMultiply(MatrixMultiply(MatrixScale(t.scale.x,t.scale.y,t.scale.z), QuaternionToMatrix(t.rotation)),
+                          MatrixTranslate(t.translation.x,t.translation.y,t.translation.z));
+}
+// Hand the rig's meshes their bone attributes (locations 7/8) and swap its materials to
+// the skinning shader. The position VBO keeps the bind pose raylib uploaded at load.
+static void EnemyRigGPU(EnemyRig *rg){
+    Model *m=&rg->model; int nb=m->skeleton.boneCount;
+    if (EnemySkinInit()!=1 || nb<=0 || nb>ENEMY_MAX_BONES || !m->skeleton.bindPose) return;
+    for (int i=0;i<m->meshCount;i++){ Mesh *ms=&m->meshes[i];
+        if (!ms->boneIndices || !ms->boneWeights || ms->vertexCount<=0 || !ms->vaoId) return;   // all-or-nothing
+    }
+    for (int i=0;i<m->meshCount;i++){ Mesh *ms=&m->meshes[i];
+        rlEnableVertexArray(ms->vaoId);
+        rlLoadVertexBuffer(ms->boneIndices, ms->vertexCount*4*(int)sizeof(unsigned char), false);
+        rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES, 4, RL_UNSIGNED_BYTE, false, 0, 0);
+        rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES);
+        rlLoadVertexBuffer(ms->boneWeights, ms->vertexCount*4*(int)sizeof(float), false);
+        rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS, 4, RL_FLOAT, false, 0, 0);
+        rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS);
+        rlDisableVertexArray();
+    }
+    for (int i=0;i<m->materialCount;i++) m->materials[i].shader=g_skinShader;
+    rg->invBind=(Matrix*)MemAlloc(sizeof(Matrix)*nb); rg->bones=(Matrix*)MemAlloc(sizeof(Matrix)*nb);
+    for (int b=0;b<nb;b++) rg->invBind[b]=MatrixInvert(XformMat(m->skeleton.bindPose[b]));   // once, not per frame
+    rg->gpu=1;
+}
+// Pose a rig for drawing: GPU rigs compute their bone palette (frame-interpolated, as
+// raylib does) and upload it to the skinning shader; anything else falls back to raylib.
+static void RigPose(EnemyRig *rg, ModelAnimation *an, float frame){
+    if (!rg->gpu){ ANIM_APPLY(rg->model, *an, frame); return; }
+    int nf=an->keyframeCount; if (nf<=0 || !an->keyframePoses) return;
+    int f0=(int)frame; float bl=frame-(float)f0; if (bl<0) bl=0; if (bl>1) bl=1;
+    f0%=nf; if (f0<0) f0+=nf; int f1=(f0+1)%nf;
+    int nb=rg->model.skeleton.boneCount;
+    for (int b=0;b<nb;b++){
+        Transform a=an->keyframePoses[f0][b], c=an->keyframePoses[f1][b], t;
+        t.translation=Vector3Lerp(a.translation,c.translation,bl);
+        t.rotation=QuaternionSlerp(a.rotation,c.rotation,bl);
+        t.scale=Vector3Lerp(a.scale,c.scale,bl);
+        rg->bones[b]=MatrixMultiply(rg->invBind[b], XformMat(t));
+    }
+    rlEnableShader(g_skinShader.id);
+    rlSetUniformMatrices(g_skinBonesLoc, rg->bones, nb);
+}
+// Load an enemy model + clips into a rig, resolving clip ROLES by name and the
+// death clip's settle frame. Returns 1 if the model has geometry.
+static int LoadEnemyRig(EnemyRig *rg, const char *path){
+    memset(rg,0,sizeof *rg);
+    char alt[160]; snprintf(alt,sizeof alt,"../%s",path);
+    const char *fp=FileExists(path)?path:(FileExists(alt)?alt:NULL);
+    if (!fp){ DebugLog("enemy","\"error\":\"%s not found\"",path); return 0; }
+    rg->model=LoadModel(fp);
+    rg->anim=LoadModelAnimations(fp,&rg->animN);
+    static const char *roleName[CL_NROLES]={"walk","idle","run","hit","attack","death"};
+    for (int ci=0; ci<rg->animN; ci++){
+        const char *nm=rg->anim[ci].name;
+        for (int r=0;r<CL_NROLES;r++) if (strstr(nm,roleName[r])){ rg->clip[r]=ci; break; }
+    }
+    // Pick the death clip's "settled on the floor" frame. Many death anims end
+    // with a trailing keyframe that snaps back to the standing start pose, so
+    // freezing the corpse at the literal last frame leaves it standing. Walk
+    // the root bone's vertical track and take the LATEST frame still near its
+    // lowest point -- that's the body lying down, just before any spring-back.
+    rg->deathFrame = (rg->animN>0) ? ANIM_FRAMES(rg->anim[rg->clip[CL_DEATH]])-1 : 0;
+#if defined(RAYLIB_VERSION_MAJOR) && RAYLIB_VERSION_MAJOR >= 6
+    if (rg->animN>0 && rg->model.skeleton.boneCount>0){
+        ModelAnimation *d=&rg->anim[rg->clip[CL_DEATH]];
+        int nf=ANIM_FRAMES(*d), root=0;
+        for (int b=0;b<rg->model.skeleton.boneCount;b++)
+            if (strstr(rg->model.skeleton.bones[b].name,"Hips")||strstr(rg->model.skeleton.bones[b].name,"hips")){ root=b; break; }
+        float minY=1e30f, maxY=-1e30f;
+        for (int f=0;f<nf;f++){ float y=d->keyframePoses[f][root].translation.y; if(y<minY)minY=y; if(y>maxY)maxY=y; }
+        float thresh=minY+(maxY-minY)*0.2f;            // "near the floor" band
+        for (int f=nf-1;f>=0;f--)                      // latest frame still in that band
+            if (d->keyframePoses[f][root].translation.y<=thresh){ rg->deathFrame=f; break; }
+    }
+#endif
+    rg->ok=(rg->model.meshCount>0);
+    if (rg->ok && rg->animN>0) EnemyRigGPU(rg);
+    BoundingBox eb=GetModelBoundingBox(rg->model);
+    DebugLog("enemy","\"file\":\"%s\",\"gpu\":%d,\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"clips\":[%d,%d,%d,%d,%d,%d],\"settleFrame\":%d,\"size\":[%.2f,%.2f,%.2f]",
+             fp, rg->gpu, rg->model.meshCount, rg->model.skeleton.boneCount, rg->animN,
+             rg->clip[0],rg->clip[1],rg->clip[2],rg->clip[3],rg->clip[4],rg->clip[5], rg->deathFrame,
+             eb.max.x-eb.min.x, eb.max.y-eb.min.y, eb.max.z-eb.min.z);
+    return rg->ok;
+}
+#define g_eWalk CL_WALK      // legacy names for the clip ROLES (e->clip holds a role, not an anim index)
+#define g_eIdle CL_IDLE
+#define g_eRun CL_RUN
+#define g_eHit CL_HIT
+#define g_eAttack CL_ATTACK
+#define g_eDeath CL_DEATH
                               // start pose, so corpses must settle on an earlier "body on the floor" frame instead
 static int             g_hasEnemy = 0;
 static int             g_kills = 0;
@@ -951,17 +1086,20 @@ static int             g_cheatUsed = 0;         // god mode was enabled this run
 static int             g_meleeDrain = 0;        // --melee-drain: legacy untimed contact damage, kept for A/B
 static int             g_reloadAt = 0;          // --reload-at N: force a reload at update frame N (dev: inspect reload anims)
 static int             g_shotEvery = 0;         // --shot-every K: numbered screenshot every K frames (dev)
+static int             g_devBoss = 0;           // --boss: jump straight to wave 1's boss interlude (dev)
+static int             g_mute = 0;              // --mute (or CHERNOBYL_MUTE=1): master volume 0 -- headless tests stay silent
 static int             g_autoFire = 0;          // --autofire: hold the trigger every frame (dev: screenshot muzzle FX)
 static int             g_cycleTest = 0;         // --cycle: soak walks all 9 weapon slots twice, logging ammo state
 static float           g_flameFuel = 0.0f;      // flamethrower: fractional fuel-unit accumulator (whole units leave the mag)
 // ---- Wave director (M2) -----------------------------------------------------
-static int             g_wave         = 0;      // current wave, 1-based (0 = run not started yet)
+static int             g_wave         = 0;      // current wave, 1-based (0 = run not started yet)  [fwd-declared above EnemyArm]
+static int             g_bossThisWave = 0;      // the between-waves boss has been spawned for this wave
 static int             g_waveBudget   = 0;      // spawn points left to spend this wave
 static float           g_waveBreather = 0.0f;   // >0: pause between waves, counting down
 static float           g_spawnTick    = 0.0f;   // trickle-spawn timer
 static int             g_aliveCap     = 0;      // max simultaneous enemies this wave
 static float           g_runT         = 0.0f;   // run clock (results screen)
-static int             g_stress       = 0;      // --stress: keep the field at MAX_ENEMIES walkers, no waves (perf gate)
+static int             g_stress       = 0;      // --stress: keep the field at MAX_ENEMIES cooks, no waves (perf gate)
 static int             g_dead = 0;              // player death state: world frozen, waiting on a respawn input
 static float           g_deadT = 0.0f;          // seconds since death (brief delay before respawn is allowed)
 static float           g_hurt = 0.0f;           // 0..1 red damage flash, spikes on hp loss then decays
@@ -969,10 +1107,14 @@ static float           g_prevHp = 100.0f;       // last frame's hp, to detect a 
 static int             g_noclip = 0;            // map mode: F toggles free-fly / noclip vs FPS collision
 static Vector3         g_spawnResetPos = {0,0,0};  // where to drop the player back to (fell off the map / new map)
 static float           g_voidY = -1e9f;            // below this Y the player has fallen out of the world
-static int             g_returnToMenu = 0;         // ESC menu "Select Map" -> break the game loop back to the picker
+#define DEFAULT_MAP "maps/chernobyl.map"            // THE arena (tools/grid2map.py from ../chernobyl level 0)
+static int             g_returnToMenu = 0;         // ESC menu "Restart Run" / death -> break the game loop and reload
 
+static int g_wave;
 static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i to life at pos
-    g_enemies[i].pos=pos; g_enemies[i].hp=kEnemy[type].hp; g_enemies[i].type=type; g_enemies[i].state=1;
+    int wv=(g_wave>1)?g_wave-1:0;                      // ../chernobyl scaling: +12% HP, +0.18 m/s per wave past the first
+    g_enemies[i].maxHp=kEnemy[type].hp*(1.0f+0.12f*wv); g_enemies[i].spd=kEnemy[type].speed+0.18f*wv; g_enemies[i].boss=0;
+    g_enemies[i].pos=pos; g_enemies[i].hp=g_enemies[i].maxHp; g_enemies[i].type=type; g_enemies[i].state=1;
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
     g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun; g_enemies[i].roarT=0; g_enemies[i].drawY=pos.y;
     g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f; g_enemies[i].atkCd=0.0f; g_enemies[i].burnN=0;
@@ -1035,25 +1177,130 @@ static int WaveBudgetFor(int w){ return 8 + w*5; }                 // ~5 walkers
 static int WaveAliveCapFor(int w){ int c=7+w; return c>16?16:c; }  // trickle cap, well under MAX_ENEMIES
 static void StartWave(int w){
     g_wave=w; g_waveBudget=WaveBudgetFor(w); g_aliveCap=WaveAliveCapFor(w);
-    g_spawnTick=0.0f; g_waveBreather=0.0f;
+    g_spawnTick=0.0f; g_waveBreather=0.0f; g_bossThisWave=0;
+    { void SeedWavePickups(void); SeedWavePickups(); }
     if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
     DebugLog("wave","\"start\":%d,\"budget\":%d,\"cap\":%d", w, g_waveBudget, g_aliveCap);
 }
-// What to spend budget on: brutes from wave 4, runners from wave 2, both weighted
-// heavier as waves rise; falls back to a walker when the budget can't afford it.
+// What to spend budget on: cooks are the staple; line cooks + liquidators join from
+// wave 2, butchers from wave 3 (the head chef is the between-waves BOSS) -- all weighted heavier as
+// waves rise. Falls back to a cook when the budget can't afford the pick.
+static int g_forceEnemy = -1;   // --enemy NAME: every spawn is this type (demo / testing a single enemy)
 static int WavePickType(void){
-    int r=GetRandomValue(0,99), t=EN_WALKER;
-    if      (g_wave>=4 && r<12+g_wave*2) t=EN_BRUTE;
-    else if (g_wave>=2 && r<40+g_wave*3) t=EN_RUNNER;
-    if (kEnemy[t].cost>g_waveBudget) t=EN_WALKER;
-    if (kEnemy[t].cost>g_waveBudget) return -1;        // can't even afford a walker -> budget is spent
+    if (g_forceEnemy>=0) return (kEnemy[g_forceEnemy].cost<=g_waveBudget) ? g_forceEnemy : -1;
+    int r=GetRandomValue(0,99), t=EN_COOK;
+    if      (g_wave>=3 && r<14+g_wave*2)    t=EN_BUTCHER;
+    else if (g_wave>=2 && r<30+g_wave*2)    t=EN_LIQUIDATOR;
+    else if (g_wave>=2 && r<55+g_wave*2)    t=EN_LINECOOK;
+    if (kEnemy[t].cost>g_waveBudget) t=EN_COOK;
+    if (kEnemy[t].cost>g_waveBudget) return -1;        // can't even afford a cook -> budget is spent
     return t;
+}
+
+// ---- Pickups + power-ups (../chernobyl) -------------------------------------
+// Health +25, mega +50 (to 150), ammo (+1 mag every gun), QUAD (4x damage 30 s), SPEED
+// (1.5x move 30 s). Dropped by kills (bosses always drop mega + quad) and seeded on the
+// map each wave. Spin + bob in the world; expire after 25 s, blinking for the last 5.
+enum { PK_HEALTH=0, PK_MEGA, PK_AMMO, PK_QUAD, PK_SPEED, PK_N };
+typedef struct { Vector3 pos; int type, active; float life, t; } Pickup;
+#define MAX_PICKUPS 32
+static Pickup g_pk[MAX_PICKUPS];
+static float  g_quadT=0.0f, g_speedT=0.0f, g_pkMsgT=0.0f;
+static char   g_pkMsg[48]="";
+static Sound  g_pkSnd; static int g_hasPkSnd=0;
+static void PickupSpawn(Vector3 pos, int type){
+    int slot=-1; float oldest=1e9f;
+    for (int i=0;i<MAX_PICKUPS;i++){ if (!g_pk[i].active){ slot=i; break; } if (g_pk[i].life<oldest){ oldest=g_pk[i].life; slot=i; } }
+    g_pk[slot]=(Pickup){ (Vector3){pos.x, pos.y, pos.z}, type, 1, 25.0f, (float)GetRandomValue(0,100)/10.0f };
+}
+static void PickupsReset(void){ memset(g_pk,0,sizeof g_pk); g_quadT=g_speedT=g_pkMsgT=0.0f; }
+// a random reachable floor spot (nav grid, BFS-reached from the player) -- for wave seeding
+static int PickupRandomSpot(Vector3 *out){
+    if (!g_navOK || g_navNX<=0) return 0;
+    for (int tries=0;tries<400;tries++){
+        int cx=GetRandomValue(0,g_navNX-1), cz=GetRandomValue(0,g_navNZ-1), ci=cz*g_navNX+cx;
+        if (g_navNL[ci]<=0) continue;
+        int l=GetRandomValue(0,g_navNL[ci]-1); long node=(long)ci*NAV_MAXL+l;
+        if (g_navDist && g_navDist[node]<0) continue;
+        Vector3 p={ g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[node], g_navMn.z+(cz+0.5f)*g_navCS };
+        if (Vector3Distance(p,g_pos)<6.0f) continue;
+        *out=p; return 1;
+    }
+    return 0;
+}
+static void PickupOnKill(Vector3 at, int boss){
+    if (boss){ PickupSpawn(at,PK_MEGA); PickupSpawn(Vector3Add(at,(Vector3){1.2f,0,0}),PK_QUAD); return; }
+    int r=GetRandomValue(0,99);
+    if (r>=22) return;                                   // ~22% of kills drop something
+    int q=GetRandomValue(0,99);
+    PickupSpawn(at, q<50?PK_HEALTH : q<85?PK_AMMO : q<93?PK_SPEED : PK_QUAD);
+}
+static void PickupsUpdate(float dt){
+    if (g_quadT>0) g_quadT-=dt; if (g_speedT>0) g_speedT-=dt; if (g_pkMsgT>0) g_pkMsgT-=dt;
+    for (int i=0;i<MAX_PICKUPS;i++){ Pickup *k=&g_pk[i]; if (!k->active) continue;
+        k->t+=dt; k->life-=dt; if (k->life<=0){ k->active=0; continue; }
+        Vector3 d=Vector3Subtract(k->pos,(Vector3){g_pos.x,g_pos.y-EYE_H,g_pos.z});
+        if (d.x*d.x+d.z*d.z>1.3f*1.3f || fabsf(d.y)>1.6f) continue;
+        const char *msg=NULL;
+        switch (k->type){
+            case PK_HEALTH: if (g_playerHp>=100.0f) continue; g_playerHp=fminf(100.0f,g_playerHp+25.0f); msg="+25 HEALTH"; break;
+            case PK_MEGA:   if (g_playerHp>=150.0f) continue; g_playerHp=fminf(150.0f,g_playerHp+50.0f); msg="+50 MEGA HEALTH"; break;
+            case PK_AMMO:   for (int w=0;w<g_numWeapons;w++){ Weapon *wp=&g_weapons[w]; if (wp->magSize>0){
+                                wp->reserve+=wp->magSize; int cap=wp->reserveStart*2; if (wp->reserve>cap) wp->reserve=cap; } }
+                            msg="AMMO"; break;
+            case PK_QUAD:   g_quadT=30.0f;  msg="QUAD DAMAGE!"; break;
+            case PK_SPEED:  g_speedT=30.0f; msg="SPEED BOOST!"; break;
+        }
+        k->active=0;
+        if (msg){ snprintf(g_pkMsg,sizeof g_pkMsg,"%s",msg); g_pkMsgT=1.6f; }
+        if (g_audio && g_hasPkSnd) PlaySound(g_pkSnd);
+        DebugLog("pickup","\"type\":%d,\"hp\":%.0f",k->type,g_playerHp);
+    }
+}
+static void DrawPickups(void){
+    float tm=(float)GetTime();
+    for (int i=0;i<MAX_PICKUPS;i++){ Pickup *k=&g_pk[i]; if (!k->active) continue;
+        if (k->life<5.0f && fmodf(tm*6.0f,1.0f)<0.4f) continue;          // blink before expiring
+        Vector3 c={k->pos.x, k->pos.y+0.45f+0.09f*sinf(k->t*2.6f), k->pos.z};
+        rlPushMatrix(); rlTranslatef(c.x,c.y,c.z); rlRotatef(k->t*90.0f,0,1,0);
+        switch (k->type){
+            case PK_HEALTH: case PK_MEGA: {
+                float s=(k->type==PK_MEGA)?0.55f:0.42f;
+                DrawCube((Vector3){0,0,0},s,s,s,(Color){235,235,230,255}); DrawCubeWires((Vector3){0,0,0},s,s,s,(Color){120,120,120,255});
+                Color red=(k->type==PK_MEGA)?(Color){40,110,255,255}:(Color){210,25,25,255};
+                DrawCube((Vector3){0,0,0},s*1.02f,s*0.22f,s*0.62f,red); DrawCube((Vector3){0,0,0},s*1.02f,s*0.62f,s*0.22f,red);
+                DrawCube((Vector3){0,0,0},s*0.22f,s*0.62f,s*1.02f,red);
+            } break;
+            case PK_AMMO:
+                DrawCube((Vector3){0,0,0},0.62f,0.34f,0.4f,(Color){74,82,48,255}); DrawCubeWires((Vector3){0,0,0},0.62f,0.34f,0.4f,(Color){30,34,20,255});
+                DrawCube((Vector3){0,0.05f,0},0.64f,0.07f,0.42f,(Color){220,180,40,255});
+                break;
+            case PK_QUAD:
+                rlRotatef(45,1,0,1);
+                DrawCube((Vector3){0,0,0},0.42f,0.42f,0.42f,(Color){200,40,230,255});
+                DrawSphereWires((Vector3){0,0,0},0.5f+0.05f*sinf(tm*5),8,10,(Color){255,90,255,180});
+                break;
+            case PK_SPEED:
+                DrawCylinder((Vector3){0,-0.25f,0},0.0f,0.26f,0.25f,8,(Color){40,220,240,255});
+                DrawCylinder((Vector3){0,0,0},0.26f,0.0f,0.25f,8,(Color){40,220,240,255});
+                DrawSphereWires((Vector3){0,0,0},0.45f+0.05f*sinf(tm*5),8,10,(Color){120,255,255,170});
+                break;
+        }
+        rlPopMatrix();
+    }
+}
+void PickupOnKillAt(int ei){ PickupOnKill(g_enemies[ei].pos, g_enemies[ei].boss); }
+void SeedWavePickups(void){
+    Vector3 p;
+    if (PickupRandomSpot(&p)) PickupSpawn(p,PK_HEALTH);
+    if (PickupRandomSpot(&p)) PickupSpawn(p,PK_AMMO);
+    if (g_wave>=3 && PickupRandomSpot(&p)) PickupSpawn(p, GetRandomValue(0,1)?PK_SPEED:PK_QUAD);
 }
 static void UpdateWaves(float dt){
     if (!g_hasEnemy || g_noEnemies) return;
     int alive=0; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state!=0) alive++;  // dying bodies still hold the field
     if (g_stress){                                     // perf gate: saturate the field, no wave logic
-        for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0) SpawnEnemyT(i,EN_WALKER,i&1);
+        for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0) SpawnEnemyT(i,(g_forceEnemy>=0)?g_forceEnemy:EN_COOK,i&1);
         return;
     }
     if (g_waveBreather>0.0f){
@@ -1061,6 +1308,7 @@ static void UpdateWaves(float dt){
         if (g_waveBreather<=0.0f) StartWave(g_wave+1);
         return;
     }
+    if (g_wave==0 && g_devBoss){ StartWave(1); g_waveBudget=0; return; }   // --boss: empty wave -> boss next frame
     if (g_wave==0){ g_waveBreather=3.0f; return; }     // run just started: a 3 s grace, then wave 1
     if (g_waveBudget>0){
         g_spawnTick-=dt;
@@ -1077,7 +1325,16 @@ static void UpdateWaves(float dt){
                 DebugLog("spawn","\"wave\":%d,\"type\":\"%s\",\"behind\":%d,\"budget\":%d", g_wave, kEnemy[t].name, behind, g_waveBudget);
             }
         }
-    } else if (alive==0){                              // budget spent + field clear -> breather, then next wave
+    } else if (alive==0 && !g_bossThisWave && g_forceEnemy<0){   // field clear -> BOSS interlude (../chernobyl)
+        g_bossThisWave=1;
+        int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
+        if (slot>=0){
+            SpawnEnemyT(slot,EN_HEADCHEF,0);
+            g_enemies[slot].boss=1;                     // HUD bar, always drops mega + quad
+            if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
+            DebugLog("boss","\"wave\":%d,\"hp\":%.0f", g_wave, g_enemies[slot].maxHp);
+        }
+    } else if (alive==0){                              // boss down + field clear -> breather, then next wave
         g_waveBreather=6.0f;
         if (g_audio && g_hasClearSnd) PlaySound(g_clearSnd);
         DebugLog("wave","\"clear\":%d,\"kills\":%d", g_wave, g_kills);
@@ -1174,7 +1431,7 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
     for (int i=0;i<MAX_ENEMIES;i++){
         if (g_enemies[i].state!=1) continue;
         Vector3 c=g_enemies[i].pos;          // c.y = the enemy's floor (0 in the arena, map height on a map)
-        float sc=kEnemy[g_enemies[i].type].scale;                    // hitbox tracks the drawn size (brute bigger, runner leaner)
+        float sc=kEnemy[g_enemies[i].type].scale;                    // hitbox tracks the drawn size (head chef looms)
         float er=ENEMY_RADIUS*sc, eh=ENEMY_HEIGHT*sc;
         BoundingBox bb={ (Vector3){c.x-er, c.y, c.z-er},
                          (Vector3){c.x+er, c.y+eh, c.z+er} };
@@ -1200,6 +1457,7 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
 static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, int blood){
     if (ei<0 || g_enemies[ei].state!=1) return;
     if (blood) SpawnBlood(hitPt, dir, head?1.9f:1.0f, g_enemies[ei].pos.y);
+    if (g_quadT>0.0f) dmg*=4.0f;                          // QUAD DAMAGE power-up
     g_enemies[ei].hp -= dmg;
     if (head) g_hsFlash=1.1f;
     if (g_enemies[ei].hp<=0){
@@ -1207,6 +1465,7 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
         g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
         g_kills++; if (head) g_headshots++;
         if (g_audio && g_nDeathSnd>0) PlaySound(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)]);
+        { void PickupOnKillAt(int ei); PickupOnKillAt(ei); }
     } else {
         g_enemies[ei].hitT=0.45f;                         // non-fatal hit -> flinch
     }
@@ -1444,7 +1703,7 @@ static void UpdateEnemies(float dt){
             if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE && !stuck){ // chase: follow the nav flow field, else beeline
                 Vector3 sd; float mx=dx/d, mz=dz/d;
                 if (g_hasMap && MapNavSteer(e->pos,&sd)){ mx=sd.x; mz=sd.z; }
-                float step=kEnemy[e->type].speed*dt; Vector3 b4=e->pos;   // per-type speed (runners actually run)
+                float step=e->spd*dt; Vector3 b4=e->pos;   // per-instance speed (type base + wave scaling)
                 EnemyNudge(i, mx*step, mz*step);
                 // wedged (the steer heads into a wall and per-axis collision blocks BOTH
                 // axes)? sweep the heading outward to either side -- nearest angle first --
@@ -1474,7 +1733,7 @@ static void UpdateEnemies(float dt){
                     for (int k=0;k<8;k++){ float cxx=cosf(A[k]),czz=sinf(A[k]);
                         if (!MapSphereHitsWall((Vector3){e->pos.x+cxx*0.3f,by,e->pos.z+czz*0.3f},ENEMY_HANDS_R)){ ox+=cxx; oz+=czz; } }
                     float l=sqrtf(ox*ox+oz*oz);
-                    if (l>1e-4f) EnemyNudge(i, ox/l*kEnemy[e->type].speed*dt*0.6f, oz/l*kEnemy[e->type].speed*dt*0.6f);
+                    if (l>1e-4f) EnemyNudge(i, ox/l*e->spd*dt*0.6f, oz/l*e->spd*dt*0.6f);
                 }
             }
             if (g_hasMap && g_mapCol.ready){                   // keep the enemy standing on the map floor
@@ -1500,8 +1759,8 @@ static void UpdateEnemies(float dt){
             if (g_meleeDrain){                                 // legacy A/B: untimed contact drain
                 if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
             } else if (e->atkCd>0) e->atkCd-=dt;
-            if (g_enemyAnimN>0){                               // advance current clip (looping)
-                int nf=ANIM_FRAMES(g_enemyAnim[e->clip]);
+            if (RigOf(e->type)->animN>0){                      // advance current clip (looping)
+                int nf=ANIM_FRAMES(*RigClip(e->type,e->clip));
                 float spd=(e->clip==g_eAttack)?90.0f:30.0f;    // attack plays much faster
                 float prevT=e->animT;
                 e->animT+=dt*spd;
@@ -1518,7 +1777,7 @@ static void UpdateEnemies(float dt){
                 if (nf>0 && e->animT>=nf) e->animT-=nf;
             }
         } else if (e->state==2){                              // dying: play the death anim to its settle frame, then leave a corpse
-            int nf = (g_enemyAnimN>0) ? g_eDeathFrame : 0;     // stop at the "on the floor" frame, not the spring-back last frame
+            int nf = (RigOf(e->type)->animN>0) ? RigOf(e->type)->deathFrame : 0;   // stop at the "on the floor" frame, not the spring-back last frame
             if (nf>0){ e->animT+=dt*60.0f; if (e->animT>(float)nf) e->animT=(float)nf; }
             e->deathT+=dt;
             // wait until the death anim has actually settled (body on the floor),
@@ -1655,7 +1914,7 @@ static void ApplyFullscreen(int on){
 // Bring the player back after death: full health, back to the spawn point. The
 // field is left as-is -- the enemies that killed you are still out there.
 static void RespawnPlayer(void){
-    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f;
+    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f; PickupsReset();
     g_dead=0; g_deadT=0.0f;
     for (int i=0;i<g_numWeapons;i++){ g_weapons[i].mag=g_weapons[i].magSize; g_weapons[i].reserve=g_weapons[i].reserveStart; }
     g_flameFuel=0.0f; g_burstLeft=0;           // fresh loadout with the fresh life; no pending burst
@@ -1692,7 +1951,7 @@ static void Update(void) {
                     g_fullscreen=!g_fullscreen; ApplyFullscreen(g_fullscreen); SaveOptions();
                     EnableCursor();                         // the toggle can re-grab; keep it free for the menu
                     DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
-                } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Select Map -> back to the picker
+                } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Restart Run -> reload the arena from wave 1
                     DebugLog("menu","\"selectMap\":true"); }
                 else if (i==2){ g_menu=0; DisableCursor(); }      // Resume
                 else if (i==3) g_quit=1;                          // Quit
@@ -1715,7 +1974,7 @@ static void Update(void) {
         g_deadT += dt;
         if (g_hurt>0) g_hurt=fmaxf(0.0f, g_hurt-dt*1.2f);
         if (g_deadT>1.0f && (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))){
-            if (g_hasMap) g_returnToMenu=1;            // a death ENDS the run -> back to the map picker
+            if (g_hasMap) g_returnToMenu=1;            // a death ENDS the run -> reload the arena, wave 1
             else RespawnPlayer();                      // built-in arena keeps the quick respawn
         }
         return;
@@ -1753,7 +2012,7 @@ static void Update(void) {
     Vector3 flat=Vector3Normalize((Vector3){ sinf(g_yaw), 0, cosf(g_yaw) });
     Vector3 right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
 
-    float speed=IsKeyDown(KEY_LEFT_SHIFT)?9.0f:5.0f;
+    float speed=(IsKeyDown(KEY_LEFT_SHIFT)?9.0f:5.0f)*(g_speedT>0.0f?1.5f:1.0f);   // SPEED power-up
     Vector3 wish={0,0,0}; int moving=0;
     if (IsKeyDown(KEY_W)){wish=Vector3Add(wish,flat);moving=1;}
     if (IsKeyDown(KEY_S)){wish=Vector3Subtract(wish,flat);moving=1;}
@@ -2006,7 +2265,7 @@ static void Update(void) {
     }
 
     UpdateEnemies(dt);
-    UpdateWaves(dt); g_runT+=dt;                       // wave director + the run clock
+    UpdateWaves(dt); PickupsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
     UpdateSmoke(dt);
     UpdateGrenades(dt);
 
@@ -2089,7 +2348,7 @@ static void Update(void) {
         g_noEnemies=!g_noEnemies;
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
         for (int c=0;c<MAX_CORPSES;c++) g_corpses[c].active=0;  // and clear corpses
-        g_playerHp=100.0f;                             // full health (clears a leftover YOU DIED)
+        g_playerHp=100.0f; PickupsReset();             // full health (clears a leftover YOU DIED)
         if (!g_noEnemies){ g_wave=0; g_waveBreather=0.0f; }     // restart the wave director from wave 1
         DebugLog("mode","\"noEnemies\":%s", g_noEnemies?"true":"false");
     }
@@ -2353,23 +2612,25 @@ static void DrawEnemies(void){
         }
         float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;       // face the player (yaw about +Y)
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
-        if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->state==2?g_eDeath:e->clip], e->animT);
+        EnemyRig *rg=RigOf(e->type);
+        if (rg->animN>0) RigPose(rg, RigClip(e->type, e->state==2?CL_DEATH:e->clip), e->animT);
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
-        float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type silhouette: brute looms, runner is lean
-        DrawModelEx(g_enemy, dpos, (Vector3){0,1,0}, yaw,     // no sink: dying body falls onto the floor, not through
+        float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type size: the head chef looms
+        DrawModelEx(rg->model, dpos, (Vector3){0,1,0}, yaw,   // no sink: dying body falls onto the floor, not through
                     (Vector3){esc,esc,esc}, kEnemy[e->type].tint);
         if (e->burnN>0) DrawBurnMarks(dpos, 1.0f, e->burnY, e->burnR, e->burnN);   // localised char where the flame touched
-        if (e->state==1 && e->hp<kEnemy[e->type].hp){         // HP bar above damaged enemies
+        if (e->state==1 && e->hp<e->maxHp && !e->boss){       // HP bar above damaged enemies (bosses get the HUD bar)
             Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT*kEnemy[e->type].scale+0.3f, e->pos.z};
-            DrawCube(hp, 0.6f*(e->hp/kEnemy[e->type].hp), 0.08f, 0.02f, (Color){230,60,60,255});
+            DrawCube(hp, 0.6f*(e->hp/e->maxHp), 0.08f, 0.02f, (Color){230,60,60,255});
         }
     }
-    // lasting corpses: the shared model posed at the death clip's settle frame, lying where each enemy fell
-    if (g_enemyAnimN>0){
-        ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], (float)g_eDeathFrame);
-        for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active){
+    // lasting corpses: each rig's model posed at its death clip's settle frame, lying where each enemy fell
+    for (int ri=0; ri<EN_NTYPES; ri++){
+        EnemyRig *rg=&g_rig[ri]; if (!rg->ok || rg->animN<=0) continue;
+        RigPose(rg, &rg->anim[rg->clip[CL_DEATH]], (float)rg->deathFrame);
+        for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active && RigOf(g_corpses[c].type)==rg){
             float csc=ENEMY_SCALE*kEnemy[g_corpses[c].type].scale;
-            DrawModelEx(g_enemy, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
+            DrawModelEx(rg->model, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
                         (Vector3){csc,csc,csc}, kEnemy[g_corpses[c].type].tint);
             if (g_corpses[c].burnN>0){   // prone body: compress the mark heights so soot sits on it, not floating above
                 Vector3 b={g_corpses[c].pos.x, g_corpses[c].pos.y+0.05f, g_corpses[c].pos.z};
@@ -2773,6 +3034,23 @@ static void DrawHUD(void) {
     Color cc={0,255,120,220};
     DrawLine(W/2-10,H/2,W/2-3,H/2,cc); DrawLine(W/2+3,H/2,W/2+10,H/2,cc);
     DrawLine(W/2,H/2-10,W/2,H/2-3,cc); DrawLine(W/2,H/2+3,W/2,H/2+10,cc);
+    // boss bar (../chernobyl interlude): wide, top-centre, names the boss
+    for (int i=0;i<MAX_ENEMIES;i++){ Enemy *e=&g_enemies[i];
+        if (!e->boss || e->state!=1) continue;
+        int bw=W/2, bx=W/4, by=46; float f=fmaxf(0.0f,e->hp/e->maxHp);
+        DrawRectangle(bx-3,by-3,bw+6,24,(Color){0,0,0,180});
+        DrawRectangle(bx,by,(int)(bw*f),18,(Color){200,30,30,255});
+        DrawRectangleLines(bx-3,by-3,bw+6,24,(Color){255,200,80,220});
+        const char *t="THE HEAD CHEF"; int fs=22, tw=MeasureText(t,fs);
+        DrawText(t,W/2-tw/2+2,by+26,fs,(Color){0,0,0,200}); DrawText(t,W/2-tw/2,by+24,fs,(Color){255,200,80,255});
+        break;
+    }
+    // power-up timers + pickup message
+    { int y=H-110;
+      if (g_quadT>0){ DrawText(TextFormat("QUAD  %d",(int)g_quadT+1),W-170,y,24,(Color){255,90,255,255}); y-=28; }
+      if (g_speedT>0){ DrawText(TextFormat("SPEED %d",(int)g_speedT+1),W-170,y,24,(Color){90,240,255,255}); }
+      if (g_pkMsgT>0){ int fs=28, tw=MeasureText(g_pkMsg,fs); unsigned char a=(unsigned char)(255*fminf(1.0f,g_pkMsgT/0.5f));
+          DrawText(g_pkMsg,W/2-tw/2+2,H/2+92,fs,(Color){0,0,0,a}); DrawText(g_pkMsg,W/2-tw/2,H/2+90,fs,(Color){140,255,140,a}); } }
     DrawFPS(W-90,10);
     // kills + headshots + player health
     DrawText(TextFormat("KILLS %d", g_kills), W-160, 36, 22, (Color){255,230,120,255});
@@ -2789,7 +3067,8 @@ static void DrawHUD(void) {
         DrawText(t, x,   y,   fs, (Color){255,70,40,(unsigned char)(255*k)});
     }
     DrawRectangle(20, H-44, 224, 24, (Color){0,0,0,150});
-    DrawRectangle(22, H-42, (int)(220*g_playerHp/100.0f), 20, (Color){200,40,40,255});
+    DrawRectangle(22, H-42, (int)(220*fminf(g_playerHp,100.0f)/100.0f), 20, (Color){200,40,40,255});
+    if (g_playerHp>100.0f) DrawRectangle(22, H-42, (int)(220*(g_playerHp-100.0f)/100.0f), 20, (Color){60,120,255,230});   // mega-health overcharge
     DrawText(TextFormat("HP %d", (int)g_playerHp), 28, H-40, 16, RAYWHITE);
     if (g_godMode) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (cheat)
     // ammo (bottom-right): mag / reserve for the active weapon
@@ -2830,7 +3109,7 @@ static void DrawHUD(void) {
         int w1=MeasureText(l1,30); DrawText(l1, W/2-w1/2, H/2-10, 30, (Color){255,210,60,255});
         int w2=MeasureText(l2,22); DrawText(l2, W/2-w2/2, H/2+30, 22, (Color){235,210,150,255});
         if (g_deadT>1.0f){                                         // prompt fades in after the beat
-            const char *p=g_hasMap?"ENTER or click  -  back to map select":"ENTER or click to respawn";
+            const char *p=g_hasMap?"ENTER or click  -  play again":"ENTER or click to respawn";
             int pw=MeasureText(p,22);
             DrawText(p, W/2-pw/2, H/2+72, 22, (Color){200,200,210,255});
         }
@@ -2898,7 +3177,7 @@ static void DrawMenu(void){
     TextSh(title, W/2-tw/2, (int)MenuRect(0).y-78, ts, (Color){255,210,60,255});
     Vector2 mp=GetMousePosition();
     char fsl[40]; snprintf(fsl,sizeof fsl,"Fullscreen:  %s", g_fullscreen?"ON":"OFF");
-    const char *labels[MENU_N]={fsl,"Select Map","Resume","Quit"};
+    const char *labels[MENU_N]={fsl,"Restart Run","Resume","Quit"};
     for (int i=0;i<MENU_N;i++){
         Rectangle r=MenuRect(i); int hov=CheckCollisionPointRec(mp,r);
         DrawRectangleRec(r, hov?(Color){58,82,120,240}:(Color){22,30,44,225});
@@ -2976,6 +3255,7 @@ static void Frame(void) {
         BeginMode3D(g_cam);
             DrawWorld();
             DrawEnemies();
+            DrawPickups();
             DrawSmoke(g_cam);                     // minigun muzzle smoke/steam (billboards, drawn last)
         EndMode3D();
         if (g_inspect && !g_noEnemies) DrawInspect();
@@ -3205,7 +3485,7 @@ static void StartSelectedMap(void){
     // death/reload state all reset -- same contract as RespawnPlayer, so dying
     // and picking a new map can't disagree about what "fresh" means. (A dead
     // player can reach here via ESC -> Select Map, so g_dead MUST clear.)
-    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f; g_dead=0; g_deadT=0.0f;
+    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f; g_dead=0; g_deadT=0.0f; PickupsReset();
     g_vy=0.0f; g_eyeSmooth=0.0f;
     for (int i=0;i<g_numWeapons;i++){ g_weapons[i].mag=g_weapons[i].magSize; g_weapons[i].reserve=g_weapons[i].reserveStart; }
     g_flameFuel=0.0f; g_burstLeft=0; g_fireCd=0.0f;
@@ -3244,11 +3524,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--seed") && i+1<argc){ seedArg=(unsigned int)strtoul(argv[++i],NULL,10); seedSet=1; }
         else if (!strcmp(argv[i],"--autofire")) g_autoFire=1;
+        else if (!strcmp(argv[i],"--mute")) g_mute=1;
+        else if (!strcmp(argv[i],"--boss")) g_devBoss=1;                // dev: straight to the boss interlude
+        else if (!strcmp(argv[i],"--enemy") && i+1<argc){                   // only spawn this enemy type (cook/linecook/butcher/liquidator/headchef)
+            const char *nm=argv[++i];
+            for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) g_forceEnemy=t;
+            if (g_forceEnemy<0){ fprintf(stderr,"--enemy: unknown type '%s' (cook|linecook|butcher|liquidator|headchef)\n",nm); return 1; }
+        }
         else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
         else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
         else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
         else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
-        else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with walkers, no waves
+        else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
         else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
         else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
@@ -3316,6 +3603,7 @@ int main(int argc, char **argv) {
     }
 
     InitAudioDevice();                 // weapon fire sounds; harmless if it fails
+    if (g_mute || getenv("CHERNOBYL_MUTE")) SetMasterVolume(0.0f);   // silent test runs
     g_audio = IsAudioDeviceReady();
     DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
 
@@ -3341,6 +3629,8 @@ int main(int argc, char **argv) {
           if (FileExists(p)){ g_waveSnd=LoadSound(p);  g_hasWaveSnd =(g_waveSnd.frameCount>0); } }
         { const char *p="assets/wave_clear.wav";  if (!FileExists(p)) p="../assets/wave_clear.wav";
           if (FileExists(p)){ g_clearSnd=LoadSound(p); g_hasClearSnd=(g_clearSnd.frameCount>0); SetSoundVolume(g_clearSnd,0.7f); } }
+        { const char *p="assets/pickup.wav";      if (!FileExists(p)) p="../assets/pickup.wav";
+          if (FileExists(p)){ g_pkSnd=LoadSound(p);    g_hasPkSnd   =(g_pkSnd.frameCount>0);  SetSoundVolume(g_pkSnd,0.6f); } }
     }
 
     // (Map selection + load happens in the per-map outer loop below, via
@@ -3439,58 +3729,27 @@ int main(int argc, char **argv) {
     ActivateWeapon(g_curWeapon);   // re-pose the live gun (measuring posed every rig)
     if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
 
-    // Load the enemy (Mixamo walk rig) and spawn a starting wave.
-    const char *enemyPath="assets/enemy.glb";
-    if (!FileExists(enemyPath)) enemyPath="../assets/enemy.glb";
-    if (FileExists(enemyPath)){
-        g_enemy=LoadModel(enemyPath);
-        g_enemyAnim=LoadModelAnimations(enemyPath,&g_enemyAnimN);
-        for (int ci=0; ci<g_enemyAnimN; ci++){
-            const char *nm=g_enemyAnim[ci].name;
-            if      (strstr(nm,"walk"))   g_eWalk=ci;
-            else if (strstr(nm,"idle"))   g_eIdle=ci;
-            else if (strstr(nm,"run"))    g_eRun=ci;
-            else if (strstr(nm,"hit"))    g_eHit=ci;
-            else if (strstr(nm,"attack")) g_eAttack=ci;
-            else if (strstr(nm,"death"))  g_eDeath=ci;
-        }
-        TraceLog(LOG_INFO,"enemy clips walk=%d idle=%d run=%d hit=%d attack=%d death=%d",g_eWalk,g_eIdle,g_eRun,g_eHit,g_eAttack,g_eDeath);
-        // Pick the death clip's "settled on the floor" frame. Many death anims end
-        // with a trailing keyframe that snaps back to the standing start pose, so
-        // freezing the corpse at the literal last frame leaves it standing. Walk
-        // the root bone's vertical track and take the LATEST frame still near its
-        // lowest point -- that's the body lying down, just before any spring-back.
-        g_eDeathFrame = (g_enemyAnimN>0) ? ANIM_FRAMES(g_enemyAnim[g_eDeath])-1 : 0;
-#if defined(RAYLIB_VERSION_MAJOR) && RAYLIB_VERSION_MAJOR >= 6
-        if (g_enemyAnimN>0 && g_enemy.skeleton.boneCount>0){
-            ModelAnimation *d=&g_enemyAnim[g_eDeath];
-            int nf=ANIM_FRAMES(*d), root=0;
-            for (int b=0;b<g_enemy.skeleton.boneCount;b++)
-                if (strstr(g_enemy.skeleton.bones[b].name,"Hips")||strstr(g_enemy.skeleton.bones[b].name,"hips")){ root=b; break; }
-            float minY=1e30f, maxY=-1e30f;
-            for (int f=0;f<nf;f++){ float y=d->keyframePoses[f][root].translation.y; if(y<minY)minY=y; if(y>maxY)maxY=y; }
-            float thresh=minY+(maxY-minY)*0.2f;            // "near the floor" band
-            for (int f=nf-1;f>=0;f--)                      // latest frame still in that band
-                if (d->keyframePoses[f][root].translation.y<=thresh){ g_eDeathFrame=f; break; }
-        }
-#endif
-        DebugLog("enemydeath","\"frames\":%d,\"settleFrame\":%d", g_enemyAnimN>0?ANIM_FRAMES(g_enemyAnim[g_eDeath]):0, g_eDeathFrame);
-        g_hasEnemy=(g_enemy.meshCount>0);
-        BoundingBox eb=GetModelBoundingBox(g_enemy);
-        DebugLog("enemy","\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"size\":[%.1f,%.1f,%.1f]",
-                 g_enemy.meshCount, g_enemy.skeleton.boneCount, g_enemyAnimN,
-                 eb.max.x-eb.min.x, eb.max.y-eb.min.y, eb.max.z-eb.min.z);
-    } else DebugLog("enemy","\"error\":\"assets/enemy.glb not found\"");
+    // Load one rig per enemy type: assets/<name>.glb. The cook is required (it stands in
+    // for any type whose model is missing); the rest are optional.
+    for (int t=0;t<EN_NTYPES;t++){
+        char path[96]; snprintf(path,sizeof path,"assets/%s.glb",kEnemy[t].name);
+        int ok=LoadEnemyRig(&g_rig[t], path);
+        if (t==EN_COOK) g_hasEnemy=ok;
+    }
     // (the starting wave of enemies is spawned per-map in StartSelectedMap)
 
 #if defined(__EMSCRIPTEN__)
+    if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
     if (!g_mapPath){ char *p=RunMapSelect(); if (p) g_mapPath=p; }
     StartSelectedMap();
     emscripten_set_main_loop(Frame,0,1);
 #else
-    // Per-map outer loop: pick a map (unless one was named on the CLI), play it, and
-    // loop back to the picker when the ESC menu's "Select Map" sets g_returnToMenu.
+    // Per-run outer loop: the game IS the Chernobyl arena (maps/chernobyl.map, rebuilt
+    // from ../chernobyl level 0 by tools/grid2map.py), so with no --map it loads that
+    // straight away; the picker is only a fallback if the arena file is missing. "Restart
+    // Run" (ESC menu) and the death screen loop back here and reload it.
     for (;;){
+        if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
         if (!g_mapPath){
             char *p=RunMapSelect();
             if (!p){ if (g_mapListN>0){ DebugLog("mapselect","\"quit\":true"); break; } } // user quit (no maps -> arena)
@@ -3501,9 +3760,9 @@ int main(int argc, char **argv) {
         int fc=0;
         while (!WindowShouldClose() && !g_quit && !g_returnToMenu){ Frame(); if (g_maxFrames>0 && ++fc>=g_maxFrames) break; }
         if (WindowShouldClose() || g_quit || g_maxFrames>0) break;   // real exit (headless --frames always exits)
-        EndCurrentMap();                                             // "Select Map": tear down, back to the picker
+        EndCurrentMap();                                             // "Restart Run": tear down and reload
         if (g_mapPathOwned){ free((void*)g_mapPath); g_mapPathOwned=0; }
-        g_mapPath=NULL;
+        g_mapPath=NULL;                                              // -> DEFAULT_MAP again (picker only if it's gone)
     }
 #endif
 
@@ -3520,7 +3779,7 @@ int main(int argc, char **argv) {
         if (g_weapons[i].anim) UnloadModelAnimations(g_weapons[i].anim,g_weapons[i].animN);
         UnloadModel(g_weapons[i].model);
     }
-    if (g_hasEnemy){ if (g_enemyAnim) UnloadModelAnimations(g_enemyAnim,g_enemyAnimN); UnloadModel(g_enemy); }
+    for (int ri=0;ri<EN_NTYPES;ri++) if (g_rig[ri].ok){ if (g_rig[ri].anim) UnloadModelAnimations(g_rig[ri].anim,g_rig[ri].animN); UnloadModel(g_rig[ri].model); }
     UnloadModel(g_floor); UnloadModel(g_wall); UnloadModel(g_crate);
     if (g_hasScrollShader) UnloadShader(g_scrollShader);
     if (g_hasMap) UnloadModel(g_map);
