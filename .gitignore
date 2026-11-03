@@ -10,6 +10,7 @@ vendor/raylib/
 vm_tune.txt
 vm_tune_*.txt
 vm_tune*.txt.pin
+vm_trim*.txt
 options.txt
 chernobyl2-debug.log
 chernobyl2-shot.png

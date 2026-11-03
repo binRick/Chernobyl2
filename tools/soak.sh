@@ -5,7 +5,7 @@
 #                failures are silent -- a missing sound just never plays)
 #   perf gate    --stress (MAX_ENEMIES walkers): uncapped p95 < 8.3ms; 30fps run
 #                (big-dt physics) reaches a clean shutdown
-#   weapon-cycle --cycle walks all 9 slots twice; pass-2 must read back pass-1's
+#   weapon-cycle --cycle walks every slot twice; pass-2 must read back pass-1's
 #                spent ammo (Activate/Stash swap corruption check)
 #
 # Needs a live display session (InitWindow fails with no-gl-context on a locked/
@@ -132,7 +132,7 @@ PYEOF
 done
 
 # ---- weapon-cycle ammo regression (M1) --------------------------------------
-# --cycle walks all 9 slots twice (spending ammo on pass 1, reading it back on
+# --cycle walks every slot twice (spending ammo on pass 1, reading it back on
 # pass 2); any slot-state corruption around the ActivateWeapon /
 # StashActiveTuning swap shows up as a pass-2 mismatch.
 run_game "$LOGDIR/cycle.stdout" --map maps/afterslime.map --frames 700 --debug --seed 1 --cycle --no-enemies
@@ -140,6 +140,7 @@ run_game "$LOGDIR/cycle.stdout" --map maps/afterslime.map --frames 700 --debug -
 if out=$(python3 - "$LOGDIR/cycle.jsonl" "$code" <<'PYEOF'
 import json, sys
 path, code = sys.argv[1], int(sys.argv[2])
+N = 6   # weapon slots -- keep in sync with g_numWeapons in src/main.c
 p1, p2 = {}, {}
 try:
     for line in open(path):
@@ -151,7 +152,7 @@ except FileNotFoundError:
     print("no debug log written"); sys.exit(1)
 bad = []
 if code != 0: bad.append(f"exit code {code}")
-if len(p1) != 9 or len(p2) != 9: bad.append(f"saw {len(p1)}/{len(p2)} slots (want 9/9)")
+if len(p1) != N or len(p2) != N: bad.append(f"saw {len(p1)}/{len(p2)} slots (want {N}/{N})")
 for s in sorted(p1):
     a, b = p1[s], p2.get(s)
     if not b: continue
@@ -161,7 +162,7 @@ for s in sorted(p1):
         bad.append(f"slot {s}: mag {b['mag']} > magSize {b['magSize']}")
 if bad:
     print("; ".join(bad)); sys.exit(1)
-print("9 slots, ammo state survives the swap")
+print(f"{N} slots, ammo state survives the swap")
 PYEOF
 ); then
   printf 'PASS  %-18s %s\n' "weapon-cycle" "$out"

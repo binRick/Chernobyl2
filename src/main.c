@@ -102,6 +102,11 @@ static float   g_vy    = 0.0f;
 static int     g_grounded = 1;
 static int     g_devOverlay = 1;
 static float   g_bob = 0.0f;
+// Procedural viewmodel motion (view-space, decaying): sway lags the mouse, bob
+// follows the stride, and the raise/lower offset drives weapon switches.
+static Vector2 g_vmSway = {0,0};     // smoothed mouse delta (pixels/frame), the gun lags the look
+static Vector2 g_vmLook = {0,0};     // this frame's raw mouse delta
+static float   g_vmRaise = 0.0f;     // 1 = fully lowered (just switched), eases to 0
 static float   g_eyeSmooth = 0.0f;   // view-height lag that absorbs stair-step snaps, decays to 0
 
 // ---- Weapon: animated M16A3 viewmodel (assets/rifle.glb) --------------------
@@ -139,6 +144,7 @@ static int             g_mgLock = 0;            // minigun overheated: locked un
 static int             g_mgFiring = 0;          // minigun was firing last frame (edge detect for cooldown sound)
 static float           g_lmgPause = 0.0f;       // LMG: forced pause (s) after its fire sound ends
 static int             g_lmgWasPlaying = 0;     // LMG: fire sound was playing last frame (edge detect)
+static Camera3D        g_cam;           // world camera (set per-map in StartSelectedMap)
 static Camera3D        g_vmCam;
 static int             g_inspect = 0;           // V: gun floats in the world
 static float           g_savedMsg = 0.0f;       // >0: flash a "SAVED" confirmation
@@ -182,6 +188,16 @@ static float   g_vmRoll  = VM_ROLL0;
 // A weapon slot owns its model+clips+tuning; the hot-path render/fire code reads
 // the active working-set globals above, which SwitchWeapon swaps in/out. Keys
 // 1/2 select. Each weapon persists its own framing to its own tune file.
+// Shared viewmodel placement per weapon class. Every gun is measured at load into a
+// canonical frame (ComputeVmFrame), then drawn at its class's slot: the gun's centre
+// at `pos` (view space, camera at origin looking -Z), scaled to `len` view units,
+// barrel converging on the crosshair `conv` units ahead. One table -> every weapon
+// sits in the same place at the same size; per-weapon trims (N mode) ride on top.
+enum { VM_RIFLE=0, VM_HEAVY=1, VM_NCLASS };
+static struct { float len; Vector3 pos; float conv; } kVmClass[VM_NCLASS]={   // VMCLASS0..1="len x y z conv" env overrides (dev)
+    { 0.70f, { 0.200f, -0.160f, -0.50f }, 0.9f },   // rifles, SMGs, shotguns, launcher
+    { 0.80f, { 0.200f, -0.220f, -0.75f }, 6.0f },   // minigun / LMG / flamethrower: held out at the hip, barrel near-level, whole gun in view
+};
 typedef struct {
     Model           model;
     ModelAnimation *anim;
@@ -194,7 +210,15 @@ typedef struct {
     Vector3         off;  float scale, yaw, pitch, roll;     // live, persisted
     Vector3         off0; float scale0, yaw0, pitch0, roll0; // defaults for 0=reset
     const char     *label;
-    const char     *tunePath;
+    const char     *tunePath;                    // legacy absolute tune file: now only read for idleHold (+ the .pin sibling)
+    char            trimPath[96];                // vm_trim_*.txt: off/scale/yaw/pitch/roll TRIM on top of the auto frame
+    Matrix          vmAlign;                     // model -> canonical gun frame: centred, barrel -Z, up +Y, length 1 (ComputeVmFrame)
+    float           vmBase;                      // canonical -> view-space scale (class length); model units * vmBase*trim = view units
+    float           gunLen;                      // measured gun length in model units (diagnostic)
+    int             vmClass;                     // VM_RIFLE / VM_HEAVY: picks the shared placement
+    int             gunBone;                     // main gun-body bone (ComputeVmFrame), -1 = none / pinned
+    Vector3         gunC;                        // gun centre at the rest pose, model space
+    float           reloadSteady;                // 0..1: how much of the gun-body's reload roll/swing to cancel (VmSteady)
     Sound           fireSnd;                     // per-weapon fire report
     int             hasSnd;                      // fireSnd loaded OK
     int             sndLoop;                     // 1 = loop while trigger held (auto); 0 = one-shot per shot
@@ -425,6 +449,7 @@ static void SwitchWeapon(int n){
         StopSound(g_weapons[g_curWeapon].auxSnd);
     StashActiveTuning();
     ActivateWeapon(n);
+    g_vmRaise=1.0f;                // new gun comes up from below the frame
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\"", n, g_weapons[n].label);
 }
 // Measure a model's bbox CENTRE + max extent from its current vertex data.
@@ -439,18 +464,72 @@ static void MeasureBBox(Model m, int useAnim, Vector3 *centre, float *maxDim){
     *centre=(Vector3){(lo[0]+hi[0])*0.5f,(lo[1]+hi[1])*0.5f,(lo[2]+hi[2])*0.5f};
     *maxDim=fmaxf(hi[0]-lo[0],fmaxf(hi[1]-lo[1],hi[2]-lo[2]));
 }
+// glTF column-major float[16] -> raylib Matrix (raylib names the math element at
+// row r, column c as m[c*4+r], which is exactly the glTF array index).
+static Matrix MatFromColMajor(const float *a){
+    Matrix m={0};
+    m.m0=a[0];  m.m1=a[1];  m.m2=a[2];  m.m3=a[3];
+    m.m4=a[4];  m.m5=a[5];  m.m6=a[6];  m.m7=a[7];
+    m.m8=a[8];  m.m9=a[9];  m.m10=a[10]; m.m11=a[11];
+    m.m12=a[12]; m.m13=a[13]; m.m14=a[14]; m.m15=a[15];
+    return m;
+}
+// raylib builds a skinned model's bind pose from the joints' REST transforms and
+// ignores the skin's inverseBindMatrices. Most of our FPS arm rigs were exported
+// with bind != rest, so raylib skins every vertex against the wrong reference:
+// the AK's hands close on air beside the gun, the MP5's arms vanish entirely.
+// tools/gen_ibm.py extracts the true IBMs into <model>.glb.ibm; this swaps them in
+// as the bind pose (bind = inverse(IBM)). Bones are matched by name, so a sidecar
+// that drifts from the asset fails loudly in the log instead of mis-skinning.
+static int ApplyIbmBindPose(Model *m, const char *glbPath, int slot){
+    char p[300]; snprintf(p,sizeof p,"%s.ibm",glbPath);
+    FILE *f=fopen(p,"r"); if (!f) return 0;
+    int ver=0, n=0; float mw[16]; char tag[32];
+    if (fscanf(f,"%31s %d",tag,&ver)!=2 || strcmp(tag,"ibm")){ fclose(f); return 0; }
+    if (fscanf(f,"%31s",tag)!=1 || strcmp(tag,"meshworld")){ fclose(f); return 0; }
+    for (int i=0;i<16;i++) if (fscanf(f,"%f",&mw[i])!=1){ fclose(f); return 0; }
+    if (fscanf(f,"%31s %d",tag,&n)!=2 || strcmp(tag,"joints")){ fclose(f); return 0; }
+    int mode=1; { const char *e=getenv("IBMMODE"); if (e) mode=atoi(e); }   // 1 = meshworld*inv(IBM): raylib bakes the mesh node transform into the verts (verified on the AK). dev A/B: -1 off, 0 inv(IBM) only
+    if (mode<0){ fclose(f); return 0; }
+    Matrix MW=MatFromColMajor(mw);
+    int applied=0, missing=0;
+    for (int k=0;k<n;k++){
+        char name[128]; float a[16];
+        if (fscanf(f,"%127s",name)!=1) break;
+        for (int i=0;i<16;i++) if (fscanf(f,"%f",&a[i])!=1){ fclose(f); return applied; }
+        int b=-1;
+        if (k<m->skeleton.boneCount && !strncmp(m->skeleton.bones[k].name,name,sizeof m->skeleton.bones[k].name-1)) b=k;   // fast path: skin order
+        else for (int q=0;q<m->skeleton.boneCount;q++) if (!strncmp(m->skeleton.bones[q].name,name,sizeof m->skeleton.bones[q].name-1)){ b=q; break; }
+        if (b<0){ missing++; continue; }
+        Matrix bind=MatrixInvert(MatFromColMajor(a));
+        if (mode==1) bind=MatrixMultiply(bind,MW);
+        Vector3 t,sc; Quaternion r; MatrixDecompose(bind,&t,&r,&sc);
+        m->skeleton.bindPose[b]=(Transform){t,r,sc};
+        applied++;
+    }
+    fclose(f);
+    DebugLog("ibm","\"slot\":%d,\"file\":\"%s\",\"mode\":%d,\"applied\":%d,\"missing\":%d,\"bones\":%d",slot,p,mode,applied,missing,m->skeleton.boneCount);
+    return applied;
+}
 // Load a glb into slot, resolve idle/shoot/reload clips by name, load saved tuning.
 static void LoadWeapon(int slot, const char *path, const char *alt,
-                       const char *label, const char *tunePath,
-                       Vector3 off0, float scale0, float yaw0, float pitch0, float roll0){
+                       const char *label, const char *tunePath, int vmClass){
     Weapon *w=&g_weapons[slot];
-    w->label=label; w->tunePath=tunePath;
-    w->off0=off0; w->scale0=scale0; w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;
-    w->off=off0; w->scale=scale0; w->yaw=yaw0; w->pitch=pitch0; w->roll=roll0;
+    w->label=label; w->tunePath=tunePath; w->vmClass=vmClass;
+    // Live tuning is a TRIM on top of the auto-measured frame (ComputeVmFrame), so
+    // the neutral trim is the default: no offset, unit scale, no extra rotation.
+    w->off0=(Vector3){0,0,0}; w->scale0=1.0f; w->yaw0=0.0f; w->pitch0=0.0f; w->roll0=0.0f;
+    w->off=w->off0; w->scale=1.0f; w->yaw=0.0f; w->pitch=0.0f; w->roll=0.0f;
+    w->vmAlign=MatrixIdentity(); w->vmBase=1.0f; w->gunLen=1.0f;
+    w->gunBone=-1; w->gunC=(Vector3){0,0,0}; w->reloadSteady=0.85f;
+    { const char *b=strstr(tunePath,"vm_tune"); // vm_tune_ak.txt -> vm_trim_ak.txt
+      if (b) snprintf(w->trimPath,sizeof w->trimPath,"%.*svm_trim%s",(int)(b-tunePath),tunePath,b+7);
+      else   snprintf(w->trimPath,sizeof w->trimPath,"trim_%s",tunePath); }
     w->aIdle=0; w->aShoot=1; w->aReload=2; w->has=0; w->anim=NULL; w->animN=0;
     const char *fp=path; if(!FileExists(fp)) fp=alt;
     if(!FileExists(fp)){ DebugLog("weapon","\"slot\":%d,\"error\":\"missing\"",slot); return; }
     w->model=LoadModel(fp);
+    ApplyIbmBindPose(&w->model, fp, slot);           // true bind pose (raylib skins against the rest pose)
     w->anim=LoadModelAnimations(fp,&w->animN);
     w->has=(w->model.meshCount>0);
     // Cull stray morph-target / blend-shape helper meshes: those ship with NO diffuse
@@ -621,16 +700,12 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     }
     w->centroid=cc;
     w->fitScale=(md>0.001f)?1.5f/md:1.0f;
-    // Auto framing (passed scale0<=0): land the centroid dead ahead, slightly
-    // down, scaled so the model is ~0.8 units (lower third). A saved tune overrides.
-    if (scale0<=0.0f){
-        float as=(md>0.001f)?0.8f/md:0.0004f;
-        w->scale0=as; w->scale=as;
-        w->off0=(Vector3){ 0.20f, -0.35f, -1.30f }; w->off=w->off0;
-        w->yaw0=yaw0; w->pitch0=pitch0; w->roll0=roll0;  // orientation still a guess; user rotates
-    }
+    // idleHold (the grip frame) still lives in the legacy tune file; its absolute
+    // transform is ignored -- the auto frame replaced it. A trim file, once saved,
+    // carries idleHold too and wins.
     w->idleHold=-1;
-    LoadTune(w->tunePath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll,&w->idleHold);
+    { Vector3 o; float a,b,c,d; LoadTune(w->tunePath,&o,&a,&b,&c,&d,&w->idleHold); }
+    { int ih=w->idleHold; if (LoadTune(w->trimPath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll,&ih)) w->idleHold=(ih>=0)?ih:w->idleHold; }
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
              slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
 }
@@ -832,12 +907,12 @@ static void DrawScorch(void){
 #define HEAD_ZONE_H        0.32f      // vertical extent of the head box (down from the top)
 #define HEAD_RADIUS        0.22f      // half-width of the head box (tighter than the body)
 #define HEADSHOT_MULT      3.0f       // headshot damage multiplier
-// Flamethrower (slot 7): a continuous cone of fire. Burns any enemy inside the
+// Flamethrower (slot 5): a continuous cone of fire. Burns any enemy inside the
 // cone + range while the trigger is held, no per-shot cooldown.
 #define FLAME_RANGE        8.5f       // reach of the fire cone (units)
 #define FLAME_COS          0.80f      // cos of the half-angle (~37deg): a broad billowing gout, not a thin jet
 #define FLAME_DPS          85.0f      // damage/sec to an enemy fully in the cone (~1.2s to kill at 100hp)
-// Knife (slot 8): a short, wide melee swing on each click.
+// Melee (no weapon uses it since the knife was cut; kept for a future melee rig): a short, wide melee swing on each click.
 #define KNIFE_RANGE        2.6f       // lunge reach (units)
 #define KNIFE_COS          0.55f      // cos half-angle (~57deg): a wide slash, forgiving to aim
 #define KNIFE_DMG          75.0f      // per swing; two slashes (or a clean one on a softened enemy) kills
@@ -874,6 +949,9 @@ static float           g_playerHp = 100.0f;
 static int             g_godMode = 0;           // invulnerable cheat; G toggles (tags the run as cheated)
 static int             g_cheatUsed = 0;         // god mode was enabled this run -> the results get tagged
 static int             g_meleeDrain = 0;        // --melee-drain: legacy untimed contact damage, kept for A/B
+static int             g_reloadAt = 0;          // --reload-at N: force a reload at update frame N (dev: inspect reload anims)
+static int             g_shotEvery = 0;         // --shot-every K: numbered screenshot every K frames (dev)
+static int             g_autoFire = 0;          // --autofire: hold the trigger every frame (dev: screenshot muzzle FX)
 static int             g_cycleTest = 0;         // --cycle: soak walks all 9 weapon slots twice, logging ammo state
 static float           g_flameFuel = 0.0f;      // flamethrower: fractional fuel-unit accumulator (whole units leave the mag)
 // ---- Wave director (M2) -----------------------------------------------------
@@ -1150,6 +1228,46 @@ typedef struct { Vector3 pos, vel; float life; int active; } Grenade;
 #define GL_RELOAD_FROM  120    // reload sub-range (R plays FROM..TO then returns to idle)
 #define GL_RELOAD_TO    185
 static Grenade g_gren[MAX_GREN];
+// Viewmodel placement: canonical gun frame (ComputeVmFrame) -> view space, where the
+// vm camera sits at the origin looking -Z. Class length * trim scale -> trim rotation
+// + recoil/sway/raise -> aim at the crosshair convergence point -> class position +
+// trim offset + bob/sway/recoil/raise. The draw prepends w->vmAlign.
+static Matrix VmPlace(const Weapon *w){
+    float bobX=sinf(g_bob)*0.010f, bobY=-fabsf(cosf(g_bob))*0.008f;
+    // recoil: muzzle kicks UP (pitch) and the gun shoves back, then settles.
+    float r=g_recoil, ease=g_vmRaise*g_vmRaise;
+    Vector3 cp=kVmClass[w->vmClass].pos;
+    Vector3 P={ cp.x+g_vmOff.x+bobX - g_vmSway.x*0.0022f,
+                cp.y+g_vmOff.y+bobY + g_vmSway.y*0.0022f + r*0.010f - ease*0.30f,
+                cp.z+g_vmOff.z + r*0.045f };
+    // aim the barrel at the crosshair convergence point
+    float conv=kVmClass[w->vmClass].conv;
+    Vector3 fwd=Vector3Normalize((Vector3){-P.x,-P.y,-conv-P.z});
+    Vector3 rt=Vector3Normalize(Vector3CrossProduct(fwd,(Vector3){0,1,0}));
+    Vector3 upv=Vector3CrossProduct(rt,fwd);
+    Matrix aim={ rt.x, upv.x, -fwd.x, 0,
+                 rt.y, upv.y, -fwd.y, 0,
+                 rt.z, upv.z, -fwd.z, 0,
+                 0,    0,     0,      1 };
+    Matrix trimR=MatrixMultiply(MatrixRotateZ(DEG2RAD*(g_vmRoll + g_vmSway.x*0.35f)),
+                 MatrixMultiply(MatrixRotateX(DEG2RAD*(g_vmPitch + r*5.0f - ease*25.0f)), MatrixRotateY(DEG2RAD*g_vmYaw)));
+    float L=kVmClass[w->vmClass].len*g_vmScale;
+    return MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixScale(L,L,L),trimR),aim),MatrixTranslate(P.x,P.y,P.z));
+}
+// The muzzle tip as a WORLD point `depth` units ahead of the eye, on the same screen
+// ray as the drawn barrel. The vm camera's FOV differs from the world camera's, so
+// the view-space tip is re-projected rather than copied. Effects spawned here
+// (tracers, flame, smoke) leave the gun wherever the class table frames it.
+static Vector3 VmMuzzleWorld(Vector3 eye, Vector3 fwd, float depth){
+    const Weapon *w=&g_weapons[g_curWeapon];
+    Vector3 m=Vector3Transform((Vector3){0,0,-0.5f}, VmPlace(w));
+    if (m.z>-1e-3f) return Vector3Add(eye,Vector3Scale(fwd,depth));
+    float T=tanf(DEG2RAD*g_cam.fovy*0.5f)/tanf(DEG2RAD*g_vmCam.fovy*0.5f);
+    float sx=m.x/(-m.z)*T, sy=m.y/(-m.z)*T;
+    Vector3 right=Vector3Normalize(Vector3CrossProduct(fwd,(Vector3){0,1,0}));
+    Vector3 up=Vector3CrossProduct(right,fwd);
+    return Vector3Add(eye, Vector3Scale(Vector3Add(fwd, Vector3Add(Vector3Scale(right,sx),Vector3Scale(up,sy))), depth));
+}
 static void LaunchGrenade(Camera3D cam){
     Vector3 dir=Vector3Normalize(Vector3Subtract(cam.target,cam.position));
     Vector3 muzzle=Vector3Add(cam.position, Vector3Scale(dir,0.6f));
@@ -1214,7 +1332,7 @@ static void Fire(Camera3D cam) {
     // weapons loop in Update() instead.
     if (g_audio && cw->hasSnd && !cw->sndLoop) PlaySound(cw->fireSnd);
     Vector3 aim=Vector3Normalize(Vector3Subtract(cam.target,cam.position));
-    Vector3 muzzle=Vector3Add(cam.position,Vector3Scale(aim,0.4f));
+    Vector3 muzzle=VmMuzzleWorld(cam.position,aim,0.6f);   // tracers leave the drawn barrel
     float dmg=(cw->dmg>0.0f)?cw->dmg:ENEMY_DMG_PER_SHOT;
     int pellets=(cw->pellets>1)?cw->pellets:1, hits=0, headAny=0;
     Vector3 lastEnd=Vector3Add(cam.position,Vector3Scale(aim,80.0f));
@@ -1465,7 +1583,6 @@ static void Collide(void) {
     }
 }
 
-static Camera3D g_cam;
 
 // Begin the active weapon's reload: multi-phase sequence if it has one, else the
 // single reload clip, else nothing. Used by the R key and the shotgun's pump.
@@ -1610,13 +1727,13 @@ static void Update(void) {
     // StashActiveTuning swap shows up as a mismatch.
     if (g_cycleTest){
         static int cf=0, k=0;
-        if (k<18 && ++cf>=30){
-            cf=0; int slot=(k+1)%9;                 // 1..8,0 twice -- ends back on the boot slot
+        if (k<2*g_numWeapons && ++cf>=30){
+            cf=0; int slot=(k+1)%g_numWeapons;      // 1..N-1,0 twice -- ends back on the boot slot
             SwitchWeapon(slot);
             Weapon *w=&g_weapons[slot];
-            if (k<9 && w->magSize>0){ w->mag-=(w->mag<3?w->mag:3); w->reserve-=(w->reserve<2?w->reserve:2); }
+            if (k<g_numWeapons && w->magSize>0){ w->mag-=(w->mag<3?w->mag:3); w->reserve-=(w->reserve<2?w->reserve:2); }
             DebugLog("ammo","\"phase\":%d,\"slot\":%d,\"mag\":%d,\"reserve\":%d,\"magSize\":%d",
-                     (k<9)?1:2, slot, w->mag, w->reserve, w->magSize);
+                     (k<g_numWeapons)?1:2, slot, w->mag, w->reserve, w->magSize);
             k++;
         }
     }
@@ -1628,6 +1745,7 @@ static void Update(void) {
 
     if (IsWindowReady() && IsCursorHidden()){
         Vector2 md=GetMouseDelta();
+        g_vmLook=md;
         g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f;
         if (g_pitch>1.5f) g_pitch=1.5f;  if (g_pitch<-1.5f) g_pitch=-1.5f;
     }
@@ -1707,20 +1825,26 @@ static void Update(void) {
     // shooting / reload
     if (g_fireCd>0) g_fireCd-=dt;
     if (g_recoil>0) g_recoil=fmaxf(0.0f, g_recoil - dt*7.0f);   // recoil settles in ~0.14s
+    { float k=fminf(1.0f,dt*9.0f);                                 // sway: chase the look delta, clamp big flicks
+      Vector2 t={ fmaxf(-40.0f,fminf(40.0f,g_vmLook.x)), fmaxf(-40.0f,fminf(40.0f,g_vmLook.y)) };
+      g_vmSway.x+=(t.x-g_vmSway.x)*k; g_vmSway.y+=(t.y-g_vmSway.y)*k; g_vmLook=(Vector2){0,0}; }
+    if (g_vmRaise>0) g_vmRaise=fmaxf(0.0f, g_vmRaise - dt*3.5f);   // weapon raise ~0.3s
     if (g_hsFlash>0) g_hsFlash-=dt;                            // "HEADSHOT!" flash fades out
     Weapon *cw=&g_weapons[g_curWeapon];
-    int lmb=IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    int lmb=IsMouseButtonDown(MOUSE_BUTTON_LEFT) || g_autoFire;
+    int lmbP=IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || (g_autoFire && g_fireCd<=0.0f);
     int firingNow=0;                                       // looped fire sound active this frame?
 
+    { static int uf=0; if (g_reloadAt>0 && ++uf==g_reloadAt) StartReload(); }
     if (IsKeyPressed(KEY_R)){
         TryReload();
     }
     else if (!g_reloading){
         if (cw->burst>0){                                  // rifle: one 3-round burst per trigger pull
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_burstLeft==0) g_burstLeft=cw->burst;
+            if (lmbP && g_burstLeft==0) g_burstLeft=cw->burst;
             if (g_burstLeft>0){ firingNow=1; if (g_fireCd<=0.0f){ Fire(g_cam); g_burstLeft--; } }
         } else if (cw->grenade){                            // grenade launcher: lob one grenade per click
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_fireCd<=0.0f){
+            if (lmbP && g_fireCd<=0.0f){
                 if (cw->magSize>0 && cw->mag<=0){ TryReload(); }
                 else {
                     if (cw->magSize>0) cw->mag--;
@@ -1742,7 +1866,7 @@ static void Update(void) {
         }
     }
 
-    // Flamethrower (slot 7): hold the trigger -> a continuous cone of fire. Spews
+    // Flamethrower (slot 5): hold the trigger -> a continuous cone of fire. Spews
     // flame billboards along the aim and burns every alive enemy inside the cone +
     // range (LOS-checked on a map so it can't burn through walls). No per-shot cd.
     if (cw->flame){
@@ -1755,11 +1879,7 @@ static void Update(void) {
             // Emit from the GUN'S NOZZLE, not screen centre: offset right + a hair down
             // (where the viewmodel barrel tip sits) and forward past the barrel, then the
             // jet flies out along the aim. Built from the camera basis so it tracks the gun.
-            Vector3 upv=Vector3CrossProduct(right,fwd);                  // camera up
-            Vector3 muzzle=Vector3Add(g_pos, Vector3Add(Vector3Add(
-                Vector3Scale(fwd,   0.95f),                              // out at the barrel tip
-                Vector3Scale(right,  0.20f)),                            // to the right (held off-centre)
-                Vector3Scale(upv,   -0.12f)));                           // barely below the view axis -> at the tip
+            Vector3 muzzle=VmMuzzleWorld(g_pos, fwd, 0.95f);             // at the drawn nozzle tip
             if (g_flameHeat < FLAME_WARMUP){                             // NOT lit yet: spit raw fuel, no damage
                 for (int q=0;q<2;q++) SpawnLiquid(muzzle, fwd);
             } else {                                                     // ignited: flame + burn
@@ -1805,9 +1925,9 @@ static void Update(void) {
         }
     }
 
-    // Knife (slot 8): a wide melee slash on each click. Hits the nearest enemy in a
+    // Melee (no weapon uses it since the knife was cut; kept for a future melee rig): a wide melee slash on each click. Hits the nearest enemy in a
     // short frontal arc; reuses the model's Shot clip as the swing if it has one.
-    if (cw->melee && !g_reloading && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_fireCd<=0.0f){
+    if (cw->melee && !g_reloading && lmbP && g_fireCd<=0.0f){
         g_fireCd=KNIFE_CD; g_recoil=1.0f;                                  // a swing kick
         if (g_aShoot!=g_aIdle && g_aShoot<g_gunAnimN){ g_curAnim=g_aShoot; g_animOnce=1; g_animT=0.0f; }
         if (g_audio && cw->hasSnd) PlaySound(cw->fireSnd);
@@ -1855,8 +1975,7 @@ static void Update(void) {
         // smoke/steam out of the spinning barrels: thick gunsmoke while firing, lighter
         // steam while the barrel spins down and cools. Emitted at the muzzle in world space.
         if (g_spin>0.02f){
-            Vector3 upv=Vector3CrossProduct(right,fwd);                          // camera up
-            Vector3 muzzle=Vector3Add(g_pos, Vector3Add(Vector3Scale(fwd,1.1f), Vector3Scale(upv,-0.08f))); // dead-centre of the barrel, a hair low
+            Vector3 muzzle=VmMuzzleWorld(g_pos, fwd, 1.1f);                      // at the drawn barrel tips
             if (g_mgFiring){ for(int q=0;q<4;q++) SpawnSmoke(muzzle,1); }        // firing: a dense fine stream
             else if (GetRandomValue(0,1)==0) SpawnSmoke(muzzle,0);              // spin-down/cooling: light steam
         }
@@ -1976,20 +2095,20 @@ static void Update(void) {
     }
     // Number keys -> weapon slots. Custom order so the two showpieces lead: 1=minigun,
     // 2=flamethrower, 3=grenade launcher, then the rest. (g_weapons indices: 0 grenade
-    // launcher,1 remington,2 minigun,3 LMG,4 AK,5 MP5,6 Benelli,7 flamethrower,8 knife.)
-    static const int kSlotForKey[9]={2,7,0,1,3,4,5,6,8};
-    for (int k=0;k<9;k++) if (IsKeyPressed(KEY_ONE+k)) SwitchWeapon(kSlotForKey[k]);
+    // launcher,1 remington,2 minigun,3 LMG,4 AK,5 flamethrower.)
+    static const int kSlotForKey[6]={2,5,0,1,3,4};
+    for (int k=0;k<6;k++) if (IsKeyPressed(KEY_ONE+k)) SwitchWeapon(kSlotForKey[k]);
     if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
     // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
     // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
     // an on-screen confirmation so you KNOW it wrote.
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_F5)){
         StashActiveTuning();
-        SaveTune(g_weapons[g_curWeapon].tunePath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll,g_weapons[g_curWeapon].idleHold);
+        SaveTune(g_weapons[g_curWeapon].trimPath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll,g_weapons[g_curWeapon].idleHold);
         { Weapon *w=&g_weapons[g_curWeapon]; SavePin(w->tunePath,w->pinOff,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll,w->armsROff,w->armsLOff); }   // grip/hand tunes save for every weapon
         g_savedMsg=2.0f;   // seconds to show "SAVED"
         DebugLog("vmsave","\"slot\":%d,\"label\":\"%s\",\"path\":\"%s\",\"saved\":true",
-                 g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].tunePath);
+                 g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].trimPath);
     }
     if (g_savedMsg>0) g_savedMsg-=GetFrameTime();
     // H ("home"): remember the current spot+facing as the player spawn (written to
@@ -2017,7 +2136,7 @@ static void Update(void) {
         Weapon *w=cwp;
         int side = (g_tuneTarget==2) ? 1 : -1;
         int bone = (side==1) ? w->handBone : w->handBoneL;
-        float np=ns/fmaxf(g_vmScale,1e-6f)*0.0667f;   // SHIFT-coarse comes via ns
+        float np=ns/fmaxf(g_vmScale*cwp->vmBase,1e-9f)*0.0667f;   // SHIFT-coarse comes via ns
         Vector3 dv={0,0,0};
         if (IsKeyDown(KEY_I)) dv.y+=np;  if (IsKeyDown(KEY_K)) dv.y-=np;
         if (IsKeyDown(KEY_L)) dv.x+=np;  if (IsKeyDown(KEY_J)) dv.x-=np;
@@ -2030,7 +2149,7 @@ static void Update(void) {
         }
     } else if (g_tuneTarget==1){                                                 // pinned gun: tune the gun's grip on the hand bone
         Weapon *w=cwp;
-        float np=ns/fmaxf(g_vmScale,1e-6f)*0.0667f;   // model-unit step; SHIFT-coarse comes via ns, net speed unchanged
+        float np=ns/fmaxf(g_vmScale*cwp->vmBase,1e-9f)*0.0667f;   // model-unit step; SHIFT-coarse comes via ns, net speed unchanged
         if (IsKeyDown(KEY_I)) w->pinOff.y+=np;  if (IsKeyDown(KEY_K)) w->pinOff.y-=np;
         if (IsKeyDown(KEY_L)) w->pinOff.x+=np;  if (IsKeyDown(KEY_J)) w->pinOff.x-=np;
         if (IsKeyDown(KEY_O)) w->pinOff.z+=np;  if (IsKeyDown(KEY_U)) w->pinOff.z-=np;
@@ -2317,11 +2436,13 @@ static Matrix XformToMatrix(Transform t){
 //   recentre gun on its own bind centre -> grip trim (rot/scale about the gun, offset
 //   in hand-bind space so it turns WITH the hand) -> seat at the palm -> skin -> view.
 // Default trim (zero) = the gun's centre sits exactly in the palm.
-static void DrawPinnedGun(Model model, ModelAnimation *anim, float frameF, Vector3 pos, float scale,
-                          int handBone, Vector3 gunC, Matrix align, Vector3 seat, unsigned long long gunMask, int authored,
-                          Vector3 pinOff, float pinScale, float pinYaw, float pinPitch, float pinRoll){
-    Matrix mt = MatrixMultiply(model.transform, MatrixMultiply(MatrixScale(scale,scale,scale), MatrixTranslate(pos.x,pos.y,pos.z)));
-    Matrix gunMat = mt;
+// Model-space matrix that carries the pinned gun's bind-space verts onto the posed
+// hand (identity when there's no hand/keyframe data). Shared by the draw and by
+// ComputeVmFrame, which needs to measure the gun exactly where it gets drawn.
+static Matrix PinnedGunLocal(Model model, ModelAnimation *anim, float frameF,
+                             int handBone, Vector3 gunC, Matrix align, Vector3 seat, int authored,
+                             Vector3 pinOff, float pinScale, float pinYaw, float pinPitch, float pinRoll){
+    Matrix local = MatrixIdentity();
     if (handBone>=0 && anim && anim->keyframePoses && anim->keyframeCount>0){
         int kf=(int)frameF; if (kf<0) kf=0; if (kf>=anim->keyframeCount) kf=anim->keyframeCount-1;
         Matrix bindM = XformToMatrix(model.skeleton.bindPose[handBone]);
@@ -2343,44 +2464,298 @@ static void DrawPinnedGun(Model model, ModelAnimation *anim, float frameF, Vecto
             pre = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixTranslate(-gunC.x,-gunC.y,-gunC.z), align), trim),
                                  MatrixTranslate(seat.x+pinOff.x, seat.y+pinOff.y, seat.z+pinOff.z));
         }
-        gunMat = MatrixMultiply(MatrixMultiply(pre, skin), mt);
+        local = MatrixMultiply(pre, skin);
     }
+    return local;
+}
+static void DrawPinnedGun(Model model, ModelAnimation *anim, float frameF, Vector3 pos, float scale,
+                          int handBone, Vector3 gunC, Matrix align, Vector3 seat, unsigned long long gunMask, int authored,
+                          Vector3 pinOff, float pinScale, float pinYaw, float pinPitch, float pinRoll){
+    Matrix mt = MatrixMultiply(model.transform, MatrixMultiply(MatrixScale(scale,scale,scale), MatrixTranslate(pos.x,pos.y,pos.z)));
+    Matrix gunMat = MatrixMultiply(PinnedGunLocal(model, anim, frameF, handBone, gunC, align, seat, authored,
+                                                  pinOff, pinScale, pinYaw, pinPitch, pinRoll), mt);
     for (int i=0;i<model.meshCount;i++){
         int isGun = (i<64) && ((gunMask>>i)&1ULL);                    // arms (blended skin) pose at mt; gun parts ride the hand
         DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], isGun?gunMat:mt);
     }
 }
 
+// Reload stabiliser. Some rigs' reload clips swing the whole gun hard -- the
+// Remington's flips ~70deg+ onto its back to feed the loading port, and the arm
+// that does it sweeps across the lens -- which reads as "the gun goes upside down".
+// While reloading, measure how far the gun-body bone has moved from its rest pose
+// and counter-transform the WHOLE rig (arms included, so the hands stay on the gun)
+// by `reloadSteady` of that motion, pivoting on the gun's current centre. The pump,
+// shells and hands still animate; the gun just stays mostly upright and in frame.
+static float VmRestFrame(const Weapon *w);
+static Matrix VmSteady(const Weapon *w){
+    if (!g_reloading || w->reloadSteady<=0.0f || w->pinGun || w->gunBone<0) return MatrixIdentity();
+    if (w->animN<=0 || g_curAnim<0 || g_curAnim>=w->animN || w->aIdle<0 || w->aIdle>=w->animN) return MatrixIdentity();
+    ModelAnimation *ra=&w->anim[w->aIdle], *ca=&w->anim[g_curAnim];
+    if (!ra->keyframePoses || !ca->keyframePoses || ra->keyframeCount<=0 || ca->keyframeCount<=0) return MatrixIdentity();
+    int rf=(int)VmRestFrame(w); if (rf<0) rf=0; if (rf>=ra->keyframeCount) rf=ra->keyframeCount-1;
+    int cf=(int)g_animT;        if (cf<0) cf=0; if (cf>=ca->keyframeCount) cf=ca->keyframeCount-1;
+    Transform t0=ra->keyframePoses[rf][w->gunBone], t1=ca->keyframePoses[cf][w->gunBone];
+    Quaternion back=QuaternionMultiply(t0.rotation, QuaternionInvert(t1.rotation));   // current -> rest orientation
+    float k=w->reloadSteady; { const char *e=getenv("VMSTEADY"); if (e) k=(float)atof(e); }   // dev A/B
+    Quaternion qk=QuaternionSlerp(QuaternionIdentity(), back, k);
+    // where the rest-pose gun centre has been carried to by the clip right now
+    Vector3 cNow=Vector3Add(Vector3RotateByQuaternion(Vector3Subtract(w->gunC,t0.translation),
+                            QuaternionMultiply(t1.rotation,QuaternionInvert(t0.rotation))), t1.translation);
+    Vector3 cTo=Vector3Lerp(cNow, w->gunC, k);
+    return MatrixMultiply(MatrixMultiply(MatrixTranslate(-cNow.x,-cNow.y,-cNow.z), QuaternionToMatrix(qk)),
+                          MatrixTranslate(cTo.x,cTo.y,cTo.z));
+}
+
+// The frame the weapon rests on between actions -- mirrors the hold logic in the
+// update loop, so the auto frame is measured from the pose the player actually sees.
+static float VmRestFrame(const Weapon *w){
+    if (w->animN<=0 || w->aIdle<0 || w->aIdle>=w->animN) return 0.0f;
+    if (w->idleHold>=0) return (float)w->idleHold;
+    if (w->grenade)     return (float)GL_IDLE_FRAME;
+    if (w->spinUp)      return (float)MG_IDLE_FRAME;
+    if (w->aWalk>=0)    return 0.0f;
+    int nf=ANIM_FRAMES(w->anim[w->aIdle]); return nf>0 ? (float)(nf-1) : 0.0f;
+}
+// Dominant eigenvector of a symmetric 3x3 (power iteration), seeded off-axis.
+static Vector3 PowerIter(double C[3][3], double *lambda){
+    double a=0.57,b=0.61,c=0.55;
+    for (int it=0;it<64;it++){
+        double x=C[0][0]*a+C[0][1]*b+C[0][2]*c, y=C[1][0]*a+C[1][1]*b+C[1][2]*c, z=C[2][0]*a+C[2][1]*b+C[2][2]*c;
+        double L=sqrt(x*x+y*y+z*z); if (L<1e-18) break; a=x/L; b=y/L; c=z/L;
+    }
+    double x=C[0][0]*a+C[0][1]*b+C[0][2]*c, y=C[1][0]*a+C[1][1]*b+C[1][2]*c, z=C[2][0]*a+C[2][1]*b+C[2][2]*c;
+    if (lambda) *lambda=a*x+b*y+c*z;
+    return (Vector3){(float)a,(float)b,(float)c};
+}
+// Is bone b part of the ARMS (vs the gun)? By name, not ancestry: rigs hang gun
+// bones off the wrist (flamethrower) and call the gun "Body" (remington), so the
+// test is: an arm/hand/finger word in the name, or a non-root bone whose subtree
+// holds one (benelli's torso 'body_01', 'pose_controller').
+static int BoneNameIsArm(const char *bn){
+    char low[64]; int j=0; for(;bn[j]&&j<63;j++){char c=bn[j]; low[j]=(c>='A'&&c<='Z')?c+32:c;} low[j]=0;
+    static const char *kw[]={"arm","elbow","wrist","hand","thumb","point","index","middle","ring","pink","finger",
+                             "knuckle","metacarpal","shoulder","clavicle","twist","chest","palm","bone_l","bone_r",
+                             "ik_","pole","cam","head",NULL};
+    for (int i=0;kw[i];i++) if (strstr(low,kw[i])) return 1;
+    return 0;
+}
+static void ClassifyArmBones(Model *m, unsigned char *isArm){
+    int nb=m->skeleton.boneCount;
+    for (int b=0;b<nb;b++) isArm[b]=(unsigned char)BoneNameIsArm(m->skeleton.bones[b].name);
+    for (int b=0;b<nb;b++){                       // propagate "has an arm below me" up to non-root ancestors
+        if (!isArm[b]) continue;
+        for (int p=m->skeleton.bones[b].parent; p>=0; p=m->skeleton.bones[p].parent){
+            char low[64]; const char *bn=m->skeleton.bones[p].name; int j=0;
+            for(;bn[j]&&j<63;j++){char c=bn[j]; low[j]=(c>='A'&&c<='Z')?c+32:c;} low[j]=0;
+            if (strstr(low,"root") || strstr(low,"object")) break;
+            isArm[p]=1;
+        }
+    }
+}
+// Vertex v of mesh ms: arm (1) or gun (0)? Dominant skin bone decides; unskinned = gun.
+static int VertIsArm(const Mesh *ms, int v, const unsigned char *isArm, int nb){
+    if (!ms->boneIndices || !ms->boneWeights) return 0;
+    int best=-1; float bw=0.0f;
+    for (int c=0;c<4;c++){ float wt=ms->boneWeights[v*4+c]; if (wt>bw){ bw=wt; best=(int)ms->boneIndices[v*4+c]; } }
+    return (best>=0 && best<nb && bw>0.0f) ? isArm[best] : 0;
+}
+static int VertDomBone(const Mesh *ms, int v){
+    if (!ms->boneIndices || !ms->boneWeights) return -1;
+    int best=-1; float bw=0.0f;
+    for (int c=0;c<4;c++){ float wt=ms->boneWeights[v*4+c]; if (wt>bw){ bw=wt; best=(int)ms->boneIndices[v*4+c]; } }
+    return bw>0.0f ? best : -1;
+}
+// Measure the weapon at its rest pose and build vmAlign: the model->canonical
+// matrix that puts the GUN (not the arms) centred at the origin, barrel along -Z,
+// top of the gun +Y, length 1. Nothing here is hand-tuned per model:
+//   barrel axis  = principal axis of the gun-part vertices
+//   gun verts    = verts whose dominant bone isn't arm-named, main gun bone subtree only
+//   muzzle end   = the THIN end (barrel vs stock/receiver); arms decide only if the ends match
+//   up           = the gun's 2nd axis (mag/grip/stock make guns taller than wide),
+//                  signed so the side that sticks out further (mag, grip) is DOWN;
+//                  round sections (minigun) use the authored +Y.
+static void ComputeVmFrame(Weapon *w, int slot){
+    if (!w->has) return;
+    float fr=VmRestFrame(w);
+    ModelAnimation *an=(w->animN>0 && w->aIdle>=0 && w->aIdle<w->animN)?&w->anim[w->aIdle]:NULL;
+    if (an) ANIM_APPLY(w->model, *an, fr);
+    Matrix pinL = MatrixIdentity();
+    if (w->pinGun) pinL=PinnedGunLocal(w->model, an, fr, w->handBone, w->gunBindC, w->pinAlign, w->pinSeat, w->pinAuthored,
+                                       w->pinOff, w->pinScale, w->pinYaw, w->pinPitch, w->pinRoll);
+    // pass 0: means of gun + arm verts; pass 1: gun covariance
+    double gs[3]={0,0,0}, as[3]={0,0,0}; long gn=0, anum=0;
+    double C[3][3]={{0}};
+    // Gun-vs-arm split: the pinned launcher's gun is whole static meshes (gunMask);
+    // every other rig is split PER VERTEX by its dominant bone's name.
+    int nb=w->model.skeleton.boneCount; if (nb>256) nb=256;
+    unsigned char isArm[256]={0}; ClassifyArmBones(&w->model,isArm);
+    // Keep only the MAIN gun body: the gun bone carrying the most verts, plus its
+    // subtree (bolt, pump, trigger). Reload props on their own root-level bones --
+    // the AK's spare mag, the Remington's loose shell -- sit far from the gun at
+    // rest and would skew the axes. Unskinned verts form their own bucket (-1).
+    unsigned char keep[257]; memset(keep,1,sizeof keep);   // index b+1; [0] = unskinned
+    if (!w->pinGun && nb>0){
+        long cnt[257]={0};
+        for (int k=0;k<w->model.meshCount;k++){ Mesh *ms=&w->model.meshes[k]; if (ms->vertexCount<=0) continue;
+            for (int v=0;v<ms->vertexCount;v++){ if (VertIsArm(ms,v,isArm,nb)) continue;
+                int b=VertDomBone(ms,v); if (b>=nb) b=-1; cnt[b+1]++; } }
+        int mb=-1; long mc=-1; for (int b=-1;b<nb;b++) if (cnt[b+1]>mc){ mc=cnt[b+1]; mb=b; }
+        w->gunBone=mb;
+        if (mb>=0){
+            memset(keep,0,sizeof keep);
+            for (int b=0;b<nb;b++){ int in=0; for (int q=b;q>=0;q=w->model.skeleton.bones[q].parent) if (q==mb){ in=1; break; } keep[b+1]=(unsigned char)in; }
+        } else { memset(keep,0,sizeof keep); keep[0]=1; }
+    }
+    for (int pass=0;pass<2;pass++){
+        double gm[3]={ gn?gs[0]/gn:0, gn?gs[1]/gn:0, gn?gs[2]/gn:0 };
+        for (int k=0;k<w->model.meshCount;k++){
+            Mesh *ms=&w->model.meshes[k]; if (ms->vertexCount<=0) continue;
+            int meshGun = (k<64 && ((w->gunMask>>k)&1ULL));
+            int pinned = w->pinGun && meshGun;
+            float *vv = (!pinned && ms->animVertices) ? ms->animVertices : ms->vertices; if (!vv) continue;
+            for (int v=0;v<ms->vertexCount;v++){
+                int isGun, armV=0;
+                if (w->pinGun) isGun=meshGun;
+                else { armV=VertIsArm(ms,v,isArm,nb); int b=VertDomBone(ms,v); if (b>=nb) b=-1; isGun = !armV && keep[b+1]; }
+                if (!w->pinGun && !isGun && !armV) continue;        // gun prop outside the main body: ignore entirely
+                Vector3 p={vv[v*3],vv[v*3+1],vv[v*3+2]};
+                if (pinned) p=Vector3Transform(p,pinL);
+                if (pass==0){
+                    if (isGun){ gs[0]+=p.x; gs[1]+=p.y; gs[2]+=p.z; gn++; }
+                    else      { as[0]+=p.x; as[1]+=p.y; as[2]+=p.z; anum++; }
+                } else if (isGun){
+                    double d[3]={p.x-gm[0],p.y-gm[1],p.z-gm[2]};
+                    for (int i=0;i<3;i++) for (int j=0;j<3;j++) C[i][j]+=d[i]*d[j];
+                }
+            }
+        }
+    }
+    if (gn<8){ DebugLog("vmframe","\"slot\":%d,\"error\":\"no gun verts\"",slot); return; }
+    Vector3 gc={(float)(gs[0]/gn),(float)(gs[1]/gn),(float)(gs[2]/gn)};
+    w->gunC=gc;
+    double l1,l2,l3;
+    Vector3 u=PowerIter(C,&l1);
+    double D[3][3]; double uu[3]={u.x,u.y,u.z};
+    for (int i=0;i<3;i++) for (int j=0;j<3;j++) D[i][j]=C[i][j]-l1*uu[i]*uu[j];
+    Vector3 v2=PowerIter(D,&l2);
+    v2=Vector3Normalize(Vector3Subtract(v2,Vector3Scale(u,Vector3DotProduct(v2,u))));
+    l3=(C[0][0]+C[1][1]+C[2][2])-l1-l2;
+    // muzzle end. Primary cue = SHAPE: the muzzle end is thin (barrel), the rear is
+    // thick (stock, receiver, grip). Measure the cross-section spread of the end
+    // 18%% slices along u. Fallback cue (ends similar): the end away from the arms.
+    Vector3 ac = anum>0 ? (Vector3){(float)(as[0]/anum),(float)(as[1]/anum),(float)(as[2]/anum)} : gc;
+    Vector3 toArms=Vector3Subtract(ac,gc);
+    float ulo=1e30f, uhi=-1e30f;
+    double endS[2]={0,0}; long endN[2]={0,0};
+    for (int pass=0;pass<2;pass++)
+    for (int k=0;k<w->model.meshCount;k++){
+        Mesh *ms=&w->model.meshes[k]; if (ms->vertexCount<=0) continue;
+        int meshGun = (k<64 && ((w->gunMask>>k)&1ULL));
+        if (w->pinGun && !meshGun) continue;
+        float *vv = (!w->pinGun && ms->animVertices) ? ms->animVertices : ms->vertices; if (!vv) continue;
+        for (int v=0;v<ms->vertexCount;v++){
+            if (!w->pinGun){ if (VertIsArm(ms,v,isArm,nb)) continue; int b=VertDomBone(ms,v); if (b>=nb) b=-1; if (!keep[b+1]) continue; }
+            Vector3 p={vv[v*3],vv[v*3+1],vv[v*3+2]}; if (w->pinGun) p=Vector3Transform(p,pinL);
+            Vector3 d=Vector3Subtract(p,gc); float q=Vector3DotProduct(d,u);
+            if (pass==0){ if (q<ulo) ulo=q; if (q>uhi) uhi=q; continue; }
+            float span=uhi-ulo; int e = (q>uhi-0.18f*span) ? 1 : ((q<ulo+0.18f*span) ? 0 : -1);
+            if (e<0) continue;
+            Vector3 perp=Vector3Subtract(d,Vector3Scale(u,q));
+            endS[e]+=Vector3LengthSqr(perp); endN[e]++;
+        }
+    }
+    double rmsLo = endN[0] ? sqrt(endS[0]/endN[0]) : 0, rmsHi = endN[1] ? sqrt(endS[1]/endN[1]) : 0;
+    double thin = (fmin(rmsLo,rmsHi)>1e-12) ? fmax(rmsLo,rmsHi)/fmin(rmsLo,rmsHi) : 1.0;
+    int byThin = thin>1.25;
+    Vector3 f;
+    if (byThin) f = (rmsHi<rmsLo) ? u : Vector3Negate(u);              // thin end = muzzle
+    else        f = (anum>0 && Vector3DotProduct(toArms,u)>0.0f) ? Vector3Negate(u) : u;
+    int armsSay = (anum>0 && Vector3DotProduct(toArms,u)>0.0f) ? -1 : 1, thinSay = (rmsHi<rmsLo) ? 1 : -1;
+    // up = the gun's 2nd axis, signed by SHAPE: mags, grips and triggers hang below
+    // the bore, so the side of v2 that sticks out FURTHER from the mean is down.
+    // (Arms are a poor cue -- shoulders sit at eye height, ABOVE the gun -- so they
+    // only decide when the section is round or the shape is near-symmetric.)
+    float vlo=0.0f, vhi=0.0f;
+    for (int k=0;k<w->model.meshCount;k++){
+        Mesh *ms=&w->model.meshes[k]; if (ms->vertexCount<=0) continue;
+        int meshGun = (k<64 && ((w->gunMask>>k)&1ULL));
+        if (w->pinGun && !meshGun) continue;
+        float *vv = (!w->pinGun && ms->animVertices) ? ms->animVertices : ms->vertices; if (!vv) continue;
+        for (int v=0;v<ms->vertexCount;v++){
+            if (!w->pinGun){ if (VertIsArm(ms,v,isArm,nb)) continue; int b=VertDomBone(ms,v); if (b>=nb) b=-1; if (!keep[b+1]) continue; }
+            Vector3 p={vv[v*3],vv[v*3+1],vv[v*3+2]}; if (w->pinGun) p=Vector3Transform(p,pinL);
+            float q=Vector3DotProduct(Vector3Subtract(p,gc),v2); if (q<vlo) vlo=q; if (q>vhi) vhi=q;
+        }
+    }
+    Vector3 up;
+    int roundSection = (l3>1e-12 && l2/l3<1.6);
+    float asym = (fminf(-vlo,vhi)>1e-9f) ? fmaxf(-vlo,vhi)/fminf(-vlo,vhi) : 99.0f;
+    Vector3 below=Vector3Subtract(toArms,Vector3Scale(f,Vector3DotProduct(toArms,f)));
+    int byShape = !roundSection && asym>1.15f;
+    if (byShape) up = (-vlo > vhi) ? v2 : Vector3Negate(v2);   // lo side sticks out further -> lo is down
+    else if (roundSection && fabsf(f.y)<0.9f){                  // round barrel cluster (minigun): shape has no "down", and
+        up=Vector3Normalize(Vector3Subtract((Vector3){0,1,0},Vector3Scale(f,f.y)));   // arms are no cue -> trust the authored +Y
+    }
+    else if (anum>0 && Vector3Length(below)>1e-6f){
+        Vector3 bdir=Vector3Normalize(below);
+        up = roundSection ? Vector3Negate(bdir) : ((Vector3DotProduct(v2,bdir)>0.0f) ? Vector3Negate(v2) : v2);
+    } else up=v2;
+    Vector3 r=Vector3Normalize(Vector3CrossProduct(f,up));     // right = forward x up
+    up=Vector3CrossProduct(r,f);
+    // extents in the gun frame -> true bbox centre + length
+    float lo[3]={1e30f,1e30f,1e30f}, hi[3]={-1e30f,-1e30f,-1e30f};
+    for (int k=0;k<w->model.meshCount;k++){
+        Mesh *ms=&w->model.meshes[k]; if (ms->vertexCount<=0) continue;
+        int meshGun = (k<64 && ((w->gunMask>>k)&1ULL));
+        if (w->pinGun && !meshGun) continue;
+        int pinned = w->pinGun;
+        float *vv = (!pinned && ms->animVertices) ? ms->animVertices : ms->vertices; if (!vv) continue;
+        for (int v=0;v<ms->vertexCount;v++){
+            if (!w->pinGun){ if (VertIsArm(ms,v,isArm,nb)) continue; int b=VertDomBone(ms,v); if (b>=nb) b=-1; if (!keep[b+1]) continue; }
+            Vector3 p={vv[v*3],vv[v*3+1],vv[v*3+2]}; if (pinned) p=Vector3Transform(p,pinL);
+            Vector3 d=Vector3Subtract(p,gc);
+            float q[3]={Vector3DotProduct(d,r),Vector3DotProduct(d,up),-Vector3DotProduct(d,f)};
+            for (int i=0;i<3;i++){ if(q[i]<lo[i])lo[i]=q[i]; if(q[i]>hi[i])hi[i]=q[i]; }
+        }
+    }
+    float len=fmaxf(hi[2]-lo[2],1e-6f);
+    Vector3 cq={(lo[0]+hi[0])*0.5f,(lo[1]+hi[1])*0.5f,(lo[2]+hi[2])*0.5f};
+    // rotation rows = r, up, -f  (v -> (r.v, up.v, -f.v))
+    Matrix R={ r.x, r.y, r.z, 0,
+               up.x,up.y,up.z,0,
+              -f.x,-f.y,-f.z, 0,
+               0,  0,  0,   1 };
+    w->vmAlign = MatrixMultiply(MatrixMultiply(MatrixTranslate(-gc.x,-gc.y,-gc.z), R),
+                 MatrixMultiply(MatrixTranslate(-cq.x,-cq.y,-cq.z), MatrixScale(1.0f/len,1.0f/len,1.0f/len)));
+    w->gunLen=len; w->vmBase=kVmClass[w->vmClass].len/len;
+    DebugLog("vmframe","\"slot\":%d,\"label\":\"%s\",\"frame\":%.0f,\"gunVerts\":%ld,\"armVerts\":%ld,\"len\":%.4f,\"eig\":[%.3g,%.3g,%.3g],\"round\":%d,\"asym\":%.2f,\"byShape\":%d,\"thin\":%.2f,\"thinVsArms\":\"%s\",\"fwd\":[%.2f,%.2f,%.2f],\"up\":[%.2f,%.2f,%.2f]",
+             slot,w->label,fr,gn,anum,len,l1,l2,l3,roundSection,asym,byShape,thin,(armsSay==thinSay)?"agree":"DISAGREE",f.x,f.y,f.z,up.x,up.y,up.z);
+}
+
+
 static void DrawViewmodel(void){
     // In orient mode the live first-person viewmodel must always show so tuning
     // is visible; inspect (which ignores the transform) is suppressed there.
     if (!g_hasGun || (g_inspect && !g_noEnemies)) return;
     PoseGun();
-    float bobX=sinf(g_bob)*0.012f, bobY=fabsf(cosf(g_bob))*0.010f;
-    // recoil: muzzle kicks UP (pitch) and the gun shoves slightly up+back, then
-    // settles. r is the live kick amount (0..1) driven by Fire().
-    float r=g_recoil;
-    Vector3 target={ g_vmOff.x+bobX, g_vmOff.y+bobY+r*0.012f, g_vmOff.z+r*0.03f };
-    Matrix rot=MatrixMultiply(MatrixRotateZ(DEG2RAD*g_vmRoll), MatrixMultiply(MatrixRotateX(DEG2RAD*(g_vmPitch - r*4.0f)), MatrixRotateY(DEG2RAD*g_vmYaw)));
-    // recenter: place the model's centroid AT target (model is far off-origin)
-    Vector3 vpos=Vector3Subtract(target, Vector3Scale(Vector3Transform(g_gunCentroid,rot), g_vmScale));
+    Weapon *w=&g_weapons[g_curWeapon];
+    Matrix M=MatrixMultiply(VmSteady(w), MatrixMultiply(w->vmAlign, VmPlace(w)));
     rlDrawRenderBatchActive();
 #if !defined(_WIN32)
     glClear(GL_DEPTH_BUFFER_BIT);   // weapon always on top
 #endif
     BeginMode3D(g_vmCam);
-        g_gun.transform=rot;
-        if (g_weapons[g_curWeapon].spinUp)               // minigun: spin the barrel mesh, hands held static (+ B-tuned arms nudge)
-            DrawGunSpinMesh(g_gun, vpos, g_vmScale, MG_BARREL_MESH, g_mgBarrelAngle,
-                            g_weapons[g_curWeapon].gunMask, g_weapons[g_curWeapon].pinOff);
-        else if (g_weapons[g_curWeapon].pinGun){          // grenade launcher: ride the static gun on the animated hand
-            Weapon *w=&g_weapons[g_curWeapon];
+        g_gun.transform=M;            // the whole rig transform; draws below pass pos 0 / scale 1
+        Vector3 o={0,0,0};
+        if (w->spinUp)                // minigun: spin the barrel mesh, hands held static (+ B-tuned arms nudge)
+            DrawGunSpinMesh(g_gun, o, 1.0f, MG_BARREL_MESH, g_mgBarrelAngle, w->gunMask, w->pinOff);
+        else if (w->pinGun){          // grenade launcher: ride the static gun on the animated hand
             ModelAnimation *an=(g_gunAnimN>0 && g_curAnim<g_gunAnimN)?&g_gunAnim[g_curAnim]:NULL;
-            DrawPinnedGun(g_gun, an, g_animT, vpos, g_vmScale, w->handBone, w->gunBindC, w->pinAlign, w->pinSeat, w->gunMask, w->pinAuthored,
+            DrawPinnedGun(g_gun, an, g_animT, o, 1.0f, w->handBone, w->gunBindC, w->pinAlign, w->pinSeat, w->gunMask, w->pinAuthored,
                           w->pinOff, w->pinScale, w->pinYaw, w->pinPitch, w->pinRoll);
-        } else   // everything else: same per-mesh draw with the arms nudge (spinMesh=-1 -> nothing spins; zero offset = plain draw)
-            DrawGunSpinMesh(g_gun, vpos, g_vmScale, -1, 0.0f,
-                            g_weapons[g_curWeapon].gunMask, g_weapons[g_curWeapon].pinOff);
+        } else                        // everything else: per-mesh draw with the arms nudge
+            DrawGunSpinMesh(g_gun, o, 1.0f, -1, 0.0f, w->gunMask, w->pinOff);
     EndMode3D();
     g_gun.transform=MatrixIdentity();
 }
@@ -2493,7 +2868,7 @@ static void DrawHUD(void) {
                 if (g_tuneTarget==2) TextSh(TextFormat("   right-hand off %.3f %.3f %.3f", w->armsROff.x,w->armsROff.y,w->armsROff.z), 18,452,18,(Color){200,220,255,255});
             }
             TextSh("0 reset      ENTER save  (or F5)",18,474,19,(Color){170,255,170,255});
-            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].tunePath),18,498,20,(Color){90,255,90,255});
+            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].trimPath),18,498,20,(Color){90,255,90,255});
         }
         DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
                  g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
@@ -2614,6 +2989,12 @@ static void Frame(void) {
     if (g_debug && (frameNo%30==0))
         DebugLog("frame","\"n\":%d,\"fps\":%d,\"anim\":%d,\"pos\":[%.1f,%.1f,%.1f]",
                  frameNo,GetFPS(),g_curAnim,g_pos.x,g_pos.y,g_pos.z);
+    if (g_shotEvery>0 && frameNo>0 && frameNo%g_shotEvery==0){
+        const char *fn=TextFormat("build/shots/f%04d.png", frameNo);
+        TakeScreenshot(fn);
+        DebugLog("shotseq","\"file\":\"%s\",\"anim\":%d,\"animName\":\"%s\",\"animT\":%.1f,\"reloading\":%d", fn, g_curAnim,
+                 (g_gunAnimN>0&&g_curAnim<g_gunAnimN)?g_gunAnim[g_curAnim].name:"", g_animT, g_reloading);
+    }
     if (g_shotFrame>0 && frameNo==g_shotFrame){
         TakeScreenshot("chernobyl2-shot.png");
         DebugLog("shot","\"file\":\"chernobyl2-shot.png\",\"frame\":%d", frameNo);
@@ -2862,6 +3243,9 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i],"--debug")) g_debug=1;
         else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--seed") && i+1<argc){ seedArg=(unsigned int)strtoul(argv[++i],NULL,10); seedSet=1; }
+        else if (!strcmp(argv[i],"--autofire")) g_autoFire=1;
+        else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
+        else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
         else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
         else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
         else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with walkers, no waves
@@ -2983,26 +3367,21 @@ int main(int argc, char **argv) {
     g_vmCam=(Camera3D){ (Vector3){0,0,0}, (Vector3){0,0,-1}, (Vector3){0,1,0}, 55.0f, CAMERA_PERSPECTIVE };  // g_cam is set per-map in StartSelectedMap
 
     g_posedBasis[0]=1;   // grenade launcher: animated rig -> frame from the posed idle, not the bind pose
-    LoadWeapon(0, "assets/grenadelauncher.glb", "../assets/grenadelauncher.glb", "Grenade Launcher", "vm_tune_grenade.txt",
-               (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);   // auto-framed; tune live with N
+    LoadWeapon(0, "assets/grenadelauncher.glb", "../assets/grenadelauncher.glb", "Grenade Launcher", "vm_tune_grenade.txt", VM_RIFLE);
     g_posedBasis[1]=1;   // remington: animated FPS rig
-    LoadWeapon(1, "assets/remington.glb", "../assets/remington.glb", "Remington", "vm_tune_remington.txt",
-               (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);   // auto-framed; tune live with N
-    LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt",
-               (Vector3){ 0.098f, -0.143f, -0.637f }, 0.96758f, 184.1f, -6.1f, 0.0f);  // dialed in
-    LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt",
-               (Vector3){ -2.45f, -5.55f, 1.68f }, -1.0f, 180.0f, 0.0f, 0.0f);
-    LoadWeapon(4, "assets/ak74.glb", "../assets/ak74.glb", "AK-74M", "vm_tune_ak.txt",
-               (Vector3){ 0.200f, -0.218f, -0.642f }, 0.290106f, -176.0f, 88.1f, 0.0f);  // dialed in
+    LoadWeapon(1, "assets/remington.glb", "../assets/remington.glb", "Remington", "vm_tune_remington.txt", VM_RIFLE);
+    LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt", VM_HEAVY);
+    LoadWeapon(3, "assets/lmg.glb", "../assets/lmg.glb", "LMG", "vm_tune_lmg.txt", VM_HEAVY);
+    LoadWeapon(4, "assets/ak74.glb", "../assets/ak74.glb", "AK-74M", "vm_tune_ak.txt", VM_RIFLE);
     // new weapons (auto-framed; tune each live with N, ENTER saves). MP5 + Benelli
     // are clean rigs that animate fire+reload; the flamethrower/knife are model-only
     // for now (they hitscan -- no flame/melee mechanic yet).
-    g_posedBasis[5]=1;   // MP5's bind pose is ~44k units off-origin; frame from the posed idle pose
-    LoadWeapon(5, "assets/mp5.glb",          "../assets/mp5.glb",          "MP5",          "vm_tune_mp5.txt",     (Vector3){0.33f,-0.49f,-1.04f}, 0.000026f, 106.0f, -90.0f, 0.0f);
-    LoadWeapon(6, "assets/benelli.glb",      "../assets/benelli.glb",      "Benelli M4",   "vm_tune_benelli.txt", (Vector3){0.30f,-0.40f,-1.08f}, 0.000021f, 104.0f, 90.0f, 0.0f);
-    LoadWeapon(7, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt",   (Vector3){0.05045f,-0.37347f,-0.43725f}, 0.021775f, -330.04f, 52.32f, 134.41f);
-    LoadWeapon(8, "assets/knife.glb",        "../assets/knife.glb",        "Knife",        "vm_tune_knife.txt",   (Vector3){0,0,0}, -1.0f, 0.0f, 0.0f, 0.0f);
-    g_numWeapons=9;
+    // (Benelli M4 cut 2026-11-02: its rig ships no visible hands. assets/benelli.glb kept as a spare.)
+    // (MP5 + knife cut 2026-11-02: their arm rigs are broken at source -- the MP5's arms
+    // never reach the gun in any clip, the knife is IK-driven, which raylib can't
+    // evaluate. assets/mp5.glb + knife.glb kept as spares.)
+    LoadWeapon(5, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt", VM_HEAVY);
+    g_numWeapons=6;
     ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // boot on slot 0 / grenade launcher (or --weapon N for tuning)
     if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
 
@@ -3013,8 +3392,6 @@ int main(int argc, char **argv) {
     LoadWeaponSound(2, "assets/minigun_fire.mp3", "../assets/minigun_fire.mp3", 1);  // minigun
     LoadWeaponSound(3, "assets/lmg_fire.mp3",     "../assets/lmg_fire.mp3",     1);  // LMG (biggun)
     LoadWeaponSound(4, "assets/ak74_fire_single.mp3", "../assets/ak74_fire_single.mp3", 0);  // AK-74M: one clean shot per bullet (first crack trimmed out of the burst clip)
-    LoadWeaponSound(5, "assets/rifle_fire.mp3",   "../assets/rifle_fire.mp3",   1);  // MP5: reuse the MG loop
-    LoadWeaponSound(6, "assets/shotgun_fire.mp3", "../assets/shotgun_fire.mp3", 0);  // Benelli M4: one-shot per shot
     LoadWeaponAux(2, "assets/minigun_cooldown.mp3", "../assets/minigun_cooldown.mp3"); // minigun spin-down
     if (g_weapons[2].hasAuxSnd) SetSoundVolume(g_weapons[2].auxSnd, 0.4f);  // spin-down was too loud/abrupt -> soften it
     g_weapons[0].grenade=1;      // grenade launcher: lobs an arcing grenade, explodes on impact
@@ -3024,39 +3401,43 @@ int main(int argc, char **argv) {
     g_weapons[2].spinUp=1;       // minigun: 5s fire cap -> cooldown sound + lockout
     g_weapons[3].soundGated=1;   // LMG:     fire while the sound plays, then a 0.75s pause
     g_weapons[4].playShoot=1;    // AK-74M:  plays its Shot clip on fire; R plays AK_Reload
-    g_weapons[5].playShoot=1;    // MP5:     plays its Shoot clip on fire; R plays Reload
-    g_weapons[6].playShoot=1;    // Benelli: plays its Fire clip on fire; R plays Reload
-    g_weapons[7].flame=1;        // Flamethrower: continuous fire cone while held
-    g_weapons[8].melee=1;        // Knife:        wide melee slash per click
-    LoadWeaponSound(7, "assets/flame_fire.mp3", "../assets/flame_fire.mp3", 1);  // flamethrower: looped roar (silent if asset absent)
-    LoadWeaponSound(8, "assets/knife_swing.wav","../assets/knife_swing.wav", 0); // knife: one-shot swing (synthesized whoosh)
+    g_weapons[5].flame=1;        // Flamethrower: continuous fire cone while held
+    LoadWeaponSound(5, "assets/flame_fire.mp3", "../assets/flame_fire.mp3", 1);  // flamethrower: looped roar (silent if asset absent)
 
     // M1 combat identity: damage / pellets / spread(deg) / kick(deg) / mag / reserve
     // per slot. dmg 0 keeps the legacy ENEMY_DMG_PER_SHOT; magSize 0 = no ammo.
     {
-        static const struct { float dmg; int pel; float spr, kick; int mag, res; } S[9]={
+        static const struct { float dmg; int pel; float spr, kick; int mag, res; } S[6]={
             {  0.0f, 0, 0.0f, 2.5f,    6,  18 },   // 0 grenade launcher (GREN_DMG on the blast)
             { 13.0f, 8, 3.5f, 3.2f,    5,  25 },   // 1 remington: a pellet wall, brutal up close
             {  7.0f, 0, 2.2f, 0.25f, 300, 300 },   // 2 minigun: belt-fed hose, wide
             { 14.0f, 0, 1.6f, 0.8f,   80, 160 },   // 3 LMG: chunky gated bursts
             { 34.0f, 0, 0.7f, 1.1f,   30, 120 },   // 4 AK-74M: 3-tap body, 1-tap head
-            { 13.0f, 0, 1.4f, 0.5f,   30, 150 },   // 5 MP5: fast spray, soft per-round
-            { 12.0f, 7, 5.0f, 2.6f,    7,  28 },   // 6 benelli: wider cone, faster follow-up
-            {  0.0f, 0, 0.0f, 0.0f,  100, 100 },   // 7 flamethrower: fuel units (FLAME_DPS while lit)
-            {  0.0f, 0, 0.0f, 0.0f,    0,   0 },   // 8 knife: no ammo
+            {  0.0f, 0, 0.0f, 0.0f,  100, 100 },   // 5 flamethrower: fuel units (FLAME_DPS while lit)
         };
-        for (int i=0;i<9;i++){ Weapon *w=&g_weapons[i];
+        for (int i=0;i<6;i++){ Weapon *w=&g_weapons[i];
             w->dmg=S[i].dmg; w->pellets=S[i].pel; w->spread=S[i].spr; w->recoilKick=S[i].kick;
             w->magSize=S[i].mag; w->reserveStart=S[i].res; w->mag=S[i].mag; w->reserve=S[i].res; }
     }
     g_weapons[2].fireCd=0.06f;   // minigun: ~17 rounds/s once spun up
-    g_weapons[5].fireCd=0.09f;   // MP5: fast, but not minigun-fast
-    g_weapons[6].fireCd=0.45f;   // benelli: semi-auto follow-up, quicker than the pump
     g_weapons[4].burst=3;        // AK-74M: one 3-round burst per trigger pull
-    g_weapons[1].autoReload=1; g_weapons[6].autoReload=1;   // shotguns: cock between shots
-    g_weapons[6].shellReload=1;  // benelli: its ReloadOne clip inserts a single shell -> loop per shell
+    g_weapons[1].autoReload=1;   // remington: cock between shots
     LoadWeaponAux(1, "assets/shotgun_cock.mp3", "../assets/shotgun_cock.mp3");
-    LoadWeaponAux(6, "assets/shotgun_cock.mp3", "../assets/shotgun_cock.mp3");
+    // Auto viewmodel frames: measured after the per-slot flags (pinGun/grenade/spinUp
+    // pick the rest pose + the pinned-gun path), so every gun is framed as drawn.
+    // Per-weapon default trims (code-owned; a saved vm_trim_*.txt still wins).
+    { struct { int slot; Vector3 off; float scale; } D[]={
+        { 3, {0.0f, 0.03f, 0.25f}, 1.0f },     // LMG: pulled in from the heavy class slot so it fills the frame
+      };
+      for (unsigned i=0;i<sizeof D/sizeof D[0];i++){ Weapon *w=&g_weapons[D[i].slot];
+          int saved=FileExists(w->trimPath);
+          w->off0=D[i].off; w->scale0=D[i].scale;
+          if (!saved){ w->off=w->off0; w->scale=w->scale0; } } }
+    for (int c=0;c<VM_NCLASS;c++){ char ev[16]; snprintf(ev,sizeof ev,"VMCLASS%d",c); const char *e=getenv(ev);
+        if (e) sscanf(e,"%f %f %f %f %f",&kVmClass[c].len,&kVmClass[c].pos.x,&kVmClass[c].pos.y,&kVmClass[c].pos.z,&kVmClass[c].conv); }
+    for (int i=0;i<g_numWeapons;i++) ComputeVmFrame(&g_weapons[i], i);
+    ActivateWeapon(g_curWeapon);   // re-pose the live gun (measuring posed every rig)
+    if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
@@ -3127,7 +3508,12 @@ int main(int argc, char **argv) {
 #endif
 
     StashActiveTuning();
-    for (int i=0;i<g_numWeapons;i++) SaveTune(g_weapons[i].tunePath,g_weapons[i].off,g_weapons[i].scale,g_weapons[i].yaw,g_weapons[i].pitch,g_weapons[i].roll,g_weapons[i].idleHold);
+    // Persist trims -- but never a --vm dev override (it would silently become the
+    // weapon's saved framing), and only once a trim is non-neutral or already saved,
+    // so untouched guns keep following the auto frame + class table.
+    if (!vmHas) for (int i=0;i<g_numWeapons;i++){ Weapon *w=&g_weapons[i];
+        int neutral = w->off.x==w->off0.x && w->off.y==w->off0.y && w->off.z==w->off0.z && w->scale==w->scale0 && w->yaw==w->yaw0 && w->pitch==w->pitch0 && w->roll==w->roll0;
+        if (!neutral || FileExists(w->trimPath)) SaveTune(w->trimPath,w->off,w->scale,w->yaw,w->pitch,w->roll,w->idleHold); }
     LogPerfStats();                        // frame-time stats for the perf gate
     DebugLog("shutdown","\"ok\":true");
     for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].has){
