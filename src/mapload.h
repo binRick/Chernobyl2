@@ -367,7 +367,9 @@ static void MapColBuild(float *tri, int ntri){
 }
 
 // Nearest triangle hit along ray (o,d) within R; returns distance or -1.
-static float MapRayNearest(Vector3 o, Vector3 d, float R){
+// The Ex variant additionally reports the hit triangle's surface normal (flipped
+// to face back along the ray) and its index, so decals sit on the real surface.
+static float MapRayNearestEx(Vector3 o, Vector3 d, float R, Vector3 *outN, int *outTri){
     if (!g_mapCol.ready) return -1.0f; AOGrid *g=&g_mapCol.grid; const float *tri=g_mapCol.tri;
     static int *st=NULL; static int cap=0, rid=0; if (cap<g_mapCol.ntri){ free(st); cap=g_mapCol.ntri; st=(int*)calloc(cap,sizeof(int)); }
     rid++;
@@ -378,19 +380,30 @@ static float MapRayNearest(Vector3 o, Vector3 d, float R){
     if(fabsf(d.x)<1e-9f){tMaxX=1e30f;tDX=1e30f;}else{float nb=(sx>0?cx+1:cx)*g->cs;tMaxX=(nb-ox)/d.x;tDX=g->cs/fabsf(d.x);}
     if(fabsf(d.y)<1e-9f){tMaxY=1e30f;tDY=1e30f;}else{float nb=(sy>0?cy+1:cy)*g->cs;tMaxY=(nb-oy)/d.y;tDY=g->cs/fabsf(d.y);}
     if(fabsf(d.z)<1e-9f){tMaxZ=1e30f;tDZ=1e30f;}else{float nb=(sz>0?cz+1:cz)*g->cs;tMaxZ=(nb-oz)/d.z;tDZ=g->cs/fabsf(d.z);}
-    float t=0.0f, best=-1.0f;
+    float t=0.0f, best=-1.0f; int bestTi=-1;
     while (t<=R){
         int cell=MapCellIdx(g,cx,cy,cz);
         for (int e=g->start[cell]; e<g->start[cell+1]; e++){ int ti=g->items[e]; if(st[ti]==rid)continue; st[ti]=rid;
             Vector3 A={tri[ti*9],tri[ti*9+1],tri[ti*9+2]},B={tri[ti*9+3],tri[ti*9+4],tri[ti*9+5]},C={tri[ti*9+6],tri[ti*9+7],tri[ti*9+8]};
-            float h=MapRayTri(o,d,A,B,C); if (h>0.001f && h<R && (best<0||h<best)) best=h; }
+            float h=MapRayTri(o,d,A,B,C); if (h>0.001f && h<R && (best<0||h<best)){ best=h; bestTi=ti; } }
         if (best>=0 && best<=t) break;                    // nothing nearer can appear in later cells
         if (tMaxX<tMaxY && tMaxX<tMaxZ){ cx+=sx; t=tMaxX; tMaxX+=tDX; if(cx<0||cx>=g->nx)break; }
         else if (tMaxY<tMaxZ){ cy+=sy; t=tMaxY; tMaxY+=tDY; if(cy<0||cy>=g->ny)break; }
         else { cz+=sz; t=tMaxZ; tMaxZ+=tDZ; if(cz<0||cz>=g->nz)break; }
     }
+    if (best>=0.0f && bestTi>=0){
+        if (outTri) *outTri=bestTi;
+        if (outN){
+            Vector3 A={tri[bestTi*9],tri[bestTi*9+1],tri[bestTi*9+2]},B={tri[bestTi*9+3],tri[bestTi*9+4],tri[bestTi*9+5]},C={tri[bestTi*9+6],tri[bestTi*9+7],tri[bestTi*9+8]};
+            Vector3 n=Vector3CrossProduct(Vector3Subtract(B,A),Vector3Subtract(C,A));
+            float L=Vector3Length(n);
+            *outN = (L>1e-9f) ? Vector3Scale(n,1.0f/L) : Vector3Scale(d,-1.0f);
+            if (Vector3DotProduct(*outN,d)>0.0f) *outN=Vector3Scale(*outN,-1.0f);   // face the shooter
+        }
+    }
     return best;
 }
+static float MapRayNearest(Vector3 o, Vector3 d, float R){ return MapRayNearestEx(o,d,R,NULL,NULL); }
 
 static Vector3 MapClosestPtTri(Vector3 p, Vector3 a, Vector3 b, Vector3 c){
     Vector3 ab=Vector3Subtract(b,a), ac=Vector3Subtract(c,a), ap=Vector3Subtract(p,a);

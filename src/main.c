@@ -219,6 +219,17 @@ typedef struct {
     float           fireCd;                      // per-shot cooldown override (0 -> default)
     Sound           auxSnd;                      // secondary sound: minigun spin-down, shotgun cock-between-shots
     int             hasAuxSnd;
+    // -- combat identity (M1). Live ammo lives HERE in the slot and is only ever
+    // read through g_weapons[g_curWeapon] -- never mirrored into the working-set
+    // globals -- so the ActivateWeapon/StashActiveTuning swap can't corrupt it.
+    float           dmg;                         // damage per bullet/pellet (0 -> legacy ENEMY_DMG_PER_SHOT)
+    int             pellets;                     // >1: pellet volley per shot (shotguns)
+    float           spread;                      // aim cone half-angle per pellet, degrees
+    float           recoilKick;                  // camera pitch kick per shot, degrees
+    int             shellReload;                 // 1: reload clip inserts ONE shell -> loop it until full (benelli)
+    int             magSize;                     // rounds per mag / fuel units per tank (0 = no ammo: knife)
+    int             reserveStart;                // reserve a fresh run starts with
+    int             mag, reserve;                // live counts
 } Weapon;
 static Weapon g_weapons[16];
 static int    g_curWeapon = 0;
@@ -228,6 +239,11 @@ static Sound  g_deathSnd[8];                      // one is played at random on 
 static int    g_nDeathSnd = 0;
 static Sound  g_attackSnd;                         // played when an enemy lunges into an attack
 static int    g_hasAttackSnd = 0;
+static Sound  g_grenSnd;  static int g_hasGrenSnd  = 0;   // grenade explosion
+static Sound  g_hurtSnd;  static int g_hasHurtSnd  = 0;   // player took a real hit
+static Sound  g_heartSnd; static int g_hasHeartSnd = 0;   // low-health heartbeat (re-triggered while low)
+static Sound  g_waveSnd;  static int g_hasWaveSnd  = 0;   // wave-start sting
+static Sound  g_clearSnd; static int g_hasClearSnd = 0;   // wave-clear sting
 
 static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll, int idleHold){
     FILE *f=fopen(path,"w"); if(!f) return;
@@ -792,7 +808,7 @@ static void DrawScorch(void){
 // so they don't march in lockstep. Mixamo export is cm-scale (~185u tall) with
 // feet at the origin facing +Z, so ENEMY_SCALE shrinks to ~1.85m and we yaw
 // each to face the player. ENEMY_YAW_OFFSET flips facing if they moonwalk.
-#define MAX_ENEMIES        12
+#define MAX_ENEMIES        24     // hard cap (M2 perf-gated); the wave director's alive-cap stays below it
 #define ENEMY_SCALE        1.0000f      // FBX2glTF export is already upright meter-scale (~1.86m)
 #define ENEMY_SPEED        3.4f
 #define ENEMY_HP           100.0f
@@ -803,7 +819,10 @@ static void DrawScorch(void){
                                       // fits everywhere the nav graph routes it (no jamming in tight cells / on stairs)
 #define ENEMY_HEIGHT       1.85f
 #define ENEMY_YAW_OFFSET   0.0f       // tune if they face the wrong way
-#define ENEMY_TOUCH_DMG    18.0f      // player hp/sec when an enemy is in melee
+#define ENEMY_TOUCH_DMG    18.0f      // player hp/sec in melee -- LEGACY untimed drain, kept for A/B via --melee-drain
+#define ENEMY_MELEE_DMG    16.0f      // hp per landed swing (timed attack window -- the default)
+#define ATK_STRIKE_FRAC    0.45f      // fraction through the attack clip where the swing lands (the dodge window is everything before it)
+#define ATK_COOLDOWN       1.2f       // min seconds between swings that can hurt
 #define ENEMY_ATTACK_RANGE  1.8f       // enters attack/melee within this range
 // Headshot zone: a narrower box at the TOP of the enemy silhouette. A shot
 // whose aim ray pierces it deals HEADSHOT_MULT x damage. Sized for the Mixamo
@@ -823,11 +842,22 @@ static void DrawScorch(void){
 #define KNIFE_COS          0.55f      // cos half-angle (~57deg): a wide slash, forgiving to aim
 #define KNIFE_DMG          75.0f      // per swing; two slashes (or a clean one on a softened enemy) kills
 #define KNIFE_CD           0.42f      // seconds between swings (the slash cadence)
+#define FLAME_FUEL_PER_SEC 9.0f       // fuel units burned per second while the stream is lit (tank = magSize)
 #define MAX_BURN 8       // localised flame-char marks per body (height up the body + how dark/wide that spot is)
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
+// Wave enemy types (M2): tint+scale variants of the one Mixamo rig. cost = wave-
+// budget points. The NAV/collision radii (NAV_WALLR/ENEMY_MOVE_R) stay IDENTICAL
+// for every type -- that tuning is fragile and afterslime-calibrated -- only the
+// drawn model and the hitscan hitbox scale per type.
+typedef enum { EN_WALKER=0, EN_RUNNER=1, EN_BRUTE=2, EN_NTYPES } EnemyKind;
+static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; const char *name; } kEnemy[EN_NTYPES]={
+    { 2, 100.0f, 3.4f,  16.0f, 1.00f, {255,255,255,255}, "walker" },   // the horde baseline
+    { 3,  60.0f, 6.2f,  12.0f, 0.92f, {255,110,100,255}, "runner" },   // outruns a backpedal -- kiting dies
+    { 6, 250.0f, 2.55f, 28.0f, 1.25f, {165,205,150,255}, "brute"  },   // slow wall of meat, hits like a truck
+};
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
-typedef struct { Vector3 pos; float yaw; int active; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
+typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
 static Corpse          g_corpses[MAX_CORPSES];
 static int             g_corpseNext = 0;
 static Model           g_enemy;
@@ -841,7 +871,19 @@ static int             g_kills = 0;
 static int             g_headshots = 0;        // running headshot-kill tally (HUD)
 static float           g_hsFlash = 0.0f;       // >0: flash "HEADSHOT!" near the crosshair
 static float           g_playerHp = 100.0f;
-static int             g_godMode = 1;           // dev stage: invulnerable (no death, no "YOU DIED"). G toggles.
+static int             g_godMode = 0;           // invulnerable cheat; G toggles (tags the run as cheated)
+static int             g_cheatUsed = 0;         // god mode was enabled this run -> the results get tagged
+static int             g_meleeDrain = 0;        // --melee-drain: legacy untimed contact damage, kept for A/B
+static int             g_cycleTest = 0;         // --cycle: soak walks all 9 weapon slots twice, logging ammo state
+static float           g_flameFuel = 0.0f;      // flamethrower: fractional fuel-unit accumulator (whole units leave the mag)
+// ---- Wave director (M2) -----------------------------------------------------
+static int             g_wave         = 0;      // current wave, 1-based (0 = run not started yet)
+static int             g_waveBudget   = 0;      // spawn points left to spend this wave
+static float           g_waveBreather = 0.0f;   // >0: pause between waves, counting down
+static float           g_spawnTick    = 0.0f;   // trickle-spawn timer
+static int             g_aliveCap     = 0;      // max simultaneous enemies this wave
+static float           g_runT         = 0.0f;   // run clock (results screen)
+static int             g_stress       = 0;      // --stress: keep the field at MAX_ENEMIES walkers, no waves (perf gate)
 static int             g_dead = 0;              // player death state: world frozen, waiting on a respawn input
 static float           g_deadT = 0.0f;          // seconds since death (brief delay before respawn is allowed)
 static float           g_hurt = 0.0f;           // 0..1 red damage flash, spikes on hp loss then decays
@@ -851,11 +893,11 @@ static Vector3         g_spawnResetPos = {0,0,0};  // where to drop the player b
 static float           g_voidY = -1e9f;            // below this Y the player has fallen out of the world
 static int             g_returnToMenu = 0;         // ESC menu "Select Map" -> break the game loop back to the picker
 
-static void EnemyArm(int i, Vector3 pos){       // common: bring enemy i to life at pos
-    g_enemies[i].pos=pos; g_enemies[i].hp=ENEMY_HP; g_enemies[i].state=1;
+static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i to life at pos
+    g_enemies[i].pos=pos; g_enemies[i].hp=kEnemy[type].hp; g_enemies[i].type=type; g_enemies[i].state=1;
     g_enemies[i].animT=(float)GetRandomValue(0,40); g_enemies[i].deathT=0;
     g_enemies[i].hitT=0; g_enemies[i].clip=g_eRun; g_enemies[i].roarT=0; g_enemies[i].drawY=pos.y;
-    g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f; g_enemies[i].burnN=0;
+    g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f; g_enemies[i].atkCd=0.0f; g_enemies[i].burnN=0;
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
@@ -867,22 +909,25 @@ static int EnemySpawnOK(float x, float fy, float z){
         && !MapSphereHitsWall((Vector3){x,fy+0.9f,z},ENEMY_MOVE_R);   // body fits (same radius it moves with)
 }
 // Map spawn: a ring around the player, dropped onto the floor under each spot.
-// Biased toward where the player is FACING so enemies appear in front, not behind.
-static void SpawnEnemyMap(int i){
+// Biased toward where the player is FACING so enemies appear in front -- unless
+// `behind` is set, which inverts the bias so a slice of every wave flanks (the
+// anti-kiting rule: backpedalling is never a safe direction).
+static void SpawnEnemyMap(int i, int type, int behind){
     float ahead = 1.5708f - g_yaw;                       // player's look direction in the ring's angle space
+    if (behind) ahead += 3.14159f;                       // flank: spawn arc centred BEHIND the player
     for (int t=0;t<40;t++){
-        float ang = ahead + GetRandomValue(-115,115)/100.0f; // within ~±66 deg of straight ahead
+        float ang = ahead + GetRandomValue(-115,115)/100.0f; // within ~±66 deg of the arc centre
         float dist=6.0f+GetRandomValue(0,90)/10.0f;          // 6..15 units out
         float x=g_pos.x+cosf(ang)*dist, z=g_pos.z+sinf(ang)*dist;
         float top=g_pos.y+8.0f;
         float fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
-        if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z}); return; } }
+        if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z},type); return; } }
     }
     // ring failed: scan outward from the player for any reachable, roomy cell.
     for (int rad=2; rad<14; rad++) for (int a=0;a<16;a++){
         float ang=a*0.3927f, x=g_pos.x+cosf(ang)*rad, z=g_pos.z+sinf(ang)*rad;
         float top=g_pos.y+8.0f, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
-        if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z}); return; } }
+        if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z},type); return; } }
     }
     // nothing valid near the player (e.g. player is off the nav mesh in a tight nook):
     // drop the enemy on a RANDOM walkable nav cell -- a guaranteed collision-free,
@@ -892,19 +937,73 @@ static void SpawnEnemyMap(int i){
             int cx=GetRandomValue(0,g_navNX-1), cz=GetRandomValue(0,g_navNZ-1), ci=cz*g_navNX+cx;
             if (g_navNL[ci]>0){
                 int l=GetRandomValue(0,g_navNL[ci]-1);   // any storey in this column is a valid, navigable spot
-                EnemyArm(i,(Vector3){ g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[ci*NAV_MAXL+l], g_navMn.z+(cz+0.5f)*g_navCS });
+                EnemyArm(i,(Vector3){ g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[ci*NAV_MAXL+l], g_navMn.z+(cz+0.5f)*g_navCS },type);
                 return;
             }
         }
     }
-    EnemyArm(i,(Vector3){g_pos.x, g_pos.y-EYE_H, g_pos.z});        // absolute fallback: the player's own (occupied) spot
+    EnemyArm(i,(Vector3){g_pos.x, g_pos.y-EYE_H, g_pos.z},type);   // absolute fallback: the player's own (occupied) spot
 }
-static void SpawnEnemy(int i){
-    if (g_hasMap && g_mapCol.ready){ SpawnEnemyMap(i); return; }
+static void SpawnEnemyT(int i, int type, int behind){
+    if (g_hasMap && g_mapCol.ready){ SpawnEnemyMap(i,type,behind); return; }
     // arena: a random spot near a wall, away from the player
     float ang=(float)GetRandomValue(0,628)/100.0f;
     float dist=ARENA*0.6f + GetRandomValue(0,(int)(ARENA*0.3f));
-    EnemyArm(i,(Vector3){ cosf(ang)*dist, 0, sinf(ang)*dist });
+    EnemyArm(i,(Vector3){ cosf(ang)*dist, 0, sinf(ang)*dist },type);
+}
+
+// ---- Wave director (M2): budgeted, trickled, cleared, breathered ------------
+static int WaveBudgetFor(int w){ return 8 + w*5; }                 // ~5 walkers wave 1 -> a 30+ point mix by wave 5
+static int WaveAliveCapFor(int w){ int c=7+w; return c>16?16:c; }  // trickle cap, well under MAX_ENEMIES
+static void StartWave(int w){
+    g_wave=w; g_waveBudget=WaveBudgetFor(w); g_aliveCap=WaveAliveCapFor(w);
+    g_spawnTick=0.0f; g_waveBreather=0.0f;
+    if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
+    DebugLog("wave","\"start\":%d,\"budget\":%d,\"cap\":%d", w, g_waveBudget, g_aliveCap);
+}
+// What to spend budget on: brutes from wave 4, runners from wave 2, both weighted
+// heavier as waves rise; falls back to a walker when the budget can't afford it.
+static int WavePickType(void){
+    int r=GetRandomValue(0,99), t=EN_WALKER;
+    if      (g_wave>=4 && r<12+g_wave*2) t=EN_BRUTE;
+    else if (g_wave>=2 && r<40+g_wave*3) t=EN_RUNNER;
+    if (kEnemy[t].cost>g_waveBudget) t=EN_WALKER;
+    if (kEnemy[t].cost>g_waveBudget) return -1;        // can't even afford a walker -> budget is spent
+    return t;
+}
+static void UpdateWaves(float dt){
+    if (!g_hasEnemy || g_noEnemies) return;
+    int alive=0; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state!=0) alive++;  // dying bodies still hold the field
+    if (g_stress){                                     // perf gate: saturate the field, no wave logic
+        for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0) SpawnEnemyT(i,EN_WALKER,i&1);
+        return;
+    }
+    if (g_waveBreather>0.0f){
+        g_waveBreather-=dt;
+        if (g_waveBreather<=0.0f) StartWave(g_wave+1);
+        return;
+    }
+    if (g_wave==0){ g_waveBreather=3.0f; return; }     // run just started: a 3 s grace, then wave 1
+    if (g_waveBudget>0){
+        g_spawnTick-=dt;
+        if (alive<g_aliveCap && g_spawnTick<=0.0f){
+            int t=WavePickType();
+            if (t<0){ g_waveBudget=0; return; }
+            int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
+            if (slot>=0){
+                int behind = GetRandomValue(0,99)<35;  // flank bias: ~a third of every wave comes from behind
+                SpawnEnemyT(slot,t,behind);
+                g_waveBudget-=kEnemy[t].cost;
+                float tick=0.9f-g_wave*0.045f; if (tick<0.45f) tick=0.45f;   // trickle speeds up with the waves
+                g_spawnTick=tick;
+                DebugLog("spawn","\"wave\":%d,\"type\":\"%s\",\"behind\":%d,\"budget\":%d", g_wave, kEnemy[t].name, behind, g_waveBudget);
+            }
+        }
+    } else if (alive==0){                              // budget spent + field clear -> breather, then next wave
+        g_waveBreather=6.0f;
+        if (g_audio && g_hasClearSnd) PlaySound(g_clearSnd);
+        DebugLog("wave","\"clear\":%d,\"kills\":%d", g_wave, g_kills);
+    }
 }
 
 static Texture2D MakeChecker(int sz, Color a, Color b, int cells) {
@@ -997,16 +1096,18 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
     for (int i=0;i<MAX_ENEMIES;i++){
         if (g_enemies[i].state!=1) continue;
         Vector3 c=g_enemies[i].pos;          // c.y = the enemy's floor (0 in the arena, map height on a map)
-        BoundingBox bb={ (Vector3){c.x-ENEMY_RADIUS, c.y, c.z-ENEMY_RADIUS},
-                         (Vector3){c.x+ENEMY_RADIUS, c.y+ENEMY_HEIGHT, c.z+ENEMY_RADIUS} };
+        float sc=kEnemy[g_enemies[i].type].scale;                    // hitbox tracks the drawn size (brute bigger, runner leaner)
+        float er=ENEMY_RADIUS*sc, eh=ENEMY_HEIGHT*sc;
+        BoundingBox bb={ (Vector3){c.x-er, c.y, c.z-er},
+                         (Vector3){c.x+er, c.y+eh, c.z+er} };
         RayCollision rc=GetRayCollisionBox((Ray){ro,rd},bb);
         if (rc.hit && rc.distance>0 && rc.distance<bd){
             bd=rc.distance; best=i; *outDist=rc.distance; *outPt=rc.point;
             // The head box lives inside the body box's vertical span, so the
             // nearest-enemy pick above is unaffected; we just additionally ask
             // whether this same ray clips the (narrower) head of that enemy.
-            BoundingBox hb={ (Vector3){c.x-HEAD_RADIUS, c.y+ENEMY_HEIGHT-HEAD_ZONE_H, c.z-HEAD_RADIUS},
-                             (Vector3){c.x+HEAD_RADIUS, c.y+ENEMY_HEIGHT,             c.z+HEAD_RADIUS} };
+            BoundingBox hb={ (Vector3){c.x-HEAD_RADIUS*sc, c.y+eh-HEAD_ZONE_H*sc, c.z-HEAD_RADIUS*sc},
+                             (Vector3){c.x+HEAD_RADIUS*sc, c.y+eh,                c.z+HEAD_RADIUS*sc} };
             RayCollision hrc=GetRayCollisionBox((Ray){ro,rd},hb);
             if (outHead) *outHead = (hrc.hit && hrc.distance>0);
         }
@@ -1071,6 +1172,7 @@ static void GrenadeExplode(Vector3 p){
     SpawnImpact(p,(Vector3){0,1,0});                        // bright spark glints
     AddScorch(p,(Vector3){0,1,0}, 1.3f);                   // soot on the ground
     g_shake=fminf(1.0f, g_shake+0.7f);                     // concussion
+    if (g_audio && g_hasGrenSnd) PlaySound(g_grenSnd);
     DebugLog("grenade","\"explode\":[%.1f,%.1f,%.1f]", p.x,p.y,p.z);
 }
 static void UpdateGrenades(float dt){
@@ -1090,36 +1192,71 @@ static void UpdateGrenades(float dt){
     }
 }
 
+static void TryReload(void);                       // fwd decl (defined with StartReload below)
+static int g_shotsFired=0, g_shotsHit=0;           // per-pellet accuracy tally (results screen, M2)
+// Random direction inside a cone of half-angle `deg` around d (uniform over the disc).
+static Vector3 SpreadDir(Vector3 d, float deg){
+    if (deg<=0.0f) return d;
+    Vector3 up = (fabsf(d.y)<0.99f) ? (Vector3){0,1,0} : (Vector3){1,0,0};
+    Vector3 r1=Vector3Normalize(Vector3CrossProduct(d,up));
+    Vector3 r2=Vector3CrossProduct(d,r1);
+    float ang=GetRandomValue(0,6283)/1000.0f;
+    float rad=tanf(DEG2RAD*deg)*sqrtf(GetRandomValue(0,1000)/1000.0f);
+    return Vector3Normalize(Vector3Add(d, Vector3Add(Vector3Scale(r1,cosf(ang)*rad), Vector3Scale(r2,sinf(ang)*rad))));
+}
 static void Fire(Camera3D cam) {
     if (g_fireCd>0) return;
     Weapon *cw=&g_weapons[g_curWeapon];
+    if (cw->magSize>0 && cw->mag<=0){ g_fireCd=0.35f; TryReload(); return; }   // trigger on empty -> reload
+    if (cw->magSize>0) cw->mag--;
     g_fireCd = (cw->fireCd>0.0f) ? cw->fireCd : 0.12f;   // per-weapon fire rate (slow shotguns etc.)
     // One-shot weapons (e.g. shotguns) sound their report here, per shot; auto
     // weapons loop in Update() instead.
     if (g_audio && cw->hasSnd && !cw->sndLoop) PlaySound(cw->fireSnd);
-    Vector3 dir=Vector3Normalize(Vector3Subtract(cam.target,cam.position));
-    Vector3 muzzle=Vector3Add(cam.position,Vector3Scale(dir,0.4f));
-    Vector3 hit,nrm,end=Vector3Add(cam.position,Vector3Scale(dir,80.0f));
-    float worldDist=80.0f;
-    int worldHit=RaycastWorld(cam.position,dir,&hit,&nrm);
-    if (worldHit){ end=hit; worldDist=Vector3Distance(cam.position,hit); }
-    // enemy hit takes priority if it's closer than the world geometry
-    float ed; Vector3 ep; int head=0;
-    int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep,&head);
-    if (ei>=0){
-        end=ep;                                           // gobs pool on the enemy's floor
-        HurtEnemy(ei, head ? ENEMY_DMG_PER_SHOT*HEADSHOT_MULT : ENEMY_DMG_PER_SHOT, head, dir, ep, 1);
-    } else if (worldHit){
-        SpawnImpact(hit,nrm);
+    Vector3 aim=Vector3Normalize(Vector3Subtract(cam.target,cam.position));
+    Vector3 muzzle=Vector3Add(cam.position,Vector3Scale(aim,0.4f));
+    float dmg=(cw->dmg>0.0f)?cw->dmg:ENEMY_DMG_PER_SHOT;
+    int pellets=(cw->pellets>1)?cw->pellets:1, hits=0, headAny=0;
+    Vector3 lastEnd=Vector3Add(cam.position,Vector3Scale(aim,80.0f));
+    g_shotsFired+=pellets;
+    for (int p=0;p<pellets;p++){
+        Vector3 dir=SpreadDir(aim, cw->spread);
+        // World stop: on a map, the brushes; otherwise the legacy arena planes/
+        // crates. Never both -- the invisible arena floor/walls/crates exist at
+        // boot regardless of map and would silently eat bullets mid-air.
+        Vector3 hit,nrm; float worldDist=80.0f; int worldHit=0;
+        if (g_hasMap && g_mapCol.ready){
+            Vector3 mn; float wd=MapRayNearestEx(cam.position,dir,80.0f,&mn,NULL);
+            if (wd>0.0f){ worldDist=wd; hit=Vector3Add(cam.position,Vector3Scale(dir,wd)); nrm=mn; worldHit=1; }
+        } else if (RaycastWorld(cam.position,dir,&hit,&nrm)){
+            worldDist=Vector3Distance(cam.position,hit); worldHit=1;
+        }
+        Vector3 end = worldHit ? hit : Vector3Add(cam.position,Vector3Scale(dir,80.0f));
+        // enemy hit takes priority if it's closer than the world geometry
+        float ed; Vector3 ep; int head=0;
+        int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep,&head);
+        if (ei>=0){
+            end=ep; hits++; g_shotsHit++; if (head) headAny=1;
+            HurtEnemy(ei, head ? dmg*HEADSHOT_MULT : dmg, head, dir, ep, 1);
+        } else if (worldHit){
+            SpawnImpact(hit,nrm);
+        }
+        lastEnd=end;
+        for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){muzzle,end,0.05f}; break; }
     }
-    for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){muzzle,end,0.05f}; break; }
     // Code-driven recoil instead of the Shoot clip (that clip repositions the
     // gun out of the viewmodel frame -> "gun goes away"). Kick rises to 1, decays.
     g_recoil=1.0f;
+    if (cw->recoilKick>0.0f){                      // camera kick: mostly up, a touch of wander
+        g_pitch += DEG2RAD*cw->recoilKick*(0.7f+GetRandomValue(0,60)/100.0f);
+        g_yaw   += DEG2RAD*cw->recoilKick*(GetRandomValue(-30,30)/100.0f);
+        if (g_pitch>1.5f) g_pitch=1.5f;
+    }
     if (cw->playShoot && g_aShoot!=g_aIdle && g_aShoot<g_gunAnimN && !g_reloading){
         g_curAnim=g_aShoot; g_animOnce=1; g_animT=0.0f;    // play the model's Shot clip (AK)
     }
-    DebugLog("fire","\"enemy\":%d,\"head\":%d,\"end\":[%.2f,%.2f,%.2f]", ei, head, end.x,end.y,end.z);
+    DebugLog("fire","\"slot\":%d,\"hits\":%d,\"head\":%d,\"mag\":%d,\"end\":[%.2f,%.2f,%.2f]",
+             g_curWeapon, hits, headAny, cw->mag, lastEnd.x,lastEnd.y,lastEnd.z);
 }
 
 // Can the enemy stand at (x,z) coming from height curY? The spot must have a floor
@@ -1173,7 +1310,10 @@ static void UpdateEnemies(float dt){
             // fires when the enemy is jammed in a wall right next to the player (attack range).
             if (g_mapCol.ready && MapSphereHitsWall((Vector3){e->pos.x, e->pos.y+0.9f, e->pos.z}, 0.35f)){
                 e->embedT += dt;
-                if (e->embedT > 0.8f){ SpawnEnemy(i); continue; }   // SpawnEnemy always picks a navigable cell now
+                if (e->embedT > 0.8f){                              // relocate to a navigable cell -- same enemy, same hp (no free heal)
+                    float keepHp=e->hp; int ty=e->type;
+                    SpawnEnemyT(i,ty,0); g_enemies[i].hp=keepHp; continue;
+                }
             } else e->embedT = 0.0f;
             // clip priority: flinch > attack (in melee range) > idle-when-stuck > run (chasing)
             int want = (e->hitT>0) ? g_eHit : (d<=ENEMY_ATTACK_RANGE ? g_eAttack : (stuck ? g_eIdle : g_eRun));
@@ -1186,7 +1326,7 @@ static void UpdateEnemies(float dt){
             if (e->hitT<=0 && d>ENEMY_ATTACK_RANGE && !stuck){ // chase: follow the nav flow field, else beeline
                 Vector3 sd; float mx=dx/d, mz=dz/d;
                 if (g_hasMap && MapNavSteer(e->pos,&sd)){ mx=sd.x; mz=sd.z; }
-                float step=ENEMY_SPEED*dt; Vector3 b4=e->pos;
+                float step=kEnemy[e->type].speed*dt; Vector3 b4=e->pos;   // per-type speed (runners actually run)
                 EnemyNudge(i, mx*step, mz*step);
                 // wedged (the steer heads into a wall and per-axis collision blocks BOTH
                 // axes)? sweep the heading outward to either side -- nearest angle first --
@@ -1216,7 +1356,7 @@ static void UpdateEnemies(float dt){
                     for (int k=0;k<8;k++){ float cxx=cosf(A[k]),czz=sinf(A[k]);
                         if (!MapSphereHitsWall((Vector3){e->pos.x+cxx*0.3f,by,e->pos.z+czz*0.3f},ENEMY_HANDS_R)){ ox+=cxx; oz+=czz; } }
                     float l=sqrtf(ox*ox+oz*oz);
-                    if (l>1e-4f) EnemyNudge(i, ox/l*ENEMY_SPEED*dt*0.6f, oz/l*ENEMY_SPEED*dt*0.6f);
+                    if (l>1e-4f) EnemyNudge(i, ox/l*kEnemy[e->type].speed*dt*0.6f, oz/l*kEnemy[e->type].speed*dt*0.6f);
                 }
             }
             if (g_hasMap && g_mapCol.ready){                   // keep the enemy standing on the map floor
@@ -1239,11 +1379,24 @@ static void UpdateEnemies(float dt){
                 e->drawY += dy*(1.0f-expf(-16.0f*dt));
                 if (e->drawY < e->pos.y-0.03f) e->drawY = e->pos.y-0.03f;   // feet never sink into the stairs
             }
-            if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
+            if (g_meleeDrain){                                 // legacy A/B: untimed contact drain
+                if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
+            } else if (e->atkCd>0) e->atkCd-=dt;
             if (g_enemyAnimN>0){                               // advance current clip (looping)
                 int nf=ANIM_FRAMES(g_enemyAnim[e->clip]);
                 float spd=(e->clip==g_eAttack)?90.0f:30.0f;    // attack plays much faster
+                float prevT=e->animT;
                 e->animT+=dt*spd;
+                // Timed melee (default): the swing damages ONCE, when the attack clip
+                // crosses its strike frame -- so the windup is dodgeable (step out of
+                // range before it lands) and a real cooldown separates hits, instead
+                // of the old unreadable touch-drain.
+                if (!g_meleeDrain && e->clip==g_eAttack && nf>0 && e->atkCd<=0 && e->hitT<=0){
+                    float strike=nf*ATK_STRIKE_FRAC;
+                    if (prevT<strike && e->animT>=strike && d<=ENEMY_ATTACK_RANGE*1.15f && !g_godMode){
+                        g_playerHp-=kEnemy[e->type].meleeDmg; e->atkCd=ATK_COOLDOWN;   // per-type swing damage
+                    }
+                }
                 if (nf>0 && e->animT>=nf) e->animT-=nf;
             }
         } else if (e->state==2){                              // dying: play the death anim to its settle frame, then leave a corpse
@@ -1255,10 +1408,10 @@ static void UpdateEnemies(float dt){
             if ((nf<=0 || e->animT>=(float)nf) && e->deathT>0.2f){
                 float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
                 Corpse *cp=&g_corpses[g_corpseNext]; *cp=(Corpse){0};            // lasting body, posed at the final death frame
-                cp->pos=e->pos; cp->yaw=yaw; cp->active=1; cp->burnN=e->burnN;    // keep the soot marks it earned while alive
+                cp->pos=e->pos; cp->yaw=yaw; cp->active=1; cp->type=e->type; cp->burnN=e->burnN;   // keep the soot marks it earned while alive
                 for (int k=0;k<e->burnN;k++){ cp->burnY[k]=e->burnY[k]; cp->burnR[k]=e->burnR[k]; }
                 g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
-                if (!g_noEnemies) SpawnEnemy(i); else e->state=0;
+                e->state=0;                                // slot freed -- the wave director owns ALL spawning (no 1:1 respawn)
             }
         }
     }
@@ -1318,8 +1471,30 @@ static Camera3D g_cam;
 // single reload clip, else nothing. Used by the R key and the shotgun's pump.
 static void StartReload(void){
     if (g_reloading) return;
+    g_burstLeft=0;                                    // a reload always cancels a pending burst
     if (g_reloadSeqN>0){ g_reloading=1; g_reloadStep=0; g_curAnim=g_reloadSeq[0]; g_animOnce=1; g_animT=0.0f; }
     else if (g_aReload!=g_aIdle && g_aReload<g_gunAnimN){ g_reloading=1; g_reloadStep=-1; g_curAnim=g_aReload; g_animOnce=1; g_animT=0.0f; }
+}
+
+// ---- Ammo (M1) --------------------------------------------------------------
+// Refill lands when the reload ANIM completes (FinishReload, called from the
+// anim-advance code), so switching weapons mid-reload cancels the reload.
+static void FinishReload(void){
+    Weapon *w=&g_weapons[g_curWeapon];
+    if (w->magSize<=0) return;
+    int need=w->magSize-w->mag, take=(need<w->reserve)?need:w->reserve;
+    w->mag+=take; w->reserve-=take;
+    DebugLog("reload","\"slot\":%d,\"mag\":%d,\"reserve\":%d", g_curWeapon, w->mag, w->reserve);
+}
+// R key / empty-mag entry point. The grenade launcher scrubs its reload slice of
+// 'allanims'; weapons without any reload clip (minigun belt, flamethrower tank)
+// refill instantly behind a fixed delay; everything else plays its Reload clip.
+static void TryReload(void){
+    Weapon *w=&g_weapons[g_curWeapon];
+    if (g_reloading || w->magSize<=0 || w->mag>=w->magSize || w->reserve<=0) return;
+    if (w->grenade){ g_reloading=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=(float)GL_RELOAD_FROM; return; }
+    if (w->reloadSeqN<=0 && (w->aReload==w->aIdle || w->aReload>=w->animN)){ g_burstLeft=0; FinishReload(); g_fireCd=1.2f; return; }
+    StartReload();
 }
 
 // Options/pause menu: a vertical stack of buttons centred on screen. DrawMenu and
@@ -1365,6 +1540,8 @@ static void ApplyFullscreen(int on){
 static void RespawnPlayer(void){
     g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f;
     g_dead=0; g_deadT=0.0f;
+    for (int i=0;i<g_numWeapons;i++){ g_weapons[i].mag=g_weapons[i].magSize; g_weapons[i].reserve=g_weapons[i].reserveStart; }
+    g_flameFuel=0.0f; g_burstLeft=0;           // fresh loadout with the fresh life; no pending burst
     g_pos = g_hasMap ? g_spawnResetPos : (Vector3){0,EYE_H,6};
     g_vy=0.0f; g_grounded=0; g_eyeSmooth=0.0f;
     DebugLog("respawn","\"pos\":[%.1f,%.1f,%.1f]", g_pos.x,g_pos.y,g_pos.z);
@@ -1420,9 +1597,28 @@ static void Update(void) {
     if (g_dead){
         g_deadT += dt;
         if (g_hurt>0) g_hurt=fmaxf(0.0f, g_hurt-dt*1.2f);
-        if (g_deadT>1.0f && (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
-            RespawnPlayer();
+        if (g_deadT>1.0f && (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))){
+            if (g_hasMap) g_returnToMenu=1;            // a death ENDS the run -> back to the map picker
+            else RespawnPlayer();                      // built-in arena keeps the quick respawn
+        }
         return;
+    }
+
+    // --cycle (soak): step through every slot twice -- spending ammo on pass 1 --
+    // logging the counts at each stop. The soak asserts pass 2 reads back pass 1's
+    // spent values: any slot-state corruption around the ActivateWeapon /
+    // StashActiveTuning swap shows up as a mismatch.
+    if (g_cycleTest){
+        static int cf=0, k=0;
+        if (k<18 && ++cf>=30){
+            cf=0; int slot=(k+1)%9;                 // 1..8,0 twice -- ends back on the boot slot
+            SwitchWeapon(slot);
+            Weapon *w=&g_weapons[slot];
+            if (k<9 && w->magSize>0){ w->mag-=(w->mag<3?w->mag:3); w->reserve-=(w->reserve<2?w->reserve:2); }
+            DebugLog("ammo","\"phase\":%d,\"slot\":%d,\"mag\":%d,\"reserve\":%d,\"magSize\":%d",
+                     (k<9)?1:2, slot, w->mag, w->reserve, w->magSize);
+            k++;
+        }
     }
 
     // Keep the mouse captured the whole time we're playing. macOS releases the
@@ -1517,8 +1713,7 @@ static void Update(void) {
     int firingNow=0;                                       // looped fire sound active this frame?
 
     if (IsKeyPressed(KEY_R)){
-        if (cw->grenade){ g_reloading=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=(float)GL_RELOAD_FROM; }  // GL: play the reload frame slice of 'allanims'
-        else StartReload();
+        TryReload();
     }
     else if (!g_reloading){
         if (cw->burst>0){                                  // rifle: one 3-round burst per trigger pull
@@ -1526,16 +1721,23 @@ static void Update(void) {
             if (g_burstLeft>0){ firingNow=1; if (g_fireCd<=0.0f){ Fire(g_cam); g_burstLeft--; } }
         } else if (cw->grenade){                            // grenade launcher: lob one grenade per click
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_fireCd<=0.0f){
-                g_fireCd=GL_FIRE_CD; g_recoil=1.0f;
-                if (g_audio && cw->hasSnd) PlaySound(cw->fireSnd);
-                LaunchGrenade(g_cam);
+                if (cw->magSize>0 && cw->mag<=0){ TryReload(); }
+                else {
+                    if (cw->magSize>0) cw->mag--;
+                    g_fireCd=GL_FIRE_CD; g_recoil=1.0f;   // (not counted in g_shotsFired -- grenades can't score g_shotsHit)
+                    if (cw->recoilKick>0.0f){ g_pitch += DEG2RAD*cw->recoilKick; if (g_pitch>1.5f) g_pitch=1.5f; }
+                    if (g_audio && cw->hasSnd) PlaySound(cw->fireSnd);
+                    LaunchGrenade(g_cam);
+                }
             }
         } else if (!cw->spinUp && !cw->soundGated && !cw->flame && !cw->melee && !cw->grenade && lmb){ // full-auto / one-shot (shotgun, sawnoff)
-            int willFire=(g_fireCd<=0.0f);
-            firingNow=1; Fire(g_cam);
-            if (willFire && cw->autoReload){               // shotgun: pump (reload anim) + cock sound between shots
-                StartReload();
-                if (g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd);
+            int canFire=(cw->magSize<=0 || cw->mag>0);
+            int willFire=(g_fireCd<=0.0f && canFire);
+            firingNow=canFire; Fire(g_cam);            // dry gun: no fire-loop audio, but Fire still auto-reloads
+            if (willFire && cw->autoReload){               // shotgun: cock between shots (the Shot clip
+                // already animates the action -- playing the shell-Reload clip here
+                // would block firing for its whole length)
+                if (g_audio && cw->hasAuxSnd && !IsSoundPlaying(cw->auxSnd)) PlaySound(cw->auxSnd);
             }
         }
     }
@@ -1544,7 +1746,9 @@ static void Update(void) {
     // flame billboards along the aim and burns every alive enemy inside the cone +
     // range (LOS-checked on a map so it can't burn through walls). No per-shot cd.
     if (cw->flame){
-        int firing = lmb && !g_reloading;
+        int haveFuel = (cw->magSize<=0 || cw->mag>0);
+        int firing = lmb && !g_reloading && haveFuel && g_fireCd<=0.0f;   // fireCd also enforces the 1.2s tank swap
+        if (lmb && !haveFuel && !g_reloading && g_fireCd<=0.0f) TryReload();   // dry trigger -> swap tanks
         if (firing){
             g_flameHeat += dt;                                           // warm up while held
             firingNow=1;                                                 // the roar plays through the whole warm-up
@@ -1559,6 +1763,8 @@ static void Update(void) {
             if (g_flameHeat < FLAME_WARMUP){                             // NOT lit yet: spit raw fuel, no damage
                 for (int q=0;q<2;q++) SpawnLiquid(muzzle, fwd);
             } else {                                                     // ignited: flame + burn
+                g_flameFuel += dt*FLAME_FUEL_PER_SEC;                    // fuel burn (tank = mag)
+                while (g_flameFuel>=1.0f && cw->mag>0){ cw->mag--; g_flameFuel-=1.0f; }
                 for (int q=0;q<5;q++) SpawnFlame(muzzle, fwd);          // a dense, wide gout streaming from the nozzle
                 for (int i=0;i<MAX_ENEMIES;i++){
                     if (g_enemies[i].state!=1) continue;
@@ -1581,14 +1787,14 @@ static void Update(void) {
                     HurtEnemy(i, FLAME_DPS*dt, 0, tn, cen, 0);                      // burning: no blood spurt
                 }
                 // Scorch whatever the stream lands on (floor/wall/prop), throttled so marks
-                // build up steadily rather than every frame. Map rays give distance only, so
-                // the decal faces back along the aim (~the wall normal when you flame it head-on).
+                // build up steadily rather than every frame. The map ray reports the real
+                // surface normal now, so the decal lies flat on the face it hit.
                 g_scorchT += dt;
                 if (g_scorchT >= 0.04f){
                     Vector3 sp, sn; int landed=0;
                     if (g_hasMap && g_mapCol.ready){
-                        float wd=MapRayNearest(muzzle, fwd, FLAME_RANGE);
-                        if (wd>0){ sp=Vector3Add(muzzle, Vector3Scale(fwd,wd)); sn=Vector3Scale(fwd,-1.0f); landed=1; }
+                        Vector3 mnrm; float wd=MapRayNearestEx(muzzle, fwd, FLAME_RANGE, &mnrm, NULL);
+                        if (wd>0){ sp=Vector3Add(muzzle, Vector3Scale(fwd,wd)); sn=mnrm; landed=1; }
                     } else { Vector3 hp,hn;
                         if (RaycastWorld(muzzle, fwd, &hp,&hn)){ if (Vector3Distance(muzzle,hp)<=FLAME_RANGE){ sp=hp; sn=hn; landed=1; } } }
                     if (landed){ g_scorchT=0.0f; AddScorch(sp, sn, 0.40f+GetRandomValue(0,35)/100.0f); }
@@ -1627,15 +1833,16 @@ static void Update(void) {
     if (cw->spinUp){
         if (!lmb) g_mgLock=0;                              // releasing clears the overheat lock
         int trigger = lmb && !g_reloading && !g_mgLock;
+        int canFire = (cw->magSize<=0 || cw->mag>0);       // empty belt: barrel still revs, nothing fires/heats
         if (trigger){
             g_mgSpinT += dt;
             g_spin = fminf(1.0f, g_mgSpinT/MG_SPINUP);     // barrel accelerates, reaching full at MG_SPINUP
             if (g_audio && cw->hasAuxSnd && IsSoundPlaying(cw->auxSnd)) StopSound(cw->auxSnd);  // revving -> cut cooldown
             if (g_mgSpinT >= MG_SPINUP){                   // AT SPEED -> actually shoot bullets
-                firingNow=1; Fire(g_cam); g_mgHeat+=dt;
-                if (g_mgHeat>=5.0f) g_mgLock=1;            // overheated after 5s of fire
+                Fire(g_cam);
+                if (canFire){ firingNow=1; g_mgHeat+=dt; if (g_mgHeat>=5.0f) g_mgLock=1; }   // heat/roar only while really firing
             }
-            g_shake = fminf(1.0f, g_shake + dt*3.5f);      // brain-shake builds as it revs + fires
+            g_shake = fminf(1.0f, g_shake + dt*(canFire?3.5f:1.0f));   // dry rev shakes far less
         } else {
             if (g_mgFiring && g_spin>0.3f && g_audio && cw->hasAuxSnd) PlaySound(cw->auxSnd);   // just stopped -> cooldown sound
             g_mgSpinT=0.0f;
@@ -1644,7 +1851,7 @@ static void Update(void) {
             g_mgHeat=0.0f;
             g_shake=fmaxf(0.0f, g_shake-dt*4.0f);
         }
-        g_mgFiring = (trigger && g_mgSpinT>=MG_SPINUP);    // "firing" = actually shooting (drives the cooldown-sound edge)
+        g_mgFiring = (trigger && canFire && g_mgSpinT>=MG_SPINUP);    // "firing" = actually shooting (drives the cooldown-sound edge)
         // smoke/steam out of the spinning barrels: thick gunsmoke while firing, lighter
         // steam while the barrel spins down and cools. Emitted at the muzzle in world space.
         if (g_spin>0.02f){
@@ -1663,7 +1870,10 @@ static void Update(void) {
         int playing = g_audio && cw->hasSnd && IsSoundPlaying(cw->fireSnd);
         if (g_lmgPause>0.0f) g_lmgPause-=dt;               // forced pause -> no fire
         else if (lmb && !g_reloading){
-            if (playing) Fire(g_cam);                      // shooting during the burst
+            if (cw->magSize>0 && cw->mag<=0){              // empty: reload instead of starting a burst sound
+                if (g_fireCd<=0.0f){ g_fireCd=0.35f; TryReload(); }
+            }
+            else if (playing) Fire(g_cam);                 // shooting during the burst
             else if (g_audio && cw->hasSnd) PlaySound(cw->fireSnd);   // start a burst (plays the whole sound once)
         }
         if (g_lmgWasPlaying && !playing && g_lmgPause<=0.0f) g_lmgPause=0.75f;   // sound ended -> 3/4 s pause
@@ -1677,6 +1887,7 @@ static void Update(void) {
     }
 
     UpdateEnemies(dt);
+    UpdateWaves(dt); g_runT+=dt;                       // wave director + the run clock
     UpdateSmoke(dt);
     UpdateGrenades(dt);
 
@@ -1691,7 +1902,7 @@ static void Update(void) {
             float hold = (cw->idleHold>=0)?(float)cw->idleHold:(float)GL_IDLE_FRAME;   // Z/X-tuned grip frame
             if (g_reloading){
                 g_animT += dt*30.0f;
-                if (g_animT >= (float)GL_RELOAD_TO){ g_reloading=0; g_animT=hold; }
+                if (g_animT >= (float)GL_RELOAD_TO){ FinishReload(); g_reloading=0; g_animT=hold; }
             } else g_animT = (nf>0) ? hold : 0.0f;
         } else if (g_weapons[g_curWeapon].spinUp && g_curAnim==g_aIdle && !g_animOnce){
             // minigun: the barrel mesh is rigid (not skinned) and 'allanims' only
@@ -1726,7 +1937,22 @@ static void Update(void) {
                         g_reloadStep++;                  // next reload phase
                         g_curAnim=g_reloadSeq[g_reloadStep]; g_animT=0.0f;
                     } else {                             // sequence (or one-shot) done
-                        g_reloadStep=-1; g_reloading=0; g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f;
+                        int feeding=0;
+                        if (g_reloading){
+                            Weapon *rw=&g_weapons[g_curWeapon];
+                            if (rw->shellReload && rw->magSize>0){
+                                // shell-by-shell (benelli): each pass of the insert clip feeds ONE
+                                // shell, looping until the tube is full or the reserve runs dry.
+                                if (rw->mag<rw->magSize && rw->reserve>0){ rw->mag++; rw->reserve--; }
+                                DebugLog("reload","\"slot\":%d,\"mag\":%d,\"reserve\":%d", g_curWeapon, rw->mag, rw->reserve);
+                                if (rw->mag<rw->magSize && rw->reserve>0){
+                                    g_reloadStep=(g_reloadSeqN>0)?0:-1;
+                                    g_curAnim=(g_reloadSeqN>0)?g_reloadSeq[0]:g_aReload;
+                                    g_animT=0.0f; feeding=1;
+                                }
+                            } else FinishReload();       // a completed RELOAD refills (a finished Shot clip doesn't)
+                        }
+                        if (!feeding){ g_reloadStep=-1; g_reloading=0; g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; }
                     }
                 } else g_animT = nf>0 ? g_animT-nf : 0.0f;
             }
@@ -1736,7 +1962,7 @@ static void Update(void) {
     // overlay + inspect + reset
     if (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB)) g_devOverlay=!g_devOverlay;
     if (IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
-    if (IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode) g_playerHp=100.0f;   // refill on re-enable
+    if (IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode){ g_playerHp=100.0f; g_cheatUsed=1; }   // refill on re-enable; the run is tagged
         DebugLog("mode","\"godMode\":%s", g_godMode?"true":"false"); }
     if (IsKeyPressed(KEY_F) && g_hasMap){ g_noclip=!g_noclip; g_vy=0.0f;   // map: fly/noclip <-> walk
         DebugLog("mode","\"noclip\":%s", g_noclip?"true":"false"); }
@@ -1745,7 +1971,7 @@ static void Update(void) {
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
         for (int c=0;c<MAX_CORPSES;c++) g_corpses[c].active=0;  // and clear corpses
         g_playerHp=100.0f;                             // full health (clears a leftover YOU DIED)
-        if (!g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);  // bring the wave back
+        if (!g_noEnemies){ g_wave=0; g_waveBreather=0.0f; }     // restart the wave director from wave 1
         DebugLog("mode","\"noEnemies\":%s", g_noEnemies?"true":"false");
     }
     // Number keys -> weapon slots. Custom order so the two showpieces lead: 1=minigun,
@@ -1870,14 +2096,23 @@ static void Update(void) {
     }
 
     // Damage feedback + death (after every hp change this frame: enemy melee, void).
-    if (g_playerHp < g_prevHp-0.01f)                                // took a hit -> punch the red flash
+    if (g_playerHp < g_prevHp-0.01f){                               // took a hit -> punch the red flash
         g_hurt = fminf(1.0f, g_hurt + (g_prevHp-g_playerHp)*0.04f + 0.12f);
+        if (g_playerHp<g_prevHp-1.0f && g_audio && g_hasHurtSnd && !IsSoundPlaying(g_hurtSnd))
+            PlaySound(g_hurtSnd);                                   // real hits thud (sub-point ticks stay quiet)
+    }
     g_prevHp = g_playerHp;
     if (g_hurt>0) g_hurt = fmaxf(0.0f, g_hurt - dt*1.5f);
+    // low-health heartbeat: repeats while under 30 hp, stops on heal/death
+    if (g_audio && g_hasHeartSnd){
+        int low = (!g_dead && g_playerHp>0.0f && g_playerHp<30.0f && !g_godMode);
+        if (low && !IsSoundPlaying(g_heartSnd)) PlaySound(g_heartSnd);
+        if (!low && IsSoundPlaying(g_heartSnd)) StopSound(g_heartSnd);
+    }
     if (!g_godMode && !g_noEnemies && g_playerHp<=0.0f && !g_dead){ // killed -> enter the death/respawn loop
         g_dead=1; g_deadT=0.0f;
         if (g_audio && cw->hasSnd && IsSoundPlaying(cw->fireSnd)) StopSound(cw->fireSnd);
-        DebugLog("death","\"kills\":%d,\"headshots\":%d", g_kills, g_headshots);
+        DebugLog("death","\"kills\":%d,\"headshots\":%d,\"cheats\":%d", g_kills, g_headshots, g_cheatUsed);
     }
 }
 
@@ -2001,20 +2236,22 @@ static void DrawEnemies(void){
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
         if (g_enemyAnimN>0) ANIM_APPLY(g_enemy, g_enemyAnim[e->state==2?g_eDeath:e->clip], e->animT);
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
+        float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type silhouette: brute looms, runner is lean
         DrawModelEx(g_enemy, dpos, (Vector3){0,1,0}, yaw,     // no sink: dying body falls onto the floor, not through
-                    (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
+                    (Vector3){esc,esc,esc}, kEnemy[e->type].tint);
         if (e->burnN>0) DrawBurnMarks(dpos, 1.0f, e->burnY, e->burnR, e->burnN);   // localised char where the flame touched
-        if (e->state==1 && e->hp<ENEMY_HP){                   // HP bar above damaged enemies
-            Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT+0.3f, e->pos.z};
-            DrawCube(hp, 0.6f*(e->hp/ENEMY_HP), 0.08f, 0.02f, (Color){230,60,60,255});
+        if (e->state==1 && e->hp<kEnemy[e->type].hp){         // HP bar above damaged enemies
+            Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT*kEnemy[e->type].scale+0.3f, e->pos.z};
+            DrawCube(hp, 0.6f*(e->hp/kEnemy[e->type].hp), 0.08f, 0.02f, (Color){230,60,60,255});
         }
     }
     // lasting corpses: the shared model posed at the death clip's settle frame, lying where each enemy fell
     if (g_enemyAnimN>0){
         ANIM_APPLY(g_enemy, g_enemyAnim[g_eDeath], (float)g_eDeathFrame);
         for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active){
+            float csc=ENEMY_SCALE*kEnemy[g_corpses[c].type].scale;
             DrawModelEx(g_enemy, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
-                        (Vector3){ENEMY_SCALE,ENEMY_SCALE,ENEMY_SCALE}, WHITE);
+                        (Vector3){csc,csc,csc}, kEnemy[g_corpses[c].type].tint);
             if (g_corpses[c].burnN>0){   // prone body: compress the mark heights so soot sits on it, not floating above
                 Vector3 b={g_corpses[c].pos.x, g_corpses[c].pos.y+0.05f, g_corpses[c].pos.z};
                 DrawBurnMarks(b, 0.30f, g_corpses[c].burnY, g_corpses[c].burnR, g_corpses[c].burnN);
@@ -2179,16 +2416,48 @@ static void DrawHUD(void) {
     DrawRectangle(20, H-44, 224, 24, (Color){0,0,0,150});
     DrawRectangle(22, H-42, (int)(220*g_playerHp/100.0f), 20, (Color){200,40,40,255});
     DrawText(TextFormat("HP %d", (int)g_playerHp), 28, H-40, 16, RAYWHITE);
-    if (g_godMode) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (dev)
-    if (g_dead){                                                   // death overlay
+    if (g_godMode) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (cheat)
+    // ammo (bottom-right): mag / reserve for the active weapon
+    { Weapon *hw=&g_weapons[g_curWeapon];
+      if (hw->magSize>0){
+        const char *at=TextFormat("%d / %d", hw->mag, hw->reserve);
+        int fs=30, aw=MeasureText(at,fs);
+        DrawText(at, W-28-aw, H-50, fs, (hw->mag==0)?(Color){255,90,60,255}:RAYWHITE);
+        DrawText(hw->label, W-28-MeasureText(hw->label,16), H-72, 16, (Color){205,205,215,210});
+        if (g_reloading){ const char *rt="RELOADING"; DrawText(rt, W-28-MeasureText(rt,16), H-18, 16, (Color){255,210,90,255}); }
+        else if (hw->mag<=0 && hw->reserve<=0){ const char *rt="OUT OF AMMO"; DrawText(rt, W-28-MeasureText(rt,16), H-18, 16, (Color){255,90,60,255}); }
+      }
+    }
+    // wave banner (top centre): current wave + field, breather countdown, or the
+    // opening GET READY beat.
+    if (g_hasEnemy && !g_noEnemies && !g_stress && !g_dead && (g_wave>0 || g_waveBreather>0.0f)){
+        char wb[64];
+        if (g_wave==0)                snprintf(wb,sizeof wb,"GET READY");
+        else if (g_waveBreather>0.0f) snprintf(wb,sizeof wb,"WAVE %d CLEARED  -  next in %d", g_wave, (int)g_waveBreather+1);
+        else {
+            int alive=0; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==1) alive++;
+            snprintf(wb,sizeof wb, g_waveBudget>0 ? "WAVE %d  -  %d hostiles +" : "WAVE %d  -  %d hostiles", g_wave, alive);
+        }
+        int wfs=24, ww=MeasureText(wb,wfs);
+        DrawText(wb, W/2-ww/2+2, 14+2, wfs, (Color){0,0,0,180});
+        DrawText(wb, W/2-ww/2,   14,   wfs, (Color){255,210,60,255});
+    }
+    if (g_dead){                                                   // run results: death ends the run
         const char *t="YOU DIED"; int fs=72, tw=MeasureText(t,fs);
-        DrawText(t, W/2-tw/2+3, H/2-58+3, fs, (Color){0,0,0,200});
-        DrawText(t, W/2-tw/2,   H/2-58,   fs, (Color){220,40,40,255});
-        char sub[64]; snprintf(sub,sizeof sub,"%d kills", g_kills);
-        int sw=MeasureText(sub,28); DrawText(sub, W/2-sw/2, H/2+20, 28, (Color){235,210,150,255});
-        if (g_deadT>1.0f){                                         // respawn prompt fades in after the beat
-            const char *p="ENTER or click to respawn"; int pw=MeasureText(p,22);
-            DrawText(p, W/2-pw/2, H/2+60, 22, (Color){200,200,210,255});
+        DrawText(t, W/2-tw/2+3, H/2-98+3, fs, (Color){0,0,0,200});
+        DrawText(t, W/2-tw/2,   H/2-98,   fs, (Color){220,40,40,255});
+        int score = g_wave*100 + g_kills*10 + g_headshots*15;
+        int acc   = g_shotsFired>0 ? (int)(100.0f*g_shotsHit/g_shotsFired+0.5f) : 0;
+        char l1[96], l2[96];
+        snprintf(l1,sizeof l1,"WAVE %d      SCORE %d%s", g_wave, score, g_cheatUsed?"  (cheats used)":"");
+        snprintf(l2,sizeof l2,"%d kills   %d headshots   %d%% accuracy   %d:%02d",
+                 g_kills, g_headshots, acc, (int)(g_runT/60.0f), (int)g_runT%60);
+        int w1=MeasureText(l1,30); DrawText(l1, W/2-w1/2, H/2-10, 30, (Color){255,210,60,255});
+        int w2=MeasureText(l2,22); DrawText(l2, W/2-w2/2, H/2+30, 22, (Color){235,210,150,255});
+        if (g_deadT>1.0f){                                         // prompt fades in after the beat
+            const char *p=g_hasMap?"ENTER or click  -  back to map select":"ENTER or click to respawn";
+            int pw=MeasureText(p,22);
+            DrawText(p, W/2-pw/2, H/2+72, 22, (Color){200,200,210,255});
         }
     }
     // Big unmistakable mode banner so "floating" can be diagnosed: INSPECT mode
@@ -2197,7 +2466,7 @@ static void DrawHUD(void) {
         DrawText("INSPECT MODE - press V for first-person", W/2-220, 30, 24, (Color){255,180,40,255});
     if (g_devOverlay){
         DrawRectangle(0,0,380,90,(Color){0,0,0,150});
-        DrawText("CHERNOBYL 2  -  M16A3 (LMB fire, R reload)",6,6,12,GRAY);
+        DrawText("CHERNOBYL 2  (LMB fire, R reload)",6,6,12,GRAY);
         DrawText(TextFormat("%s  [%s]  1-9=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
         if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
             DrawRectangle(6,96,600,430,(Color){0,0,0,215});
@@ -2309,8 +2578,22 @@ static void DrawDamageOverlay(void){
     if (g_dead) DrawRectangle(0,0,W,H,(Color){45,0,0,(unsigned char)(fminf(1.0f,g_deadT*1.2f)*170.0f)});
 }
 
+// Frame-time samples for the perf gate: collected under --debug (skipping the
+// 30-frame warmup) and logged as one "perf" JSONL event at shutdown. 4096
+// samples ~= 34 s at 120 fps -- plenty for a soak window.
+static float g_perfDt[4096]; static int g_perfN=0;
+static int CmpFloat(const void *a, const void *b){ float x=*(const float*)a, y=*(const float*)b; return (x>y)-(x<y); }
+static void LogPerfStats(void){
+    if (g_perfN<8) return;
+    qsort(g_perfDt, g_perfN, sizeof(float), CmpFloat);
+    double sum=0; for (int i=0;i<g_perfN;i++) sum+=g_perfDt[i];
+    DebugLog("perf","\"frames\":%d,\"avg_ms\":%.2f,\"p95_ms\":%.2f,\"max_ms\":%.2f",
+             g_perfN, 1000.0*sum/g_perfN, 1000.0f*g_perfDt[(int)(g_perfN*0.95f)], 1000.0f*g_perfDt[g_perfN-1]);
+}
+
 static void Frame(void) {
     static int frameNo=0;
+    if (g_debug && frameNo>30 && g_perfN<4096) g_perfDt[g_perfN++]=GetFrameTime();
     Update();
     BeginDrawing();
         ClearBackground((Color){70,90,110,255});
@@ -2391,6 +2674,7 @@ static char *RunMapSelect(void){
     EnableCursor();
     while (!WindowShouldClose()){
         frame++;
+        if (g_maxFrames>0 && frame>g_maxFrames){ EnableCursor(); return NULL; }   // --frames covers the picker too (headless runs must never hang here)
         int W=GetScreenWidth(), H=GetScreenHeight();
         // layout: a scrolling list on the left, a big preview on the right. Shrink the
         // row height so the whole list fits on screen (down to a floor); only longer
@@ -2536,10 +2820,20 @@ static void StartSelectedMap(void){
         g_spawnResetPos=g_pos; g_voidY=-12.0f;        // below the lowest floor (normalised to y=0) -> fell off
     } else { g_pos=(Vector3){0,EYE_H,6}; g_voidY=-1e9f; }
 
-    g_playerHp=100.0f; g_vy=0.0f; g_eyeSmooth=0.0f;   // fresh start for the (new) map
+    // Fresh RUN for the (new) map: health, loadout, tallies, and any in-flight
+    // death/reload state all reset -- same contract as RespawnPlayer, so dying
+    // and picking a new map can't disagree about what "fresh" means. (A dead
+    // player can reach here via ESC -> Select Map, so g_dead MUST clear.)
+    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f; g_dead=0; g_deadT=0.0f;
+    g_vy=0.0f; g_eyeSmooth=0.0f;
+    for (int i=0;i<g_numWeapons;i++){ g_weapons[i].mag=g_weapons[i].magSize; g_weapons[i].reserve=g_weapons[i].reserveStart; }
+    g_flameFuel=0.0f; g_burstLeft=0; g_fireCd=0.0f;
+    g_reloading=0; g_reloadStep=-1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=0.0f;   // cancel a reload begun on the old map
+    g_kills=0; g_headshots=0; g_shotsFired=0; g_shotsHit=0; g_cheatUsed=0;
+    g_wave=0; g_waveBudget=0; g_waveBreather=0.0f; g_spawnTick=0.0f; g_runT=0.0f;    // wave director restarts with the run
     g_cam=(Camera3D){ g_pos, Vector3Add(g_pos,(Vector3){0,0,-1}), (Vector3){0,1,0}, 70.0f, CAMERA_PERSPECTIVE };
     for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;          // clear any survivors from the previous map
-    if (g_hasEnemy && !g_noEnemies) for (int i=0;i<5;i++) SpawnEnemy(i);
+    // (no boot spawns -- the wave director trickles wave 1 in after a short grace)
 }
 
 // Tear down the current map before loading another. The scroll shader is shared by
@@ -2562,9 +2856,17 @@ static void EndCurrentMap(void){
 
 int main(int argc, char **argv) {
     int vmWeapon=-1; float vmOv[7]={0}; int vmHas=0;          // dev: --weapon / --vm framing overrides
+    unsigned int seedArg=0; int seedSet=0;                    // --seed N : deterministic runs
+    int fpsOv=-1;                                             // --fps N : target-fps override (perf gate)
     for (int i=1;i<argc;i++){
         if (!strcmp(argv[i],"--debug")) g_debug=1;
         else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--seed") && i+1<argc){ seedArg=(unsigned int)strtoul(argv[++i],NULL,10); seedSet=1; }
+        else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
+        else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
+        else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with walkers, no waves
+        else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
+        else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
         else if (!strcmp(argv[i],"--map") && i+1<argc) g_mapPath=argv[++i];   // SPIKE: load a .map
@@ -2591,9 +2893,9 @@ int main(int argc, char **argv) {
     }
     DebugLog("boot","\"windowReady\":%s,\"raylib\":\"%s\"", ready?"true":"false", RAYLIB_VERSION);
 
-    const char *gunPath="assets/rifle.glb";
-    if (!FileExists(gunPath)) gunPath="../assets/rifle.glb";
-    DebugLog("model","\"path\":\"%s\"", JStr(gunPath));
+    // InitWindow just seeded raylib's RNG from the clock, so --seed must be
+    // applied after it (and before any GetRandomValue call) to stick.
+    if (seedSet){ SetRandomSeed(seedArg); DebugLog("seed","\"value\":%u", seedArg); }
 
     if (!ready){   // headless: nothing to render without a GL context
         DebugLog("shutdown","\"reason\":\"no-gl-context\"");
@@ -2614,6 +2916,7 @@ int main(int argc, char **argv) {
     }
 
     SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
+    if (fpsOv>=0) SetTargetFPS(fpsOv);   // --fps: perf-gate override (0 = uncapped, 30 = throttled dt check)
     DisableCursor();
 
     // window + Dock/Cmd-Tab icon
@@ -2643,6 +2946,17 @@ int main(int argc, char **argv) {
         if (!FileExists(ap)) ap="../assets/enemy_attack.mp3";
         if (FileExists(ap)){ g_attackSnd=LoadSound(ap); g_hasAttackSnd=(g_attackSnd.frameCount>0); }
         DebugLog("enemysnd","\"deaths\":%d,\"attack\":%s", g_nDeathSnd, g_hasAttackSnd?"true":"false");
+        // combat one-shots (M1, synthesized in-repo): grenade blast, hurt thud, low-hp heartbeat
+        { const char *p="assets/explosion.wav";   if (!FileExists(p)) p="../assets/explosion.wav";
+          if (FileExists(p)){ g_grenSnd=LoadSound(p);  g_hasGrenSnd =(g_grenSnd.frameCount>0); } }
+        { const char *p="assets/player_hurt.wav"; if (!FileExists(p)) p="../assets/player_hurt.wav";
+          if (FileExists(p)){ g_hurtSnd=LoadSound(p);  g_hasHurtSnd =(g_hurtSnd.frameCount>0); } }
+        { const char *p="assets/heartbeat.wav";   if (!FileExists(p)) p="../assets/heartbeat.wav";
+          if (FileExists(p)){ g_heartSnd=LoadSound(p); g_hasHeartSnd=(g_heartSnd.frameCount>0); SetSoundVolume(g_heartSnd,0.65f); } }
+        { const char *p="assets/wave_start.wav";  if (!FileExists(p)) p="../assets/wave_start.wav";
+          if (FileExists(p)){ g_waveSnd=LoadSound(p);  g_hasWaveSnd =(g_waveSnd.frameCount>0); } }
+        { const char *p="assets/wave_clear.wav";  if (!FileExists(p)) p="../assets/wave_clear.wav";
+          if (FileExists(p)){ g_clearSnd=LoadSound(p); g_hasClearSnd=(g_clearSnd.frameCount>0); SetSoundVolume(g_clearSnd,0.7f); } }
     }
 
     // (Map selection + load happens in the per-map outer loop below, via
@@ -2715,7 +3029,34 @@ int main(int argc, char **argv) {
     g_weapons[7].flame=1;        // Flamethrower: continuous fire cone while held
     g_weapons[8].melee=1;        // Knife:        wide melee slash per click
     LoadWeaponSound(7, "assets/flame_fire.mp3", "../assets/flame_fire.mp3", 1);  // flamethrower: looped roar (silent if asset absent)
-    LoadWeaponSound(8, "assets/knife_swing.mp3","../assets/knife_swing.mp3", 0); // knife: one-shot swing (silent if asset absent)
+    LoadWeaponSound(8, "assets/knife_swing.wav","../assets/knife_swing.wav", 0); // knife: one-shot swing (synthesized whoosh)
+
+    // M1 combat identity: damage / pellets / spread(deg) / kick(deg) / mag / reserve
+    // per slot. dmg 0 keeps the legacy ENEMY_DMG_PER_SHOT; magSize 0 = no ammo.
+    {
+        static const struct { float dmg; int pel; float spr, kick; int mag, res; } S[9]={
+            {  0.0f, 0, 0.0f, 2.5f,    6,  18 },   // 0 grenade launcher (GREN_DMG on the blast)
+            { 13.0f, 8, 3.5f, 3.2f,    5,  25 },   // 1 remington: a pellet wall, brutal up close
+            {  7.0f, 0, 2.2f, 0.25f, 300, 300 },   // 2 minigun: belt-fed hose, wide
+            { 14.0f, 0, 1.6f, 0.8f,   80, 160 },   // 3 LMG: chunky gated bursts
+            { 34.0f, 0, 0.7f, 1.1f,   30, 120 },   // 4 AK-74M: 3-tap body, 1-tap head
+            { 13.0f, 0, 1.4f, 0.5f,   30, 150 },   // 5 MP5: fast spray, soft per-round
+            { 12.0f, 7, 5.0f, 2.6f,    7,  28 },   // 6 benelli: wider cone, faster follow-up
+            {  0.0f, 0, 0.0f, 0.0f,  100, 100 },   // 7 flamethrower: fuel units (FLAME_DPS while lit)
+            {  0.0f, 0, 0.0f, 0.0f,    0,   0 },   // 8 knife: no ammo
+        };
+        for (int i=0;i<9;i++){ Weapon *w=&g_weapons[i];
+            w->dmg=S[i].dmg; w->pellets=S[i].pel; w->spread=S[i].spr; w->recoilKick=S[i].kick;
+            w->magSize=S[i].mag; w->reserveStart=S[i].res; w->mag=S[i].mag; w->reserve=S[i].res; }
+    }
+    g_weapons[2].fireCd=0.06f;   // minigun: ~17 rounds/s once spun up
+    g_weapons[5].fireCd=0.09f;   // MP5: fast, but not minigun-fast
+    g_weapons[6].fireCd=0.45f;   // benelli: semi-auto follow-up, quicker than the pump
+    g_weapons[4].burst=3;        // AK-74M: one 3-round burst per trigger pull
+    g_weapons[1].autoReload=1; g_weapons[6].autoReload=1;   // shotguns: cock between shots
+    g_weapons[6].shellReload=1;  // benelli: its ReloadOne clip inserts a single shell -> loop per shell
+    LoadWeaponAux(1, "assets/shotgun_cock.mp3", "../assets/shotgun_cock.mp3");
+    LoadWeaponAux(6, "assets/shotgun_cock.mp3", "../assets/shotgun_cock.mp3");
 
     // Load the enemy (Mixamo walk rig) and spawn a starting wave.
     const char *enemyPath="assets/enemy.glb";
@@ -2787,6 +3128,7 @@ int main(int argc, char **argv) {
 
     StashActiveTuning();
     for (int i=0;i<g_numWeapons;i++) SaveTune(g_weapons[i].tunePath,g_weapons[i].off,g_weapons[i].scale,g_weapons[i].yaw,g_weapons[i].pitch,g_weapons[i].roll,g_weapons[i].idleHold);
+    LogPerfStats();                        // frame-time stats for the perf gate
     DebugLog("shutdown","\"ok\":true");
     for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].has){
         if (g_weapons[i].anim) UnloadModelAnimations(g_weapons[i].anim,g_weapons[i].animN);

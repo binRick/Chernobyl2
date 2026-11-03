@@ -12,13 +12,19 @@ fi
 
 make all
 
-# Always run with --debug. The JSON event stream is written by the game to
-# ./chernobyl2-debug.log (clean JSON, no raylib warnings). Extra args pass through.
-# With no "--map", the game shows its startup map picker (scans maps/*.map); pass
-# "--map <file>" to skip the picker and load that map directly. Maps are gitignored
-# local content, so a fresh clone with no maps just boots the built-in arena.
-# Filter raylib's harmless per-model warnings (texcoord-attribute limit) out of the
-# console so the output stays clean.
+# Extra args pass through; add --debug for the JSON event stream (written by the
+# game to ./chernobyl2-debug.log, clean of raylib warnings). With no "--map", the
+# game shows its startup map picker (scans maps/*.map); pass "--map <file>" to
+# skip the picker and load that map directly.
+# Filter raylib's harmless per-model warnings (texcoord-attribute limit) out of
+# the console. PIPESTATUS keeps the game's own exit code: grep exiting 1 only
+# means every line was filtered, not that the game failed.
 MGW='No more than 2 texture coordinates'
-./build/chernobyl2 --debug "$@" 2>&1 | grep --line-buffered -v "$MGW" || true
-echo "JSON event log: $(pwd)/chernobyl2-debug.log"
+set +e
+./build/chernobyl2 "$@" 2>&1 | grep --line-buffered -v "$MGW"
+status=${PIPESTATUS[0]}
+set -e
+if [[ " $* " == *" --debug"* ]]; then
+  echo "JSON event log: $(pwd)/chernobyl2-debug.log"
+fi
+exit "$status"
