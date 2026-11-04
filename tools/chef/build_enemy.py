@@ -92,7 +92,7 @@ SPECS = {
 }
 AIM_RIFLE = ("79_96", 58, 100, True, 6)            # two-handed steady aim, held (looped while engaged)
 AIM_HEAVY = ("80_03", 40, 96, True, 6)
-THROW     = ("124_01", 76, 118, False, 0)          # wind-up + hurl (radiation bolt)
+THROW     = ("124_01", 76, 118, False, 0, "release")   # wind-up + hurl (radiation bolt); a side-on pitch
 CAST      = ("120_03", 92, 150, False, 0)          # arms thrust out over the dead
 SPECS.update({
     "rifleman": dict(   # militia rifleman: aimed single shots
@@ -123,7 +123,7 @@ SPECS.update({
         skin="old_caucasian_male", eyebrows="eyebrow005",
         clothes=["male_worksuit01", "shoes02"],
         recolor={"worksuit": ((0.10, 0.10, 0.11), 0, 0, 6)},
-        props="priest", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK, attack=CAST)),
+        props="priest", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK, cast=CAST)),   # melee = the base swing; cast = raising the dead
     "revenant": dict(   # burned firefighter: charred skin, brass-crested helmet, fire axe -- fast
         phenotype=dict(gender=1.0, age=0.45, muscle=0.8, weight=0.35, proportions=0.6, height=0.66),
         targets={"stomach-pregnant-decr": 0.6, "torso-muscle-dorsi-incr": 0.4},
@@ -1153,7 +1153,7 @@ def swing(a, b):
     return a.normalized().rotation_difference(b.normalized()).to_matrix()
 
 
-def sample(src, frames, loop, yaw_fix=True):
+def sample(src, frames, loop, yaw_fix=True, face=None):
     """Retarget src (imported BVH armature) frames (BVH frame numbers) -> list of {bone: (quat, loc|None)}."""
     sb = src.data.bones
     Rs0 = {b.name: (src.matrix_world.to_3x3() @ b.matrix_local.to_3x3()).normalized() for b in sb}
@@ -1180,6 +1180,18 @@ def sample(src, frames, loop, yaw_fix=True):
     foot_ref = src.matrix_world @ src.pose.bones["LeftFoot"].head
     k = (Ht0["Hips"].z - Ht0["LeftFoot"].z) / (hip_ref.z - foot_ref.z)
     hs = [heading(f) for f in frames[:: max(1, len(frames) // 8)]] if yaw_fix else [heading(frames[0])]
+    if face == "release":   # throws: aim the fastest hand's release, not the (side-on) hips
+        best, prev = (0.0, None), {}
+        for f in frames:
+            scene.frame_set(f)
+            for hb in ("LeftHand", "RightHand"):
+                p = (src.matrix_world @ src.pose.bones[hb].head).copy()
+                if hb in prev:
+                    v = p - prev[hb]; v.z = 0
+                    if v.length > best[0]:
+                        best = (v.length, v.normalized())
+                prev[hb] = p
+        hs = [best[1]]
     avg = sum(hs, Vector()).normalized()
     Y = swing(avg, Vector((0, -1, 0)))
     out = []
@@ -1269,9 +1281,9 @@ def bvh_frames(src, dump_a, dump_b):
 clips = []
 _cache = {}
 def take(role):
-    bvh, d0, d1, loop, xf = SPEC["clips"][role]
+    bvh, d0, d1, loop, xf, *face = SPEC["clips"][role]
     src = import_bvh(bvh)
-    poses = fist(sample(src, bvh_frames(src, d0, d1), loop=loop, yaw_fix=loop))
+    poses = fist(sample(src, bvh_frames(src, d0, d1), loop=loop, yaw_fix=loop, face=(face or [None])[0]))
     bpy.data.objects.remove(src, do_unlink=True)
     return crossfade(poses, xf) if xf else poses
 idle, walk, run, attack, death = (take(r) for r in ("idle", "walk", "run", "attack", "death"))
@@ -1327,6 +1339,8 @@ idle, walk, run, attack, hit, death = (tentacle_motion(ps, r) for ps, r in
 for name, poses, step in (("idle", idle, 1), ("walk", walk, 1), ("run", run, 1),
                           ("attack", attack, 2), ("hit", hit, 1), ("death", death, 2)):
     clips.append(bake(name, poses, step))
+if "cast" in SPEC["clips"]:     # optional spell clip (priest), separate from the melee swing
+    clips.append(bake("cast", take("cast"), 2))
 for act in clips:
     tr = rig.animation_data.nla_tracks.new(); tr.name = act.name
     tr.strips.new(act.name, int(act.frame_range[0]), act)

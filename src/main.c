@@ -897,6 +897,7 @@ static void DrawScorch(void){
 #define ENEMY_TOUCH_DMG    18.0f      // player hp/sec in melee -- LEGACY untimed drain, kept for A/B via --melee-drain
 #define ENEMY_MELEE_DMG    16.0f      // hp per landed swing (timed attack window -- the default)
 #define ATK_STRIKE_FRAC    0.45f      // fraction through the attack clip where the swing lands (the dodge window is everything before it)
+#define ENEMY_BLEND        0.15f      // seconds of crossfade on every clip change (no pose snaps)
 #define ATK_COOLDOWN       1.2f       // min seconds between swings that can hurt
 #define ENEMY_ATTACK_RANGE  1.8f       // enters attack/melee within this range
 // Headshot zone: a narrower box at the TOP of the enemy silhouette. A shot
@@ -947,7 +948,7 @@ static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; co
 };
 // melee reach: the tentacled fiend lashes from further out (range doubles as reach for AK_MELEE)
 #define ENEMY_REACH(t) ((kEnemy[t].kind==AK_MELEE && kEnemy[t].range>0) ? kEnemy[t].range : ENEMY_ATTACK_RANGE)
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; int swing, prevClip; float prevT, blendT; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
 typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
@@ -955,7 +956,7 @@ static Corpse          g_corpses[MAX_CORPSES];
 static int             g_corpseNext = 0;
 // Enemy rigs. Clips are addressed by ROLE (CL_*), each rig maps a role to its own
 // animation index, so models with different clip orders/frame counts coexist.
-enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_NROLES };
+enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_CAST, CL_NROLES };   // CL_CAST: spell clip (priest raising the dead); falls back to attack
 typedef struct { Model model; ModelAnimation *anim; int animN; int clip[CL_NROLES]; int deathFrame; int ok;
                  int gpu; Matrix *invBind, *bones; } EnemyRig;   // gpu: skinned in the vertex shader (EnemySkinInit)
 static EnemyRig        g_rig[EN_NTYPES];
@@ -1107,6 +1108,29 @@ static void RigPose(EnemyRig *rg, ModelAnimation *an, float frame){
     // No manual upload: DrawModelEx already sends model.boneMatrices to the shader's
     // "boneMatrices" uniform (rmodels.c) -- an upload here would just be overwritten.
 }
+// Crossfade: pose blended from clip A at frame fa (weight 1-w) into clip B at fb (w).
+static Transform RigSample(ModelAnimation *an, float frame, int b){
+    int nf=an->keyframeCount; int f0=(int)frame; float bl=frame-(float)f0; if (bl<0) bl=0; if (bl>1) bl=1;
+    f0%=nf; if (f0<0) f0+=nf; int f1=(f0+1)%nf;
+    Transform a=an->keyframePoses[f0][b], c=an->keyframePoses[f1][b], t;
+    t.translation=Vector3Lerp(a.translation,c.translation,bl);
+    t.rotation=QuaternionSlerp(a.rotation,c.rotation,bl);
+    t.scale=Vector3Lerp(a.scale,c.scale,bl);
+    return t;
+}
+static void RigPoseBlend(EnemyRig *rg, ModelAnimation *A, float fa, ModelAnimation *B, float fb, float w){
+    if (!rg->gpu || w>=1.0f || A->keyframeCount<=0 || !A->keyframePoses){ RigPose(rg,B,fb); return; }
+    if (B->keyframeCount<=0 || !B->keyframePoses) return;
+    if (w<0) w=0;
+    int nb=rg->model.skeleton.boneCount;
+    for (int b=0;b<nb;b++){
+        Transform a=RigSample(A,fa,b), c=RigSample(B,fb,b), t;
+        t.translation=Vector3Lerp(a.translation,c.translation,w);
+        t.rotation=QuaternionSlerp(a.rotation,c.rotation,w);
+        t.scale=Vector3Lerp(a.scale,c.scale,w);
+        rg->model.boneMatrices[b]=MatrixMultiply(rg->invBind[b], XformMat(t));
+    }
+}
 // Load an enemy model + clips into a rig, resolving clip ROLES by name and the
 // death clip's settle frame. Returns 1 if the model has geometry.
 static int LoadEnemyRig(EnemyRig *rg, const char *path){
@@ -1116,11 +1140,13 @@ static int LoadEnemyRig(EnemyRig *rg, const char *path){
     if (!fp){ DebugLog("enemy","\"error\":\"%s not found\"",path); return 0; }
     rg->model=LoadModel(fp);
     rg->anim=LoadModelAnimations(fp,&rg->animN);
-    static const char *roleName[CL_NROLES]={"walk","idle","run","hit","attack","death"};
+    static const char *roleName[CL_NROLES]={"walk","idle","run","hit","attack","death","cast"};
+    for (int r=0;r<CL_NROLES;r++) rg->clip[r]=-1;
     for (int ci=0; ci<rg->animN; ci++){
         const char *nm=rg->anim[ci].name;
         for (int r=0;r<CL_NROLES;r++) if (strstr(nm,roleName[r])){ rg->clip[r]=ci; break; }
     }
+    for (int r=0;r<CL_NROLES;r++) if (rg->clip[r]<0) rg->clip[r]=(r==CL_CAST && rg->clip[CL_ATTACK]>=0)?rg->clip[CL_ATTACK]:0;
     // Pick the death clip's "settled on the floor" frame. Many death anims end
     // with a trailing keyframe that snaps back to the standing start pose, so
     // freezing the corpse at the literal last frame leaves it standing. Walk
@@ -1165,6 +1191,7 @@ static int             g_godMode = 0;           // invulnerable cheat; G toggles
 static int             g_cheatUsed = 0;         // god mode was enabled this run -> the results get tagged
 static int             g_meleeDrain = 0;        // --melee-drain: legacy untimed contact damage, kept for A/B
 static int             g_reloadAt = 0;          // --reload-at N: force a reload at update frame N (dev: inspect reload anims)
+static int             g_kite = 0;              // --kite: dev autopilot -- face the nearest enemy and backpedal (repro chase glitches)
 static int             g_shotEvery = 0;         // --shot-every K: numbered screenshot every K frames (dev)
 static int             g_devCorpses = 0;        // --corpses N: lay out N cook corpses at run start (dev: test the priest)
 static int             g_devBoss = 0;           // --boss: jump straight to wave 1's boss interlude (dev)
@@ -1201,6 +1228,7 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
     g_enemies[i].stuckT=0; g_enemies[i].embedT=0; g_enemies[i].fallV=0.0f; g_enemies[i].atkCd=0.0f; g_enemies[i].burnN=0;
     g_enemies[i].fireT=kEnemy[type].rate*0.5f; g_enemies[i].losT=0; g_enemies[i].los=0; g_enemies[i].burstLeft=0;
     g_enemies[i].raiseC=-1; g_enemies[i].chanT=0;
+    g_enemies[i].swing=0; g_enemies[i].blendT=0;
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
@@ -1571,6 +1599,7 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
     g_enemies[ei].hp -= dmg;
     if (head) g_hsFlash=1.1f;
     if (g_enemies[ei].hp<=0){
+        g_enemies[ei].prevClip=g_enemies[ei].clip; g_enemies[ei].prevT=g_enemies[ei].animT; g_enemies[ei].blendT=ENEMY_BLEND;
         g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0;
         g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
         g_kills++; if (head) g_headshots++;
@@ -1940,6 +1969,7 @@ static void UpdateEnemies(float dt){
                 e->embedT += dt;
                 if (e->embedT > 0.8f){                              // relocate to a navigable cell -- same enemy, same hp (no free heal)
                     float keepHp=e->hp; int ty=e->type;
+                    DebugLog("relocate","\"i\":%d,\"type\":\"%s\",\"from\":[%.2f,%.2f,%.2f],\"d\":%.2f",i,kEnemy[ty].name,e->pos.x,e->pos.y,e->pos.z,d);
                     SpawnEnemyT(i,ty,0); g_enemies[i].hp=keepHp; continue;
                 }
             } else e->embedT = 0.0f;
@@ -1947,10 +1977,13 @@ static void UpdateEnemies(float dt){
             // (they stop and shoot); the priest engages while raising a corpse.
             int kind=kEnemy[e->type].kind;
             if (e->fireT>0) e->fireT-=dt;
-            int engage = (d<=ENEMY_REACH(e->type));
+            // hysteresis: already swinging -> keep swinging until clearly out of reach (the
+            // strike itself lands out to reach*1.15), so the range edge doesn't flip clips
+            int engage = (d<=ENEMY_REACH(e->type)*(e->clip==g_eAttack ? 1.15f : 1.0f));
             if ((kind==AK_HITSCAN || kind==AK_BOLT) && e->hitT<=0 && d<=kEnemy[e->type].range && d>ENEMY_ATTACK_RANGE)
                 engage = EnemySeesPlayer(e,dt);
-            if (kind==AK_RAISE && e->hitT<=0 && PriestRaise(i,dt)) engage=1;
+            int casting = (kind==AK_RAISE && e->hitT<=0 && PriestRaise(i,dt));
+            if (casting) engage=1;
             if (engage && e->hitT<=0 && (kind==AK_HITSCAN || kind==AK_BOLT) && d>ENEMY_ATTACK_RANGE){
                 if (e->burstLeft>0){ if (e->fireT<=0){ EnemyHitscan(e,d); e->burstLeft--; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; } }
                 else if (e->fireT<=0){
@@ -1958,14 +1991,23 @@ static void UpdateEnemies(float dt){
                     else { EnemyHitscan(e,d); e->burstLeft=kEnemy[e->type].burst-1; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; }
                 }
             }
+            // a melee swing, once started, plays out (the player backing off mid-swing used
+            // to snap it to the run clip and back every few frames); the strike still
+            // checks range, so stepping back is still a dodge. A flinch interrupts it.
+            if (e->hitT>0) e->swing=0;
+            if (e->swing && !casting) engage=1;
             // clip priority: flinch > attack (engaged) > idle-when-stuck > run (chasing)
-            int want = (e->hitT>0) ? g_eHit : (engage ? g_eAttack : (stuck ? g_eIdle : g_eRun));
+            int want = (e->hitT>0) ? g_eHit : (casting ? CL_CAST : (engage ? g_eAttack : (stuck ? g_eIdle : g_eRun)));
             if (want!=e->clip){
                 if (want==g_eAttack && e->roarT<=0 && g_audio && g_hasAttackSnd){   // lunging into an attack -> roar
                     PlaySound(g_attackSnd); e->roarT=2.5f;                          // cooldown so it doesn't spam at the range edge
                 }
+                e->prevClip=e->clip; e->prevT=e->animT; e->blendT=ENEMY_BLEND;   // crossfade, never snap
+                DebugLog("clipsw","\"i\":%d,\"from\":%d,\"to\":%d,\"atT\":%.1f,\"d\":%.2f",i,e->clip,want,e->animT,d);
                 e->clip=want; e->animT=0;
+                e->swing = (want==g_eAttack && (kind==AK_MELEE || kind==AK_RAISE || d<=ENEMY_ATTACK_RANGE));
             }
+            if (e->blendT>0) e->blendT-=dt;
             if (e->hitT<=0 && !engage && !stuck){            // chase: follow the nav flow field, else beeline
                 Vector3 sd; float mx=dx/d, mz=dz/d;
                 if (g_hasMap && MapNavSteer(e->pos,&sd)){ mx=sd.x; mz=sd.z; }
@@ -2030,7 +2072,7 @@ static void UpdateEnemies(float dt){
             } else if (e->atkCd>0) e->atkCd-=dt;
             if (RigOf(e->type)->animN>0){                      // advance current clip (looping)
                 int nf=ANIM_FRAMES(*RigClip(e->type,e->clip));
-                float spd=(e->clip==g_eAttack && kEnemy[e->type].kind==AK_MELEE)?90.0f:30.0f;    // melee swings play fast; aims/casts at pace
+                float spd=(e->clip==g_eAttack && (kEnemy[e->type].kind==AK_MELEE || kEnemy[e->type].kind==AK_RAISE))?90.0f:30.0f;    // melee swings play fast; aims/casts at pace
                 float prevT=e->animT;
                 e->animT+=dt*spd;
                 // Timed melee (default): the swing damages ONCE, when the attack clip
@@ -2043,9 +2085,10 @@ static void UpdateEnemies(float dt){
                         g_playerHp-=kEnemy[e->type].meleeDmg; e->atkCd=ATK_COOLDOWN;   // per-type swing damage
                     }
                 }
-                if (nf>0 && e->animT>=nf) e->animT-=nf;
+                if (nf>0 && e->animT>=nf){ e->animT-=nf; e->swing=0; }   // swing finished -> free to chase again
             }
         } else if (e->state==2){                              // dying: play the death anim to its settle frame, then leave a corpse
+            if (e->blendT>0) e->blendT-=dt;
             int nf = (RigOf(e->type)->animN>0) ? RigOf(e->type)->deathFrame : 0;   // stop at the "on the floor" frame, not the spring-back last frame
             if (nf>0){ e->animT+=dt*60.0f; if (e->animT>(float)nf) e->animT=(float)nf; }
             e->deathT+=dt;
@@ -2287,6 +2330,13 @@ static void Update(void) {
     if (IsKeyDown(KEY_S)){wish=Vector3Subtract(wish,flat);moving=1;}
     if (IsKeyDown(KEY_D)){wish=Vector3Add(wish,right);moving=1;}
     if (IsKeyDown(KEY_A)){wish=Vector3Subtract(wish,right);moving=1;}
+    if (g_kite){                                        // dev autopilot: face the nearest enemy, back away
+        float bd=1e9f; int bi=-1;
+        for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1){ float dd=Vector3Distance(g_enemies[k].pos,g_pos); if (dd<bd){ bd=dd; bi=k; } }
+        if (bi>=0){ g_yaw=atan2f(g_enemies[bi].pos.x-g_pos.x, g_enemies[bi].pos.z-g_pos.z); g_pitch=-0.05f;
+            flat=(Vector3){sinf(g_yaw),0,cosf(g_yaw)}; right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
+            wish=Vector3Subtract(wish,flat); if (((int)(GetTime()/3.0))&1) wish=Vector3Add(wish,Vector3Scale(right,0.6f)); moving=1; }
+    }
     g_playerMoveAmt += ((moving?1.0f:0.0f)-g_playerMoveAmt)*fminf(1.0f,dt*6.0f);   // spoils enemy hitscan aim
     Vector3 mv={0,0,0};
     if (moving && Vector3Length(wish)>0.001f){
@@ -2870,20 +2920,35 @@ static void DrawEnemies(void){
         // model pokes through the geometry to the player's side. Any point visible -> draw
         // (so an enemy peeking around cover still shows).
         if (g_hasMap && g_mapCol.ready){
-            const float hy[3]={0.15f,0.9f,1.7f}; int vis=0;
-            for (int p=0;p<3;p++){
-                Vector3 pt={e->pos.x, e->drawY+hy[p], e->pos.z};
+            // Sample the body's SILHOUETTE, not just its centre line: feet/chest/head at the
+            // centre and at shoulder width either side (across the view). Centre-only tests
+            // hid an enemy half-way round a corner -- he popped out and back in while chasing.
+            const float hy[3]={0.15f,0.9f,1.7f}, hx[3]={0.0f,-0.55f,0.55f}; int vis=0;
+            float sx=g_cam.position.z-e->pos.z, sz=e->pos.x-g_cam.position.x, sl=sqrtf(sx*sx+sz*sz);
+            if (sl>1e-4f){ sx/=sl; sz/=sl; } else { sx=1; sz=0; }
+            float esc=kEnemy[e->type].scale;
+            for (int q=0;q<9 && !vis;q++){
+                int p=q%3, h=q/3;
+                Vector3 pt={e->pos.x+sx*hx[h]*esc, e->drawY+hy[p]*esc, e->pos.z+sz*hx[h]*esc};
                 Vector3 to=Vector3Subtract(pt,g_cam.position); float dist=Vector3Length(to);
                 if (dist<0.5f){ vis=1; break; }                      // basically on top of us -> visible
                 float hit=MapRayNearest(g_cam.position, Vector3Scale(to,1.0f/dist), dist);
-                if (hit<=0.0f || hit>=dist-0.15f){ vis=1; break; }   // nothing blocks this point
+                if (hit<=0.0f || hit>=dist-0.15f) vis=1;              // nothing blocks this point
             }
+            static int lastVis[MAX_ENEMIES];
+            if (vis!=lastVis[i]) DebugLog("cullflip","\"i\":%d,\"vis\":%d,\"d\":%.2f,\"pos\":[%.2f,%.2f,%.2f],\"cam\":[%.2f,%.2f,%.2f]",
+                                          i,vis,Vector3Distance(e->pos,g_pos),e->pos.x,e->drawY,e->pos.z,g_cam.position.x,g_cam.position.y,g_cam.position.z);
+            lastVis[i]=vis;
             if (!vis) continue;
         }
         float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;       // face the player (yaw about +Y)
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
         EnemyRig *rg=RigOf(e->type);
-        if (rg->animN>0) RigPose(rg, RigClip(e->type, e->state==2?CL_DEATH:e->clip), e->animT);
+        if (rg->animN>0){
+            ModelAnimation *cur=RigClip(e->type, e->state==2?CL_DEATH:e->clip);
+            if (e->blendT>0) RigPoseBlend(rg, RigClip(e->type,e->prevClip), e->prevT, cur, e->animT, 1.0f-e->blendT/ENEMY_BLEND);
+            else RigPose(rg, cur, e->animT);
+        }
         if (rg->gpu) EnemyLightUpload(e->pos);
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
         float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type size: the head chef looms
@@ -3812,6 +3877,7 @@ int main(int argc, char **argv) {
             if (g_forceEnemy==-1){ fprintf(stderr,"--enemy: unknown type '%s' (all|cook|linecook|butcher|liquidator|headchef)\n",nm); return 1; }
         }
         else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
+        else if (!strcmp(argv[i],"--kite")) g_kite=1;
         else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
         else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
         else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
