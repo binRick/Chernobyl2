@@ -3858,6 +3858,8 @@ static void EndCurrentMap(void){
 #include <emscripten/emscripten.h>
 #endif
 
+#include "intro.h"                      // title intro (archival montage + Hell March)
+
 int main(int argc, char **argv) {
     int vmWeapon=-1; float vmOv[7]={0}; int vmHas=0;          // dev: --weapon / --vm framing overrides
     unsigned int seedArg=0; int seedSet=0;                    // --seed N : deterministic runs
@@ -3878,6 +3880,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
         else if (!strcmp(argv[i],"--kite")) g_kite=1;
+        else if (!strcmp(argv[i],"--no-intro")) g_noIntro=1;                // skip the title intro
         else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
         else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
         else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
@@ -4093,6 +4096,7 @@ int main(int argc, char **argv) {
     StartSelectedMap();
     emscripten_set_main_loop(Frame,0,1);
 #else
+    if (!RunIntro()){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
     // Per-run outer loop: the game IS the Chernobyl arena (maps/chernobyl.map, rebuilt
     // from ../chernobyl level 0 by tools/grid2map.py), so with no --map it loads that
     // straight away; the picker is only a fallback if the arena file is missing. "Restart

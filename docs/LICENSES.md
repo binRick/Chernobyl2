@@ -75,6 +75,8 @@ Unused: ak74_fire, sawnoff_fire, shotgun_cock.
 |---|---|
 | `assets/icon.png`, `assets/screenshot.png` | ours — SHIP |
 | `../Chernobyl/sounds/` (sibling repo, 56 files, presumed C&C rips) | **QUARANTINE** — nothing ships from there, ever |
+| Title intro: `assets/intro.mpg`, `intro_music.mp3`, `intro_title.png` (`tools/intro/`) | **QUARANTINE** (private build only) — archival Soviet/Chernobyl footage of mixed or unclear rights (archive.org: 1986–91 Soviet documentaries, Periscope Film uploads, Pripyat home video, plus a public-domain aerial shot and compilation), the 1977 USSR anthem recording, and *Hell March* (C&C: Red Alert). Strip the intro (or rebuild it from cleared footage and music) before any public release; the game runs without it. |
+| `src/pl_mpeg.h` (phoboslab/pl_mpeg) | MIT — SHIP |
 
 ## Attribution (must ship with the game)
 
