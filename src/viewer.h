@@ -135,6 +135,42 @@ static float GalFps(int type, int st){
     return 30.0f;
 }
 
+// Enemy picker: a column of buttons down the right edge, one per enemy -- a small full-body
+// picture (idle pose, thighs up, rendered once at startup, lit like the stage) and the name.
+#define GAL_THUMB_W 224     // rendered at 2x the button size: sharp on HiDPI
+#define GAL_THUMB_H 224
+static RenderTexture2D g_galThumb[EN_NTYPES];
+
+static void GalThumbs(void){
+    for (int t=0;t<EN_NTYPES;t++){
+        EnemyRig *rg=&g_rig[t];
+        g_galThumb[t]=LoadRenderTexture(GAL_THUMB_W,GAL_THUMB_H);
+        SetTextureFilter(g_galThumb[t].texture,TEXTURE_FILTER_BILINEAR);
+        BeginTextureMode(g_galThumb[t]);
+        ClearBackground((Color){26,24,27,255});
+        if (rg->ok && rg->animN>0){
+            ModelAnimation *an=&rg->anim[rg->clip[CL_IDLE]];
+            RigPose(rg,an,0);
+            float esc=ENEMY_SCALE*kEnemy[t].scale, tall=ViewerHeadY(rg)*kEnemy[t].scale/0.92f;
+            float yr=25.0f*DEG2RAD, d=1.55f*tall/1.75f, ly=0.70f*tall;   // thighs up: faces and weapons read
+            Camera3D cam={ (Vector3){sinf(yr)*d, ly+0.1f, cosf(yr)*d}, (Vector3){0,ly,0}, (Vector3){0,1,0}, 40.0f, CAMERA_PERSPECTIVE };
+            BeginMode3D(cam);
+            ViewerLights(cam.position);
+            DrawModelEx(rg->model,(Vector3){0,0,0},(Vector3){0,1,0},ENEMY_YAW_OFFSET,(Vector3){esc,esc,esc},WHITE);
+            EndMode3D();
+        }
+        EndTextureMode();
+    }
+}
+
+// screen rectangle of enemy button k (column down the right edge)
+static Rectangle GalButton(int k, int sw, int sh){
+    float top=20, bottom=sh-40.0f, rowH=(bottom-top)/EN_NTYPES;
+    if (rowH>72) rowH=72;
+    float w=200;
+    return (Rectangle){ sw-w-12, top+k*rowH, w, rowH-4 };
+}
+
 static int RunGallery(void){
     for (int t=0;t<EN_NTYPES;t++){ char p[96]; snprintf(p,sizeof p,"assets/%s.glb",kEnemy[t].name); LoadEnemyRig(&g_rig[t],p); }
     int type=0, st=GS_WALK, paused=0, autoMode=0, face=0;
@@ -156,6 +192,7 @@ static int RunGallery(void){
       if (ss && *ss){ char nm[32]={0}; const char *c=strchr(ss,':'); size_t n=c?(size_t)(c-ss):strlen(ss);
         if (n<sizeof nm){ memcpy(nm,ss,n); for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) type=t; }
         if (c){ int k=atoi(c+1); if (k>=1 && k<=GS_N) st=k-1; } } }
+    GalThumbs();
     EnableCursor();
     while (!WindowShouldClose()){
         float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
@@ -171,7 +208,16 @@ static int RunGallery(void){
         if (IsKeyDown(KEY_RIGHT)) turn+=90*dt;
         if (IsKeyDown(KEY_UP))    dist-=1.5f*dt;
         if (IsKeyDown(KEY_DOWN))  dist+=1.5f*dt;
-        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) turn+=GetMouseDelta().x*0.4f;
+        int overPick=-1;                                                   // enemy buttons: click to pick
+        { Vector2 mp=GetMousePosition(); int sw0=GetScreenWidth(), sh0=GetScreenHeight();
+          for (int k=0;k<EN_NTYPES;k++) if (CheckCollisionPointRec(mp,GalButton(k,sw0,sh0))) overPick=k; }
+        static int dragging=0;                                             // a drag that starts on a button doesn't turn
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
+            if (overPick>=0){ type=overPick; autoMode=0; dragging=0; }
+            else dragging=1;
+        }
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) dragging=0;
+        if (dragging) turn+=GetMouseDelta().x*0.4f;
         dist-=GetMouseWheelMove()*0.25f; if (dist<0.8f) dist=0.8f; if (dist>9) dist=9;
         if (st==GS_CAST && kEnemy[type].kind!=AK_RAISE) st=GS_ATTACK;          // only the priest casts
         if (type!=prevType || st!=prevSt){ frame=0; stT=0; hold=0; boltT=-1;
@@ -237,9 +283,21 @@ static int RunGallery(void){
             DrawText(lb,x,100,22,c); x+=w+26;
         }
         DrawText(TextFormat("frame %.0f/%d   %s%s", frame, nf, autoMode?"AUTO  ":"", paused?"PAUSED":""), 26, 134, 16, (Color){140,140,140,255});
-        DrawText("TAB/[ ] enemy   1-7 state   A auto   SPACE pause   drag/arrows turn   wheel zoom   F face   ESC quit",
+        DrawText("click/TAB/[ ] enemy   1-7 state   A auto   SPACE pause   drag/arrows turn   wheel zoom   F face   ESC quit",
                  14, sh-28, 18, (Color){150,150,150,255});
-        (void)sw;
+        for (int k=0;k<EN_NTYPES;k++){
+            Rectangle r=GalButton(k,sw,sh);
+            int sel=(k==type), hov=(k==overPick);
+            DrawRectangleRec(r, sel?(Color){60,40,20,235}:(hov?(Color){44,40,40,235}:(Color){24,22,25,220}));
+            float th=r.height-6, tw=th*GAL_THUMB_W/(float)GAL_THUMB_H;
+            DrawTexturePro(g_galThumb[k].texture,(Rectangle){0,0,GAL_THUMB_W,-GAL_THUMB_H},   // render textures are upside down
+                           (Rectangle){r.x+3,r.y+3,tw,th},(Vector2){0,0},0,WHITE);
+            int fs=r.height>=48?20:16;
+            DrawText(kEnemy[k].name,(int)(r.x+tw+12),(int)(r.y+r.height/2-fs/2),fs,
+                     sel?(Color){255,220,90,255}:(hov?(Color){230,230,230,255}:(Color){160,160,160,255}));
+            if (sel) DrawRectangleLinesEx(r,2,(Color){255,90,70,255});
+        }
+        SetMouseCursor(overPick>=0?MOUSE_CURSOR_POINTING_HAND:MOUSE_CURSOR_DEFAULT);
         EndDrawing();
         if (poseN>0){ if (++galClock>=3){ galClock=0; TakeScreenshot(TextFormat("build/pose_%02d.png",poseI)); if (++poseI>=poseN) break; } }
         if (galShots>0){                                                   // dev self-test: CHERNOBYL_GALLERY_TEST=N
@@ -247,5 +305,6 @@ static int RunGallery(void){
             if (galClock>=1.7f){ galClock=0; TakeScreenshot(TextFormat("build/gallery_%02d.png",galShot)); if (++galShot>=galShots) break; }
         }
     }
+    for (int t=0;t<EN_NTYPES;t++) UnloadRenderTexture(g_galThumb[t]);
     return 0;
 }
