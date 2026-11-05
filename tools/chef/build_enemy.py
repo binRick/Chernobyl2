@@ -2131,6 +2131,9 @@ def declip(poses, loop, label=""):
                     for side, sv in (("Left", sep), ("Right", -sep)):
                         t = swing(side, Vector(tuple(W[side][0].mean(0))), sv, 3.0)
                         if t: turns.append(t)
+                        if it >= wrist_after and not gun:      # props locked together: tip them apart too
+                            t = swing(side, Vector(tuple(W[side][0].mean(0))), sv, 4.0, bone="Hand")
+                            if t: turns.append(t)
             if not turns:
                 break
             for side, deg, ax, bone in turns:
@@ -2230,8 +2233,23 @@ def grip(poses):
 
 # two_hand="shaft" (liquidator's shovel, revenant's axe swing): the left fist rides the shaft,
 # nearest to where the mocap had it (clamped along the shaft); two_hand_clips picks the clips
+FORE_CLEAR = 0.06       # shaft axis to left forearm axis (elbow .. 80% to the wrist): no closer than this
+POLES_L = (None, Vector((0, 0, -1)), Vector((1, 0, -0.5)), Vector((1, -0.5, 0)))   # elbow: as is, down, out-down, out-forward
+
+
+def fore_clear(p, hole, ax):
+    """Closest the left forearm (elbow .. 80% of the way to the wrist) comes to the shaft's axis."""
+    e, w = fk_pos(p, "LeftForeArm"), fk_pos(p, "LeftHand")
+    best = 9.0
+    for k in range(9):
+        q = e.lerp(w, k / 10)
+        along = max(-0.15, min(1.4, (q - hole).dot(ax)))
+        best = min(best, (q - (hole + ax * along)).length)
+    return best
+
+
 if SPEC.get("two_hand") == "shaft":
-    hbR = hand_basis("Right"); worst = 0.0
+    hbR = hand_basis("Right"); worst = 0.0; worst_clear = 9.0
     TH = {"idle": idle, "walk": walk, "run": run, "hit": hit, "attack": attack}
     for cn in SPEC.get("two_hand_clips", ("idle", "walk", "run", "hit", "attack")):
         for p in TH[cn]:
@@ -2247,23 +2265,33 @@ if SPEC.get("two_hand") == "shaft":
             pd = pd if pd.length > 1e-4 else Rl @ hbL["n"]
             fa = fk_pos(p, "LeftHand") - fk_pos(p, "LeftForeArm")     # forearm comes in across the shaft
             miss = seat_hand(p, "Left", pt, ax, pd.normalized(), along_dir=fa)
-            if miss > 0.01:      # out of reach (a de-clipped wind-up tips the shaft away): slide the
-                best = None      # left fist down the shaft toward the right hand until it closes on it
-                for tt in (0.25, 0.20, 0.16, 0.12):
-                    if tt >= t:
-                        continue
-                    q = {b: [v[0].copy(), (v[1].copy() if v[1] is not None else None)] for b, v in p.items()}
-                    pt2 = hole + ax * tt
-                    m2 = seat_hand(q, "Left", pt2, ax, (pt2 - lh).normalized() if (pt2 - lh).length > 1e-4 else pd.normalized(), along_dir=fa)
-                    if best is None or m2 < best[0]:
-                        best = (m2, q)
-                if best and best[0] < miss:
-                    miss = best[0]
-                    p.update(best[1])
-            if miss > 0.02:
-                print(f"enemy: two_hand {cn} frame {TH[cn].index(p)} miss {miss * 100:.1f} cm")
+            clear = fore_clear(p, hole, ax)
+            if miss > 0.01 or clear < FORE_CLEAR:
+                # out of reach (a de-clipped wind-up tips the shaft away), or the forearm lies along
+                # the shaft and it runs through the wrist: try other grip points along the shaft and
+                # other elbow directions; score = reach + forearm clearance + staying near the mocap
+                def score(m_, c_, tt_):
+                    return m_ * 5 + max(0.0, FORE_CLEAR - c_) * 3 + abs(tt_ - t) * 0.02
+                best = (score(miss, clear, t), miss, clear, None)
+                for tt in (0.12, 0.18, 0.24, 0.30, 0.36, 0.42, 0.48, 0.54, 0.60, 0.66, 0.70):
+                    for pole in POLES_L:
+                        q = {b: [v[0].copy(), (v[1].copy() if v[1] is not None else None)] for b, v in p.items()}
+                        pt2 = hole + ax * tt
+                        pd2 = pt2 - lh
+                        pd2 = pd2.normalized() if pd2.length > 1e-4 else pd.normalized()
+                        m2 = seat_hand(q, "Left", pt2, ax, pd2, pole=pole, along_dir=fa)
+                        c2 = fore_clear(q, hole, ax)
+                        sc = score(m2, c2, tt)
+                        if sc < best[0]:
+                            best = (sc, m2, c2, q)
+                if best[3] is not None:
+                    p.update(best[3]); miss, clear = best[1], best[2]
+            if miss > 0.02 or clear < FORE_CLEAR:
+                print(f"enemy: two_hand {cn} frame {TH[cn].index(p)} miss {miss * 100:.1f} cm, forearm clear {clear * 100:.1f} cm")
+            worst_clear = min(worst_clear, clear)
             worst = max(worst, miss)
-    print(f"enemy: two_hand left fist on the shaft, max miss {worst * 100:.1f} cm")
+    print(f"enemy: two_hand left fist on the shaft, max miss {worst * 100:.1f} cm, "
+          f"min forearm clearance {worst_clear * 100:.1f} cm")
 
 idle, walk, run, attack, hit, death = (grip(ps) for ps in (idle, walk, run, attack, hit, death))
 print(f"enemy: grip {GRIP_SIDES} closed, relaxed {sorted({b[:4] for b in RELAXQ})} on every frame")
