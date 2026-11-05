@@ -2348,183 +2348,22 @@ static void RespawnPlayer(void){
     DebugLog("respawn","\"pos\":[%.1f,%.1f,%.1f]", g_pos.x,g_pos.y,g_pos.z);
 }
 
-static void Update(void) {
-    float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
-
-    // While P-paused, ANY of P / ESC / click resumes (handled here, before ESC would
-    // otherwise open the options menu). Stays captured so play resumes seamlessly.
-    if (g_paused){
-        if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
-            g_paused=0; DebugLog("pause","\"paused\":false");
-        }
-        return;
-    }
-
-    // ESC toggles the options/pause menu. While open the cursor is freed for
-    // clicking and the whole gameplay update is skipped (early return), so the
-    // world freezes behind the overlay.
-    if (IsKeyPressed(KEY_ESCAPE)){
-        g_menu=!g_menu;
-        if (g_menu) EnableCursor(); else DisableCursor();
-        DebugLog("menu","\"open\":%s", g_menu?"true":"false");
-    }
-    if (g_menu){
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
-            Vector2 mp=GetMousePosition();
-            for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))){
-                if (i==0){                                  // Fullscreen toggle
-                    g_fullscreen=!g_fullscreen; ApplyFullscreen(g_fullscreen); SaveOptions();
-                    EnableCursor();                         // the toggle can re-grab; keep it free for the menu
-                    DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
-                } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Restart Run -> reload the arena from wave 1
-                    DebugLog("menu","\"selectMap\":true"); }
-                else if (i==2){ g_menu=0; DisableCursor(); }      // Resume
-                else if (i==3) g_quit=1;                          // Quit
-            }
-        }
-        return;
-    }
-
-    // P pauses/unpauses the game: the gameplay update is skipped (early return) so
-    // the world freezes, but the cursor stays captured so play resumes seamlessly.
-    if (IsKeyPressed(KEY_P)){
-        g_paused=!g_paused;
-        DebugLog("pause","\"paused\":%s", g_paused?"true":"false");
-    }
-    if (g_paused) return;
-
-    // Dead: the world is frozen (no move/fire, enemies stop too) behind the "YOU
-    // DIED" overlay. After a short beat, ENTER or a click respawns you at spawn.
-    if (g_dead){
-        g_deadT += dt;
-        if (g_hurt>0) g_hurt=fmaxf(0.0f, g_hurt-dt*1.2f);
-        if (g_deadT>1.0f && (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))){
-            if (g_hasMap) g_returnToMenu=1;            // a death ENDS the run -> reload the arena, wave 1
-            else RespawnPlayer();                      // built-in arena keeps the quick respawn
-        }
-        return;
-    }
-
-    // --cycle (soak): step through every slot twice -- spending ammo on pass 1 --
-    // logging the counts at each stop. The soak asserts pass 2 reads back pass 1's
-    // spent values: any slot-state corruption around the ActivateWeapon /
-    // StashActiveTuning swap shows up as a mismatch.
-    if (g_cycleTest){
-        static int cf=0, k=0;
-        if (k<2*g_numWeapons && ++cf>=30){
-            cf=0; int slot=(k+1)%g_numWeapons;      // 1..N-1,0 twice -- ends back on the boot slot
-            SwitchWeapon(slot);
-            Weapon *w=&g_weapons[slot];
-            if (k<g_numWeapons && w->magSize>0){ w->mag-=(w->mag<3?w->mag:3); w->reserve-=(w->reserve<2?w->reserve:2); }
-            DebugLog("ammo","\"phase\":%d,\"slot\":%d,\"mag\":%d,\"reserve\":%d,\"magSize\":%d",
-                     (k<g_numWeapons)?1:2, slot, w->mag, w->reserve, w->magSize);
-            k++;
-        }
-    }
-
-    // Keep the mouse captured the whole time we're playing. macOS releases the
-    // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
-    // re-grab it the instant we have focus again and it's become visible.
-    if (IsWindowFocused() && !IsCursorHidden()) DisableCursor();
-
-    if (IsWindowReady() && IsCursorHidden()){
-        Vector2 md=GetMouseDelta();
-        g_vmLook=md;
-        g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f;
-        if (g_pitch>1.5f) g_pitch=1.5f;  if (g_pitch<-1.5f) g_pitch=-1.5f;
-    }
-    Vector3 fwd =Vector3Normalize((Vector3){ sinf(g_yaw)*cosf(g_pitch), sinf(g_pitch), cosf(g_yaw)*cosf(g_pitch) });
-    Vector3 flat=Vector3Normalize((Vector3){ sinf(g_yaw), 0, cosf(g_yaw) });
-    Vector3 right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
-
-    float speed=(IsKeyDown(KEY_LEFT_SHIFT)?9.0f:5.0f)*(g_speedT>0.0f?1.5f:1.0f);   // SPEED power-up
-    Vector3 wish={0,0,0}; int moving=0;
-    if (IsKeyDown(KEY_W)){wish=Vector3Add(wish,flat);moving=1;}
-    if (IsKeyDown(KEY_S)){wish=Vector3Subtract(wish,flat);moving=1;}
-    if (IsKeyDown(KEY_D)){wish=Vector3Add(wish,right);moving=1;}
-    if (IsKeyDown(KEY_A)){wish=Vector3Subtract(wish,right);moving=1;}
-    if (g_kite){                                        // dev autopilot: face the nearest enemy, back away
-        float bd=1e9f; int bi=-1;
-        for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1){ float dd=Vector3Distance(g_enemies[k].pos,g_pos); if (dd<bd){ bd=dd; bi=k; } }
-        if (bi>=0){ g_yaw=atan2f(g_enemies[bi].pos.x-g_pos.x, g_enemies[bi].pos.z-g_pos.z); g_pitch=-0.05f;
-            flat=(Vector3){sinf(g_yaw),0,cosf(g_yaw)}; right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
-            wish=Vector3Subtract(wish,flat); if (((int)(GetTime()/3.0))&1) wish=Vector3Add(wish,Vector3Scale(right,0.6f)); moving=1; }
-    }
-    g_playerMoveAmt += ((moving?1.0f:0.0f)-g_playerMoveAmt)*fminf(1.0f,dt*6.0f);   // spoils enemy hitscan aim
-    Vector3 mv={0,0,0};
-    if (moving && Vector3Length(wish)>0.001f){
-        wish=Vector3Scale(Vector3Normalize(wish),speed*dt);
-        mv=wish; g_bob+=dt*(IsKeyDown(KEY_LEFT_SHIFT)?14.0f:10.0f);
-    }
-    if (g_hasMap && !g_noclip){                         // block into walls per-axis (so you slide, never drift)
-        float by=g_pos.y-0.55f;
-        if (!MapSphereHitsWall((Vector3){g_pos.x+mv.x, by, g_pos.z}, 0.42f)) g_pos.x+=mv.x;
-        if (!MapSphereHitsWall((Vector3){g_pos.x, by, g_pos.z+mv.z}, 0.42f)) g_pos.z+=mv.z;
-    } else { g_pos.x+=mv.x; g_pos.z+=mv.z; }
-    if (g_hasMap && g_noclip){                         // F: free-fly / noclip (inspect or escape)
-        if (IsKeyDown(KEY_SPACE))        g_pos.y += speed*dt;
-        if (IsKeyDown(KEY_LEFT_CONTROL)) g_pos.y -= speed*dt;
-        g_vy=0; g_grounded=1;
-    } else if (g_hasMap){                               // FPS collision against the loaded map mesh
-        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=6.0f; g_grounded=0; }
-        float dn=MapRayNearest(g_pos,(Vector3){0,-1,0},80.0f);  // eye -> floor distance
-        float floorEye = (dn>0) ? g_pos.y-dn+EYE_H : -1e30f;    // eye height standing on that floor
-        const float STEP=0.7f;                                  // auto climb/descend up to this height
-        if (g_vy<=0.0f && dn>0 && (g_pos.y-floorEye)<=STEP){
-            // grounded (or within a step of the floor): glue the feet to it,
-            // but feed the height change into g_eyeSmooth so the CAMERA eases
-            // over the step instead of popping (the actual stair-jitter fix).
-            g_eyeSmooth += floorEye - g_pos.y;
-            if (g_eyeSmooth> 1.0f) g_eyeSmooth= 1.0f;
-            if (g_eyeSmooth<-1.0f) g_eyeSmooth=-1.0f;
-            g_pos.y=floorEye; g_vy=0.0f; g_grounded=1;
-        } else {                                                // airborne: ballistic
-            g_vy-=18.0f*dt; g_pos.y+=g_vy*dt; g_grounded=0;
-            if (dn>0 && g_pos.y<=floorEye){ g_pos.y=floorEye; g_vy=0.0f; g_grounded=1; }   // land
-            if (g_vy>0.0f){ float up=MapRayNearest(g_pos,(Vector3){0,1,0},0.4f); if (up>0) g_vy=0.0f; }  // ceiling
-        }
-    } else {
-        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
-        g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
-        if (g_pos.y<=EYE_H){ g_pos.y=EYE_H; g_vy=0; g_grounded=1; }
-    }
-    // Fell out of the world (off a ledge into the void). Lethal in normal play; in
-    // god mode just teleport back to spawn so dev play isn't an endless fall.
-    if (g_hasMap && !g_noclip && g_pos.y < g_voidY){
-        if (!g_godMode) g_playerHp = 0.0f;
-        g_pos=g_spawnResetPos; g_vy=0.0f; g_grounded=0; g_eyeSmooth=0.0f;
-        DebugLog("void","\"fell\":true,\"died\":%s", g_godMode?"false":"true");
-    }
-    Collide();
-
-    // ease the step-smoothing offset back to 0 (~0.15s), then view from the
-    // smoothed eye height so stairs glide instead of popping
-    if (g_eyeSmooth!=0.0f){ g_eyeSmooth -= g_eyeSmooth*fminf(1.0f,dt*14.0f); if (fabsf(g_eyeSmooth)<0.002f) g_eyeSmooth=0.0f; }
-    Vector3 eye=g_pos; eye.y-=g_eyeSmooth;
-    if (g_shake>0.001f){                                   // minigun brain-shake: jitter the head a touch
-        float a=g_shake*0.055f;
-        eye.x += GetRandomValue(-1000,1000)/1000.0f*a;
-        eye.y += GetRandomValue(-1000,1000)/1000.0f*a;
-        eye.z += GetRandomValue(-1000,1000)/1000.0f*a;
-    }
-    g_cam.position=eye; g_cam.target=Vector3Add(eye,fwd); g_cam.up=(Vector3){0,1,0};
-    if (g_shake>0.001f){                                   // plus a little look-direction wobble
-        float a=g_shake*0.03f;
-        g_cam.target.x += GetRandomValue(-1000,1000)/1000.0f*a;
-        g_cam.target.y += GetRandomValue(-1000,1000)/1000.0f*a;
-    }
-
-    // shooting / reload
+// The live weapon's trigger, one frame: fire cadence, recoil/sway decay, bursts, the
+// grenade lob, the flame cone, minigun spin-up, LMG sound-gated bursts, R reload and the
+// looped fire sound. held/pressed = the trigger (--autofire adds to them after the cooldown
+// ticks, as it always has); fwd = aim direction
+// from g_pos (g_cam must be set). Shared by Update and the enemy gallery's range mode.
+static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     if (g_fireCd>0) g_fireCd-=dt;
     if (g_recoil>0) g_recoil=fmaxf(0.0f, g_recoil - dt*7.0f);   // recoil settles in ~0.14s
+    int lmb=held || g_autoFire;
+    int lmbP=pressed || (g_autoFire && g_fireCd<=0.0f);
     { float k=fminf(1.0f,dt*9.0f);                                 // sway: chase the look delta, clamp big flicks
       Vector2 t={ fmaxf(-40.0f,fminf(40.0f,g_vmLook.x)), fmaxf(-40.0f,fminf(40.0f,g_vmLook.y)) };
       g_vmSway.x+=(t.x-g_vmSway.x)*k; g_vmSway.y+=(t.y-g_vmSway.y)*k; g_vmLook=(Vector2){0,0}; }
     if (g_vmRaise>0) g_vmRaise=fmaxf(0.0f, g_vmRaise - dt*3.5f);   // weapon raise ~0.3s
     if (g_hsFlash>0) g_hsFlash-=dt;                            // "HEADSHOT!" flash fades out
     Weapon *cw=&g_weapons[g_curWeapon];
-    int lmb=IsMouseButtonDown(MOUSE_BUTTON_LEFT) || g_autoFire;
-    int lmbP=IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || (g_autoFire && g_fireCd<=0.0f);
     int firingNow=0;                                       // looped fire sound active this frame?
 
     { static int uf=0; if (g_reloadAt>0 && ++uf==g_reloadAt) StartReload(); }
@@ -2697,11 +2536,12 @@ static void Update(void) {
         else if (IsSoundPlaying(cw->fireSnd)) StopSound(cw->fireSnd);
     }
 
-    UpdateEnemies(dt);
-    UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
-    UpdateSmoke(dt);
-    UpdateGrenades(dt);
+}
 
+// Advance the live weapon's viewmodel clips one frame (idle hold, walk loop, shot,
+// reload sequence, grenade-launcher scrub, minigun barrel spin). Shared with the gallery.
+static void WeaponAnimate(float dt, int moving){
+    Weapon *cw=&g_weapons[g_curWeapon];
     // advance weapon animation. idle = HOLD the last frame of Take (static ready
     // pose, no wandering). One-shot clips (Shoot/Reload) play through, then snap
     // back to the held idle.
@@ -2769,6 +2609,209 @@ static void Update(void) {
             }
         }
     }
+
+}
+
+// Tracers fade; sparks and blood fly under gravity and settle on the floor. Shared with the gallery.
+static void EffectsUpdate(float dt){
+    for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0) g_tracers[i].life-=dt;
+    for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
+        Spark *sp=&g_sparks[i];
+        int resting=(sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0 && sp->pos.y<=sp->rest+0.03f);
+        if (resting){
+            if (!sp->lasting) sp->life-=dt;        // glints + fine spray fade; lasting blood puddles stay put
+        } else {
+            sp->life-=dt;
+            sp->vel.y-=12.0f*dt;
+            sp->pos=Vector3Add(sp->pos,Vector3Scale(sp->vel,dt));
+            if (sp->pos.y<=sp->rest){              // hit the floor -> settle
+                float hl=sqrtf(sp->vel.x*sp->vel.x+sp->vel.z*sp->vel.z);  // keep the horizontal heading for a directional splat
+                if (hl>0.001f){ sp->ix=sp->vel.x/hl; sp->iz=sp->vel.z/hl; }
+                sp->pos.y=sp->rest+0.015f; sp->vel=(Vector3){0,0,0};
+                if (sp->lasting){ sp->life=1e9f; sp->life0=1e9f; }   // lasting blood puddle (full opacity)
+                else if (sp->life<0.5f) sp->life=0.5f;             // brief impact glow
+            }
+        }
+    }
+
+}
+
+static void Update(void) {
+    float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
+
+    // While P-paused, ANY of P / ESC / click resumes (handled here, before ESC would
+    // otherwise open the options menu). Stays captured so play resumes seamlessly.
+    if (g_paused){
+        if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
+            g_paused=0; DebugLog("pause","\"paused\":false");
+        }
+        return;
+    }
+
+    // ESC toggles the options/pause menu. While open the cursor is freed for
+    // clicking and the whole gameplay update is skipped (early return), so the
+    // world freezes behind the overlay.
+    if (IsKeyPressed(KEY_ESCAPE)){
+        g_menu=!g_menu;
+        if (g_menu) EnableCursor(); else DisableCursor();
+        DebugLog("menu","\"open\":%s", g_menu?"true":"false");
+    }
+    if (g_menu){
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
+            Vector2 mp=GetMousePosition();
+            for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))){
+                if (i==0){                                  // Fullscreen toggle
+                    g_fullscreen=!g_fullscreen; ApplyFullscreen(g_fullscreen); SaveOptions();
+                    EnableCursor();                         // the toggle can re-grab; keep it free for the menu
+                    DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
+                } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Restart Run -> reload the arena from wave 1
+                    DebugLog("menu","\"selectMap\":true"); }
+                else if (i==2){ g_menu=0; DisableCursor(); }      // Resume
+                else if (i==3) g_quit=1;                          // Quit
+            }
+        }
+        return;
+    }
+
+    // P pauses/unpauses the game: the gameplay update is skipped (early return) so
+    // the world freezes, but the cursor stays captured so play resumes seamlessly.
+    if (IsKeyPressed(KEY_P)){
+        g_paused=!g_paused;
+        DebugLog("pause","\"paused\":%s", g_paused?"true":"false");
+    }
+    if (g_paused) return;
+
+    // Dead: the world is frozen (no move/fire, enemies stop too) behind the "YOU
+    // DIED" overlay. After a short beat, ENTER or a click respawns you at spawn.
+    if (g_dead){
+        g_deadT += dt;
+        if (g_hurt>0) g_hurt=fmaxf(0.0f, g_hurt-dt*1.2f);
+        if (g_deadT>1.0f && (IsKeyPressed(KEY_ENTER) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))){
+            if (g_hasMap) g_returnToMenu=1;            // a death ENDS the run -> reload the arena, wave 1
+            else RespawnPlayer();                      // built-in arena keeps the quick respawn
+        }
+        return;
+    }
+
+    // --cycle (soak): step through every slot twice -- spending ammo on pass 1 --
+    // logging the counts at each stop. The soak asserts pass 2 reads back pass 1's
+    // spent values: any slot-state corruption around the ActivateWeapon /
+    // StashActiveTuning swap shows up as a mismatch.
+    if (g_cycleTest){
+        static int cf=0, k=0;
+        if (k<2*g_numWeapons && ++cf>=30){
+            cf=0; int slot=(k+1)%g_numWeapons;      // 1..N-1,0 twice -- ends back on the boot slot
+            SwitchWeapon(slot);
+            Weapon *w=&g_weapons[slot];
+            if (k<g_numWeapons && w->magSize>0){ w->mag-=(w->mag<3?w->mag:3); w->reserve-=(w->reserve<2?w->reserve:2); }
+            DebugLog("ammo","\"phase\":%d,\"slot\":%d,\"mag\":%d,\"reserve\":%d,\"magSize\":%d",
+                     (k<g_numWeapons)?1:2, slot, w->mag, w->reserve, w->magSize);
+            k++;
+        }
+    }
+
+    // Keep the mouse captured the whole time we're playing. macOS releases the
+    // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
+    // re-grab it the instant we have focus again and it's become visible.
+    if (IsWindowFocused() && !IsCursorHidden()) DisableCursor();
+
+    if (IsWindowReady() && IsCursorHidden()){
+        Vector2 md=GetMouseDelta();
+        g_vmLook=md;
+        g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f;
+        if (g_pitch>1.5f) g_pitch=1.5f;  if (g_pitch<-1.5f) g_pitch=-1.5f;
+    }
+    Vector3 fwd =Vector3Normalize((Vector3){ sinf(g_yaw)*cosf(g_pitch), sinf(g_pitch), cosf(g_yaw)*cosf(g_pitch) });
+    Vector3 flat=Vector3Normalize((Vector3){ sinf(g_yaw), 0, cosf(g_yaw) });
+    Vector3 right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
+
+    float speed=(IsKeyDown(KEY_LEFT_SHIFT)?9.0f:5.0f)*(g_speedT>0.0f?1.5f:1.0f);   // SPEED power-up
+    Vector3 wish={0,0,0}; int moving=0;
+    if (IsKeyDown(KEY_W)){wish=Vector3Add(wish,flat);moving=1;}
+    if (IsKeyDown(KEY_S)){wish=Vector3Subtract(wish,flat);moving=1;}
+    if (IsKeyDown(KEY_D)){wish=Vector3Add(wish,right);moving=1;}
+    if (IsKeyDown(KEY_A)){wish=Vector3Subtract(wish,right);moving=1;}
+    if (g_kite){                                        // dev autopilot: face the nearest enemy, back away
+        float bd=1e9f; int bi=-1;
+        for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1){ float dd=Vector3Distance(g_enemies[k].pos,g_pos); if (dd<bd){ bd=dd; bi=k; } }
+        if (bi>=0){ g_yaw=atan2f(g_enemies[bi].pos.x-g_pos.x, g_enemies[bi].pos.z-g_pos.z); g_pitch=-0.05f;
+            flat=(Vector3){sinf(g_yaw),0,cosf(g_yaw)}; right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
+            wish=Vector3Subtract(wish,flat); if (((int)(GetTime()/3.0))&1) wish=Vector3Add(wish,Vector3Scale(right,0.6f)); moving=1; }
+    }
+    g_playerMoveAmt += ((moving?1.0f:0.0f)-g_playerMoveAmt)*fminf(1.0f,dt*6.0f);   // spoils enemy hitscan aim
+    Vector3 mv={0,0,0};
+    if (moving && Vector3Length(wish)>0.001f){
+        wish=Vector3Scale(Vector3Normalize(wish),speed*dt);
+        mv=wish; g_bob+=dt*(IsKeyDown(KEY_LEFT_SHIFT)?14.0f:10.0f);
+    }
+    if (g_hasMap && !g_noclip){                         // block into walls per-axis (so you slide, never drift)
+        float by=g_pos.y-0.55f;
+        if (!MapSphereHitsWall((Vector3){g_pos.x+mv.x, by, g_pos.z}, 0.42f)) g_pos.x+=mv.x;
+        if (!MapSphereHitsWall((Vector3){g_pos.x, by, g_pos.z+mv.z}, 0.42f)) g_pos.z+=mv.z;
+    } else { g_pos.x+=mv.x; g_pos.z+=mv.z; }
+    if (g_hasMap && g_noclip){                         // F: free-fly / noclip (inspect or escape)
+        if (IsKeyDown(KEY_SPACE))        g_pos.y += speed*dt;
+        if (IsKeyDown(KEY_LEFT_CONTROL)) g_pos.y -= speed*dt;
+        g_vy=0; g_grounded=1;
+    } else if (g_hasMap){                               // FPS collision against the loaded map mesh
+        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=6.0f; g_grounded=0; }
+        float dn=MapRayNearest(g_pos,(Vector3){0,-1,0},80.0f);  // eye -> floor distance
+        float floorEye = (dn>0) ? g_pos.y-dn+EYE_H : -1e30f;    // eye height standing on that floor
+        const float STEP=0.7f;                                  // auto climb/descend up to this height
+        if (g_vy<=0.0f && dn>0 && (g_pos.y-floorEye)<=STEP){
+            // grounded (or within a step of the floor): glue the feet to it,
+            // but feed the height change into g_eyeSmooth so the CAMERA eases
+            // over the step instead of popping (the actual stair-jitter fix).
+            g_eyeSmooth += floorEye - g_pos.y;
+            if (g_eyeSmooth> 1.0f) g_eyeSmooth= 1.0f;
+            if (g_eyeSmooth<-1.0f) g_eyeSmooth=-1.0f;
+            g_pos.y=floorEye; g_vy=0.0f; g_grounded=1;
+        } else {                                                // airborne: ballistic
+            g_vy-=18.0f*dt; g_pos.y+=g_vy*dt; g_grounded=0;
+            if (dn>0 && g_pos.y<=floorEye){ g_pos.y=floorEye; g_vy=0.0f; g_grounded=1; }   // land
+            if (g_vy>0.0f){ float up=MapRayNearest(g_pos,(Vector3){0,1,0},0.4f); if (up>0) g_vy=0.0f; }  // ceiling
+        }
+    } else {
+        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
+        g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
+        if (g_pos.y<=EYE_H){ g_pos.y=EYE_H; g_vy=0; g_grounded=1; }
+    }
+    // Fell out of the world (off a ledge into the void). Lethal in normal play; in
+    // god mode just teleport back to spawn so dev play isn't an endless fall.
+    if (g_hasMap && !g_noclip && g_pos.y < g_voidY){
+        if (!g_godMode) g_playerHp = 0.0f;
+        g_pos=g_spawnResetPos; g_vy=0.0f; g_grounded=0; g_eyeSmooth=0.0f;
+        DebugLog("void","\"fell\":true,\"died\":%s", g_godMode?"false":"true");
+    }
+    Collide();
+
+    // ease the step-smoothing offset back to 0 (~0.15s), then view from the
+    // smoothed eye height so stairs glide instead of popping
+    if (g_eyeSmooth!=0.0f){ g_eyeSmooth -= g_eyeSmooth*fminf(1.0f,dt*14.0f); if (fabsf(g_eyeSmooth)<0.002f) g_eyeSmooth=0.0f; }
+    Vector3 eye=g_pos; eye.y-=g_eyeSmooth;
+    if (g_shake>0.001f){                                   // minigun brain-shake: jitter the head a touch
+        float a=g_shake*0.055f;
+        eye.x += GetRandomValue(-1000,1000)/1000.0f*a;
+        eye.y += GetRandomValue(-1000,1000)/1000.0f*a;
+        eye.z += GetRandomValue(-1000,1000)/1000.0f*a;
+    }
+    g_cam.position=eye; g_cam.target=Vector3Add(eye,fwd); g_cam.up=(Vector3){0,1,0};
+    if (g_shake>0.001f){                                   // plus a little look-direction wobble
+        float a=g_shake*0.03f;
+        g_cam.target.x += GetRandomValue(-1000,1000)/1000.0f*a;
+        g_cam.target.y += GetRandomValue(-1000,1000)/1000.0f*a;
+    }
+
+    // shooting / reload
+    Weapon *cw=&g_weapons[g_curWeapon];
+    WeaponTrigger(dt, fwd, IsMouseButtonDown(MOUSE_BUTTON_LEFT), IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+
+    UpdateEnemies(dt);
+    UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
+    UpdateSmoke(dt);
+    UpdateGrenades(dt);
+
+    WeaponAnimate(dt, moving);                             // the gun's idle/shot/reload clips
 
     // overlay + inspect + reset
     if (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB)) g_devOverlay=!g_devOverlay;
@@ -2886,25 +2929,7 @@ static void Update(void) {
         }
     }
 
-    for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0) g_tracers[i].life-=dt;
-    for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
-        Spark *sp=&g_sparks[i];
-        int resting=(sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0 && sp->pos.y<=sp->rest+0.03f);
-        if (resting){
-            if (!sp->lasting) sp->life-=dt;        // glints + fine spray fade; lasting blood puddles stay put
-        } else {
-            sp->life-=dt;
-            sp->vel.y-=12.0f*dt;
-            sp->pos=Vector3Add(sp->pos,Vector3Scale(sp->vel,dt));
-            if (sp->pos.y<=sp->rest){              // hit the floor -> settle
-                float hl=sqrtf(sp->vel.x*sp->vel.x+sp->vel.z*sp->vel.z);  // keep the horizontal heading for a directional splat
-                if (hl>0.001f){ sp->ix=sp->vel.x/hl; sp->iz=sp->vel.z/hl; }
-                sp->pos.y=sp->rest+0.015f; sp->vel=(Vector3){0,0,0};
-                if (sp->lasting){ sp->life=1e9f; sp->life0=1e9f; }   // lasting blood puddle (full opacity)
-                else if (sp->life<0.5f) sp->life=0.5f;             // brief impact glow
-            }
-        }
-    }
+    EffectsUpdate(dt);                                     // tracers fade, blood/sparks fly and settle
 
     // Damage feedback + death (after every hp change this frame: enemy melee, void).
     if (g_playerHp < g_prevHp-0.01f){                               // took a hit -> punch the red flash
@@ -2927,31 +2952,8 @@ static void Update(void) {
     }
 }
 
-static void DrawWorld(void) {
-    if (g_hasMap){                          // SPIKE: draw the loaded .map (no collision yet)
-        rlDisableBackfaceCulling();         // brush winding flips under the Z->Y axis swap
-        if (g_hasScrollShader && g_mapMeshScrollAny){
-            // per-mesh draw so flowing liquids/warpzones can scroll their UVs (tcMod scroll)
-            float t=(float)GetTime();
-            for (int i=0;i<g_map.meshCount;i++){
-                float sx=g_mapMeshScroll[i*2], sy=g_mapMeshScroll[i*2+1];
-                Vector2 off={ sx*t, sy*t };
-                SetShaderValue(g_scrollShader,g_scrollLoc,&off,SHADER_UNIFORM_VEC2);
-                DrawMesh(g_map.meshes[i], g_map.materials[g_map.meshMaterial[i]], g_map.transform);
-            }
-        } else {
-            DrawModel(g_map,(Vector3){0,0,0},1.0f,WHITE);
-        }
-        rlEnableBackfaceCulling();
-    } else {
-        DrawModelEx(g_floor,(Vector3){0,0,0},(Vector3){0,1,0},0,(Vector3){ARENA*2,1,ARENA*2},WHITE);
-        DrawModelEx(g_wall,(Vector3){0,WALL_H/2, ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
-        DrawModelEx(g_wall,(Vector3){0,WALL_H/2,-ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
-        DrawModelEx(g_wall,(Vector3){ ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
-        DrawModelEx(g_wall,(Vector3){-ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
-        for (int c=0;c<NUM_CRATES;c++)
-            DrawModelEx(g_crate,g_crates[c].pos,(Vector3){0,1,0},0,g_crates[c].size,g_crates[c].col);
-    }
+// Tracers, sparks, blood (flying, spatter, pools), scorch and in-flight grenades. Inside BeginMode3D.
+static void DrawEffects(void){
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0)
         DrawLine3D(g_tracers[i].a,g_tracers[i].b,(Color){255,240,150,255});
     for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
@@ -3006,6 +3008,34 @@ static void DrawWorld(void) {
     DrawScorch();                                          // flamethrower soot, laid on the surfaces it touched
     for (int i=0;i<MAX_GREN;i++) if (g_gren[i].active)     // in-flight grenades: a small dark sphere
         DrawSphereEx(g_gren[i].pos, 0.13f, 8, 8, (Color){45,50,42,255});
+}
+
+static void DrawWorld(void) {
+    if (g_hasMap){                          // SPIKE: draw the loaded .map (no collision yet)
+        rlDisableBackfaceCulling();         // brush winding flips under the Z->Y axis swap
+        if (g_hasScrollShader && g_mapMeshScrollAny){
+            // per-mesh draw so flowing liquids/warpzones can scroll their UVs (tcMod scroll)
+            float t=(float)GetTime();
+            for (int i=0;i<g_map.meshCount;i++){
+                float sx=g_mapMeshScroll[i*2], sy=g_mapMeshScroll[i*2+1];
+                Vector2 off={ sx*t, sy*t };
+                SetShaderValue(g_scrollShader,g_scrollLoc,&off,SHADER_UNIFORM_VEC2);
+                DrawMesh(g_map.meshes[i], g_map.materials[g_map.meshMaterial[i]], g_map.transform);
+            }
+        } else {
+            DrawModel(g_map,(Vector3){0,0,0},1.0f,WHITE);
+        }
+        rlEnableBackfaceCulling();
+    } else {
+        DrawModelEx(g_floor,(Vector3){0,0,0},(Vector3){0,1,0},0,(Vector3){ARENA*2,1,ARENA*2},WHITE);
+        DrawModelEx(g_wall,(Vector3){0,WALL_H/2, ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        DrawModelEx(g_wall,(Vector3){0,WALL_H/2,-ARENA},(Vector3){0,1,0}, 0,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        DrawModelEx(g_wall,(Vector3){ ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        DrawModelEx(g_wall,(Vector3){-ARENA,WALL_H/2,0},(Vector3){0,1,0},90,(Vector3){ARENA*2,WALL_H,1},WHITE);
+        for (int c=0;c<NUM_CRATES;c++)
+            DrawModelEx(g_crate,g_crates[c].pos,(Vector3){0,1,0},0,g_crates[c].size,g_crates[c].col);
+    }
+    DrawEffects();                                         // tracers, sparks, blood, scorch, grenades
 }
 
 // Soot smudges on a body: one soft dark billboard per flame-char mark, at its height
@@ -4032,6 +4062,11 @@ int main(int argc, char **argv) {
 
     SetTraceLogLevel(LOG_WARNING);
     SetTraceLogCallback(FilteredTraceLog);   // drop raylib's harmless u32->u16 index spam
+    // CHERNOBYL_BACKGROUND=1: automated test runs open a HIDDEN, unfocused window, so they
+    // don't take the keyboard or cover what the person at the machine is doing. (Minimized
+    // doesn't work: macOS stops a minimized window's buffer swaps and the loop stalls.)
+    int bgRun = getenv("CHERNOBYL_BACKGROUND") && *getenv("CHERNOBYL_BACKGROUND") && strcmp(getenv("CHERNOBYL_BACKGROUND"),"0");
+    if (bgRun) SetConfigFlags(FLAG_WINDOW_UNFOCUSED|FLAG_WINDOW_HIDDEN);
     InitWindow(1280,720,"Chernobyl 2");
     SetExitKey(KEY_NULL);              // ESC opens the options menu instead of quitting
     int ready=IsWindowReady();
@@ -4080,7 +4115,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (g_viewA){ int r=!strcmp(g_viewA,"all")?RunGallery():RunViewer(); CloseWindow(); return r; }   // --viewer: no game, no audio
+    if (g_viewA && strcmp(g_viewA,"all")){ int r=RunViewer(); CloseWindow(); return r; }   // --viewer <glb>: no game, no audio
+    // (--viewer all, the enemy gallery, starts further down: its weapon mode needs the guns + audio)
     InitAudioDevice();                 // weapon fire sounds; harmless if it fails
     if (g_mute || getenv("CHERNOBYL_MUTE")) SetMasterVolume(0.0f);   // silent test runs
     if (getenv("CHERNOBYL_NO_LOD")) g_noLod=1;
@@ -4220,6 +4256,12 @@ int main(int argc, char **argv) {
         if (t==EN_COOK) g_hasEnemy=ok;
     }
     // (the starting wave of enemies is spawned per-map in StartSelectedMap)
+
+    if (g_viewA){                       // --viewer all: the enemy gallery (+ weapon range), no map, no game
+        int r=RunGallery();
+        if (g_audio) CloseAudioDevice();
+        CloseWindow(); return r;
+    }
 
 #if defined(__EMSCRIPTEN__)
     if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;

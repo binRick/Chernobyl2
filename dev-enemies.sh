@@ -7,10 +7,12 @@
 # Keys:
 #   TAB / ]  next enemy     [  previous      1 idle 2 walk 3 pursue 4 attack 5 hit 6 die 7 cast (priest)
 #   A auto-cycle   SPACE pause   drag/arrows turn   wheel zoom   F face close-up   ESC quit
+#   W or the WEAPON button: weapon mode -- pick a gun on the bottom bar and shoot the enemy
+#     click fire   right-drag/arrows aim   C re-aim   R reload   (ammo never runs out)
 cd "$(dirname "$0")"
 ENEMIES="cook linecook butcher liquidator headchef rifleman gunner mutant priest revenant fiend"
 if [[ $1 == -h || $1 == --help ]]; then
-    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
     echo; echo "Enemies: $ENEMIES"
     exit 0
 fi

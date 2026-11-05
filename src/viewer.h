@@ -171,11 +171,37 @@ static Rectangle GalButton(int k, int sw, int sh){
     return (Rectangle){ sw-w-12, top+k*rowH, w, rowH-4 };
 }
 
+// ---- weapon range: the game's own guns (viewmodel, sounds, cadence, tracers, blood, flinch,
+// death) fired at the gallery enemy from RANGE_DIST away. Bottom bar: [WEAPON ON/OFF] + one
+// button per gun, in the game's number-key order. Left click fires, right-drag aims, R reloads,
+// ammo never runs out. The target flinches, dies, and stands back up 2 s later.
+#define RANGE_DIST 5.0f
+static const int kRangeSlot[6]={2,5,0,1,3,4};          // = the game's kSlotForKey: minigun first
+static Rectangle GalWeaponButton(int k, int sh){        // k=0: the ON/OFF toggle, 1..6: guns
+    float w=(k==0)?150.0f:132.0f, x=14.0f+(k>0?150.0f+6.0f+(k-1)*(132.0f+6.0f):0.0f);
+    return (Rectangle){ x, sh-28.0f-44.0f, w, 36.0f };
+}
+static void RangeTargetReset(int type){
+    for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;
+    Enemy *e=&g_enemies[0]; memset(e,0,sizeof *e);
+    e->type=type; e->state=1; e->hp=e->maxHp=kEnemy[type].hp; e->pos=(Vector3){0,0,0};
+    for (int i=0;i<MAX_SPARKS;i++) g_sparks[i].life=0;  // wipe the last body's blood
+}
+static void RangeAimHome(int type){                     // look at the chest
+    g_yaw=PI; g_pitch=atan2f(1.15f*kEnemy[type].scale-EYE_H, RANGE_DIST);
+}
+static void RangeSilence(void){
+    Weapon *w=&g_weapons[g_curWeapon];
+    if (g_audio && w->hasSnd && IsSoundPlaying(w->fireSnd)) StopSound(w->fireSnd);
+    if (g_audio && w->hasAuxSnd && IsSoundPlaying(w->auxSnd)) StopSound(w->auxSnd);
+}
+
 static int RunGallery(void){
-    for (int t=0;t<EN_NTYPES;t++){ char p[96]; snprintf(p,sizeof p,"assets/%s.glb",kEnemy[t].name); LoadEnemyRig(&g_rig[t],p); }
+    for (int t=0;t<EN_NTYPES;t++) if (!g_rig[t].ok){ char p[96]; snprintf(p,sizeof p,"assets/%s.glb",kEnemy[t].name); LoadEnemyRig(&g_rig[t],p); }
     int type=0, st=GS_WALK, paused=0, autoMode=0, face=0;
     float frame=0, turn=25.0f, dist=3.6f, stT=0, hold=0;
     Vector3 boltP={0}; float boltT=-1;
+    int range=0, armed=0; float deadT=0;
     int galShots=getenv("CHERNOBYL_GALLERY_TEST")?atoi(getenv("CHERNOBYL_GALLERY_TEST")):0, galShot=0; float galClock=0;
     if (galShots>0){ autoMode=1; type=EN_MUTANT; st=GS_IDLE; }   // starts on the mutant: covers the bolt throw
     // dev: CHERNOBYL_GALLERY_POSE="name:state:f1,f2,..." -> one still per clip fraction, then exit
@@ -192,36 +218,57 @@ static int RunGallery(void){
       if (ss && *ss){ char nm[32]={0}; const char *c=strchr(ss,':'); size_t n=c?(size_t)(c-ss):strlen(ss);
         if (n<sizeof nm){ memcpy(nm,ss,n); for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) type=t; }
         if (c){ int k=atoi(c+1); if (k>=1 && k<=GS_N) st=k-1; } } }
+    // dev: CHERNOBYL_GALLERY_RANGE="slot[:seconds]" -> start in weapon mode with that gun (g_weapons
+    // index); with seconds, hold the trigger that long, screenshot build/range_NN.png every 0.5 s, exit
+    float rangeTest=0, rangeClock=0; int rangeShot=0;
+    { const char *rs=getenv("CHERNOBYL_GALLERY_RANGE");
+      if (rs && *rs){ int sl=atoi(rs); if (sl>=0 && sl<g_numWeapons && g_weapons[sl].has){ range=1; ActivateWeapon(sl); }
+        const char *c=strchr(rs,':'); if (c) rangeTest=(float)atof(c+1); } }
+    for (int c=0;c<NUM_CRATES;c++) g_crates[c].pos.y=-100.0f;   // the arena's invisible crates would eat bullets
+    if (range){ RangeTargetReset(type); RangeAimHome(type); }
     GalThumbs();
     EnableCursor();
     while (!WindowShouldClose()){
         float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
         EnemyRig *rg=&g_rig[type];
-        int prevType=type, prevSt=st;
+        int prevType=type, prevSt=st, prevRange=range;
         if (IsKeyPressed(KEY_TAB)||IsKeyPressed(KEY_RIGHT_BRACKET)) type=(type+1)%EN_NTYPES;
         if (IsKeyPressed(KEY_LEFT_BRACKET)) type=(type+EN_NTYPES-1)%EN_NTYPES;
         for (int k=0;k<GS_N;k++) if (IsKeyPressed(KEY_ONE+k)) st=k;
         if (IsKeyPressed(KEY_A)) autoMode=!autoMode;
         if (IsKeyPressed(KEY_SPACE)) paused=!paused;
-        if (IsKeyPressed(KEY_F)) face=!face;
-        if (IsKeyDown(KEY_LEFT))  turn-=90*dt;
-        if (IsKeyDown(KEY_RIGHT)) turn+=90*dt;
-        if (IsKeyDown(KEY_UP))    dist-=1.5f*dt;
-        if (IsKeyDown(KEY_DOWN))  dist+=1.5f*dt;
-        int overPick=-1;                                                   // enemy buttons: click to pick
-        { Vector2 mp=GetMousePosition(); int sw0=GetScreenWidth(), sh0=GetScreenHeight();
-          for (int k=0;k<EN_NTYPES;k++) if (CheckCollisionPointRec(mp,GalButton(k,sw0,sh0))) overPick=k; }
+        if (IsKeyPressed(KEY_W)) range=!range;
+        if (!range){
+            if (IsKeyPressed(KEY_F)) face=!face;
+            if (IsKeyDown(KEY_LEFT))  turn-=90*dt;
+            if (IsKeyDown(KEY_RIGHT)) turn+=90*dt;
+            if (IsKeyDown(KEY_UP))    dist-=1.5f*dt;
+            if (IsKeyDown(KEY_DOWN))  dist+=1.5f*dt;
+        }
+        int sw0=GetScreenWidth(), sh0=GetScreenHeight();
+        int overPick=-1, overW=-1;                                         // buttons: click to pick
+        { Vector2 mp=GetMousePosition();
+          for (int k=0;k<EN_NTYPES;k++) if (CheckCollisionPointRec(mp,GalButton(k,sw0,sh0))) overPick=k;
+          for (int k=0;k<=6;k++) if (CheckCollisionPointRec(mp,GalWeaponButton(k,sh0))) overW=k; }
         static int dragging=0;                                             // a drag that starts on a button doesn't turn
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
-            if (overPick>=0){ type=overPick; autoMode=0; dragging=0; }
+            armed=0; dragging=0;
+            if (overPick>=0){ type=overPick; autoMode=0; }
+            else if (overW==0) range=!range;
+            else if (overW>0){ int sl=kRangeSlot[overW-1];
+                if (g_weapons[sl].has){ if (!range){ range=1; ActivateWeapon(sl); } else if (sl!=g_curWeapon) SwitchWeapon(sl); } }
+            else if (range) armed=1;                                       // the trigger
             else dragging=1;
         }
-        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) dragging=0;
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)){ dragging=0; armed=0; }
         if (dragging) turn+=GetMouseDelta().x*0.4f;
-        dist-=GetMouseWheelMove()*0.25f; if (dist<0.8f) dist=0.8f; if (dist>9) dist=9;
+        if (!range){ dist-=GetMouseWheelMove()*0.25f; if (dist<0.8f) dist=0.8f; if (dist>9) dist=9; }
         if (st==GS_CAST && kEnemy[type].kind!=AK_RAISE) st=GS_ATTACK;          // only the priest casts
         if (type!=prevType || st!=prevSt){ frame=0; stT=0; hold=0; boltT=-1;
         }
+        if (range && !prevRange){ autoMode=0; RangeTargetReset(type); RangeAimHome(type); g_vmRaise=1.0f; }
+        if (!range && prevRange){ RangeSilence(); g_autoFire=0; for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0; }
+        if (range && type!=prevType){ RangeTargetReset(type); RangeAimHome(type); deadT=0; }
         rg=&g_rig[type];
         if (!rg->ok || rg->animN<=0){ type=(type+1)%EN_NTYPES; continue; }
         ModelAnimation *an=&rg->anim[rg->clip[kGalRole[st]]];
@@ -248,29 +295,86 @@ static int RunGallery(void){
                        an=&rg->anim[rg->clip[kGalRole[st]]]; nf=ANIM_FRAMES(*an); if (nf<1) nf=1; }
         }
         if (poseN>0) frame=poseF[poseI]*(nf-1);
-        RigPose(rg,an,frame);
+
+        // ---- weapon range: aim, trigger, the target's flinch / death / stand-up
+        Enemy *tg=&g_enemies[0];
+        float drawFrame=frame; ModelAnimation *drawAn=an;
+        Vector3 fwd={0,0,-1};
+        if (range){
+            Vector2 md=GetMouseDelta();
+            if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)){ g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f; g_vmLook.x+=md.x; g_vmLook.y+=md.y; }
+            if (IsKeyDown(KEY_LEFT))  g_yaw+=1.2f*dt;
+            if (IsKeyDown(KEY_RIGHT)) g_yaw-=1.2f*dt;
+            if (IsKeyDown(KEY_UP))    g_pitch+=1.0f*dt;
+            if (IsKeyDown(KEY_DOWN))  g_pitch-=1.0f*dt;
+            if (IsKeyPressed(KEY_C)) RangeAimHome(type);
+            if (g_pitch>1.2f) g_pitch=1.2f; if (g_pitch<-1.2f) g_pitch=-1.2f;
+            g_pos=(Vector3){0,EYE_H,RANGE_DIST};
+            fwd=Vector3Normalize((Vector3){ sinf(g_yaw)*cosf(g_pitch), sinf(g_pitch), cosf(g_yaw)*cosf(g_pitch) });
+            g_cam=(Camera3D){ g_pos, Vector3Add(g_pos,fwd), (Vector3){0,1,0}, 70.0f, CAMERA_PERSPECTIVE };
+            if (rangeTest>0) g_autoFire=(rangeClock<rangeTest);
+            int held=armed && IsMouseButtonDown(MOUSE_BUTTON_LEFT), pressed=armed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+            WeaponTrigger(dt, fwd, held, pressed);
+            WeaponAnimate(dt, 0);
+            EffectsUpdate(dt); UpdateSmoke(dt); UpdateGrenades(dt);
+            Weapon *cw=&g_weapons[g_curWeapon];
+            if (cw->magSize>0 && cw->reserve<cw->magSize) cw->reserve=cw->reserveStart;   // the range never runs dry
+            if (tg->state==0) RangeTargetReset(type);
+            if (tg->state==2){                                             // shot dead: fall, lie there, stand back up
+                deadT+=dt;
+                drawAn=&rg->anim[rg->clip[CL_DEATH]];
+                drawFrame=fminf(deadT*60.0f,(float)rg->deathFrame);
+                if (deadT>(float)rg->deathFrame/60.0f+2.0f){ RangeTargetReset(type); deadT=0; }
+            } else if (tg->hitT>0){                                        // flinch
+                drawAn=&rg->anim[rg->clip[CL_HIT]];
+                int hf=ANIM_FRAMES(*drawAn); drawFrame=fminf((0.45f-tg->hitT)*30.0f,(float)(hf>0?hf-1:0));
+                tg->hitT-=dt;
+            }
+        }
+        RigPose(rg,drawAn,drawFrame);
         float esc=ENEMY_SCALE*kEnemy[type].scale;
         float head=ViewerHeadY(rg)*kEnemy[type].scale, tall=head/0.92f;
         float d=face?0.95f*tall/1.75f:dist*tall/1.75f, ly=face?head+0.02f:1.05f*tall/1.75f;
         float yr=turn*DEG2RAD;
         Camera3D cam={ (Vector3){sinf(yr)*d, ly+(face?0.02f:0.15f), cosf(yr)*d}, (Vector3){0,ly,0}, (Vector3){0,1,0}, face?32.0f:42.0f, CAMERA_PERSPECTIVE };
+        if (range) cam=g_cam;
         BeginDrawing();
         ClearBackground((Color){14,13,15,255});
         BeginMode3D(cam);
         DrawPlane((Vector3){0,-0.002f,0},(Vector2){30,30},(Color){34,32,30,255});
         // floor lines scroll under walk/pursue at the enemy's real speed (feet should "grip")
         float sp = (st==GS_RUN)?kEnemy[type].speed:((st==GS_WALK)?kEnemy[type].speed*0.45f:0.0f);
+        if (range && tg->state!=1) sp=0;
         float off=fmodf(GetTime()*sp,1.0f); if (paused) off=0;
         for (int z=-8;z<=8;z++){ float zz=z+off; DrawLine3D((Vector3){-8,0,zz},(Vector3){8,0,zz},(Color){60,56,52,255}); }
         for (int x=-8;x<=8;x++) DrawLine3D((Vector3){(float)x,0,-8},(Vector3){(float)x,0,8},(Color){48,45,42,255});
         ViewerLights(cam.position);
         DrawModelEx(rg->model,(Vector3){0,0,0},(Vector3){0,1,0},ENEMY_YAW_OFFSET,(Vector3){esc,esc,esc},WHITE);
-        if (boltT>=0){                                                     // the radiation bolt, flying off "at the player"
+        if (boltT>=0 && !(range && tg->state!=1)){                         // the radiation bolt, flying off "at the player"
             Vector3 bp={boltP.x, boltP.y-1.0f*boltT, boltP.z+13.0f*boltT};       // from the hand it left
             DrawSphere(bp,0.12f,(Color){140,255,90,255}); DrawSphereWires(bp,0.2f,6,6,(Color){90,220,60,120});
         }
+        if (range){
+            if (tg->burnN>0) DrawBurnMarks((Vector3){0,0,0}, tg->state==2?0.30f:1.0f, tg->burnY, tg->burnR, tg->burnN);
+            DrawEffects();
+            DrawSmoke(g_cam);
+        }
         EndMode3D();
         int sw=GetScreenWidth(), sh=GetScreenHeight();
+        if (range){
+            DrawViewmodel();
+            DrawVignette(g_shake);
+            int cx=sw/2, cy=sh/2; Color ch=(Color){235,235,235,220};       // crosshair
+            DrawRectangle(cx-12,cy-1,8,2,ch); DrawRectangle(cx+4,cy-1,8,2,ch);
+            DrawRectangle(cx-1,cy-12,2,8,ch); DrawRectangle(cx-1,cy+4,2,8,ch);
+            Weapon *cw=&g_weapons[g_curWeapon];
+            const char *ammo = cw->flame ? TextFormat("fuel %d", cw->mag) : (cw->magSize>0 ? TextFormat("%d / %d", cw->mag, cw->reserve) : "");
+            DrawText(TextFormat("%s   %s%s", cw->label, ammo, g_reloading?"   RELOADING":""), sw/2-220, sh-28-44-34, 22, (Color){235,220,170,255});
+            float hpk=tg->maxHp>0?fmaxf(0.0f,tg->hp)/tg->maxHp:0;          // the target's health
+            DrawRectangle(26,160,240,12,(Color){40,20,20,220}); DrawRectangle(26,160,(int)(240*hpk),12,(Color){210,50,40,255});
+            DrawText(tg->state==2?"DOWN -- back up in a moment":TextFormat("hp %.0f / %.0f", fmaxf(0.0f,tg->hp), tg->maxHp), 274, 157, 16, (Color){200,200,200,255});
+            if (g_hsFlash>0) DrawText("HEADSHOT!", sw/2-MeasureText("HEADSHOT!",40)/2, sh/2-90, 40, (Color){255,70,50,(unsigned char)fminf(255.0f,g_hsFlash*400.0f)});
+        }
         DrawText(TextFormat("%s", kEnemy[type].name), 24, 20, 40, (Color){255,90,70,255});
         DrawText(TextFormat("%d/%d   %s   hp %.0f   speed %.1f m/s", type+1, EN_NTYPES, kGalKind[kEnemy[type].kind], kEnemy[type].hp, kEnemy[type].speed),
                  26, 66, 18, (Color){170,170,170,255});
@@ -283,7 +387,8 @@ static int RunGallery(void){
             DrawText(lb,x,100,22,c); x+=w+26;
         }
         DrawText(TextFormat("frame %.0f/%d   %s%s", frame, nf, autoMode?"AUTO  ":"", paused?"PAUSED":""), 26, 134, 16, (Color){140,140,140,255});
-        DrawText("click/TAB/[ ] enemy   1-7 state   A auto   SPACE pause   drag/arrows turn   wheel zoom   F face   ESC quit",
+        DrawText(range ? "click fire   right-drag/arrows aim   C re-aim   R reload   W weapon off   click/TAB enemy   1-7 state   ESC quit"
+                       : "click/TAB/[ ] enemy   1-7 state   W weapon   A auto   SPACE pause   drag/arrows turn   wheel zoom   F face   ESC quit",
                  14, sh-28, 18, (Color){150,150,150,255});
         for (int k=0;k<EN_NTYPES;k++){
             Rectangle r=GalButton(k,sw,sh);
@@ -297,14 +402,35 @@ static int RunGallery(void){
                      sel?(Color){255,220,90,255}:(hov?(Color){230,230,230,255}:(Color){160,160,160,255}));
             if (sel) DrawRectangleLinesEx(r,2,(Color){255,90,70,255});
         }
-        SetMouseCursor(overPick>=0?MOUSE_CURSOR_POINTING_HAND:MOUSE_CURSOR_DEFAULT);
+        for (int k=0;k<=6;k++){                                            // weapon bar
+            Rectangle r=GalWeaponButton(k,sh);
+            int sl=(k>0)?kRangeSlot[k-1]:-1, hov=(k==overW);
+            int on = (k==0) ? range : (range && sl==g_curWeapon);
+            int usable = (k==0) || g_weapons[sl].has;
+            DrawRectangleRec(r, on?(Color){60,40,20,235}:(hov&&usable?(Color){44,40,40,235}:(Color){24,22,25,220}));
+            const char *lb = (k==0) ? (range?"WEAPON: ON":"WEAPON: OFF") : g_weapons[sl].label;
+            int fs=18; while (fs>12 && MeasureText(lb,fs)>r.width-12) fs--;
+            Color tc = !usable?(Color){80,80,80,255}:(on?(Color){255,220,90,255}:(hov?(Color){230,230,230,255}:(Color){160,160,160,255}));
+            DrawText(lb,(int)(r.x+r.width/2-MeasureText(lb,fs)/2),(int)(r.y+r.height/2-fs/2),fs,tc);
+            if (on) DrawRectangleLinesEx(r,2,(Color){255,90,70,255});
+        }
+        SetMouseCursor((overPick>=0||overW>=0)?MOUSE_CURSOR_POINTING_HAND:(range?MOUSE_CURSOR_CROSSHAIR:MOUSE_CURSOR_DEFAULT));
         EndDrawing();
         if (poseN>0){ if (++galClock>=3){ galClock=0; TakeScreenshot(TextFormat("build/pose_%02d.png",poseI)); if (++poseI>=poseN) break; } }
         if (galShots>0){                                                   // dev self-test: CHERNOBYL_GALLERY_TEST=N
             galClock+=dt;
             if (galClock>=1.7f){ galClock=0; TakeScreenshot(TextFormat("build/gallery_%02d.png",galShot)); if (++galShot>=galShots) break; }
         }
+        if (rangeTest>0){                                                  // dev self-test: CHERNOBYL_GALLERY_RANGE=slot:seconds
+            float pc=rangeClock; rangeClock+=dt;
+            if (floorf(rangeClock/0.5f)>floorf(pc/0.5f)){
+                TakeScreenshot(TextFormat("build/range_%02d.png",rangeShot++));
+                DebugLog("range","\"t\":%.2f,\"slot\":%d,\"hp\":%.1f,\"state\":%d,\"hitT\":%.2f,\"mag\":%d",
+                         rangeClock,g_curWeapon,tg->hp,tg->state,tg->hitT,g_weapons[g_curWeapon].mag); }
+            if (rangeClock>rangeTest+1.5f) break;
+        }
     }
+    RangeSilence();
     for (int t=0;t<EN_NTYPES;t++) UnloadRenderTexture(g_galThumb[t]);
     return 0;
 }
