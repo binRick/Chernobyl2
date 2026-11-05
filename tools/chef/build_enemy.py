@@ -110,7 +110,8 @@ SPECS.update({
         skin="middleage_caucasian_male", eyebrows="eyebrow010",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.30, 0.32, 0.26), 6, 4, 14)},
-        props="gunner", aim_gun="line", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, attack=AIM_RIFLE)),   # shouldered, like the rifleman (the heavy-aim mocap held the gun at his sternum)
+        props="gunner", aim_gun="line", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, attack=AIM_RIFLE),
+        aim_hand_drop=0.14, aim_hand_out=0.10, aim_hand_fwd=0.06),   # the big receiver clears the helmet, the stock the belt   # shouldered, like the rifleman (the heavy-aim mocap held the gun at his sternum)
     "mutant": dict(   # glowing mutant: irradiated skin, throws radiation bolts
         phenotype=dict(gender=1.0, age=0.5, muscle=0.75, weight=0.3, proportions=0.4, height=0.58),
         targets={"stomach-pregnant-decr": 0.5, "torso-muscle-dorsi-incr": 0.5},
@@ -145,6 +146,9 @@ SPECS.update({
         clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
 })
 SPEC = SPECS[ENEMY]
+if os.environ.get("CHEF_SPEC"):      # dev: try spec values without editing, e.g. CHEF_SPEC='{"aim_hand_drop": 0.2}'
+    import json as _json
+    SPEC = dict(SPEC, **_json.loads(os.environ["CHEF_SPEC"]))
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
@@ -1870,9 +1874,15 @@ if SPEC.get("aim_gun") and GUN.get("parts"):
                 for bn in (f"{side}Leg", f"{side}Foot", f"{side}ToeBase"):
                     if bn in p and bn in ref:
                         p[bn][0] = ref[bn][0].copy()
-        # the gun rides above the fist: drop the cheek hand so it passes UNDER the helmet brim
+        # the gun rides above the fist: drop the cheek hand so it passes UNDER the helmet brim;
+        # a big gun (gunner's) also comes out to the right, off the cheek and the chest belt
+        a0 = fk_pos(mid, "LeftHand") - fk_pos(mid, "RightHand")
+        a0 = Vector((a0.x, a0.y, 0)).normalized()
+        right = a0.cross(Vector((0, 0, 1))).normalized()
+        off = (Vector((0, 0, -SPEC.get("aim_hand_drop", 0.12))) + right * SPEC.get("aim_hand_out", 0.0)
+               + a0 * SPEC.get("aim_hand_fwd", 0.0))
         for p in attack:
-            ik_arm(p, "Right", fk_pos(p, "RightHand") - Vector((0, 0, SPEC.get("aim_hand_drop", 0.12))))
+            ik_arm(p, "Right", fk_pos(p, "RightHand") + off)
         a = (fk_pos(mid, "LeftHand") - fk_pos(mid, "RightHand")).normalized()
     else:
         a = Vector((0, -1, 0))
