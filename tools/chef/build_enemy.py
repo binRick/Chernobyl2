@@ -103,7 +103,8 @@ SPECS.update({
         skin="young_caucasian_male2", eyebrows="eyebrow003",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.40, 0.43, 0.29), 4, 3, 10)},
-        props="rifleman", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE)),
+        props="rifleman", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE),
+        aim_hand_out=0.04),   # the receiver clears the gas-mask filter
     "gunner": dict(   # machine-gunner: heavy, bursts
         phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.8, proportions=0.3, height=0.62),
         targets={"measure-neck-circ-incr": 0.6, "torso-scale-horiz-incr": 0.35},
