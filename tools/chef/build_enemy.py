@@ -58,7 +58,8 @@ SPECS = {
         skin="middleage_caucasian_male", eyebrows="eyebrow007",
         clothes=["male_worksuit01", "shoes02"],
         recolor={"worksuit": ((0.93, 0.91, 0.86), 9, 7, 8)},
-        props="cook", clips=dict(BASE_CLIPS)),
+        props="cook", attack_synth="dual", spread_arms=(20, 20, 10),   # walk/run: blades apart, off the belly
+        clips=dict(BASE_CLIPS)),   # cleaver + meat hook: one hand at a time
     "linecook": dict(   # line cook: young, wiry, fast -- knife
         phenotype=dict(gender=1.0, age=0.42, muscle=0.55, weight=0.25, proportions=0.6, height=0.62),
         targets={"stomach-pregnant-decr": 0.4, "neck-scale-horiz-decr": 0.3},
@@ -73,14 +74,14 @@ SPECS = {
         skin="middleage_caucasian_male", eyebrows="eyebrow010",
         clothes=["male_casualsuit06", "shoes03"],
         recolor={"casualsuit06": ((0.62, 0.60, 0.56), 8, 10, 8)},
-        props="butcher", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
+        props="butcher", attack_synth="dual", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
     "liquidator": dict(   # liquidator: off-white cotton coverall, GP-5 mask, shovel
         phenotype=dict(gender=1.0, age=0.55, muscle=0.7, weight=0.6, proportions=0.5, height=0.6),
         targets={},
         skin="middleage_caucasian_male", eyebrows="eyebrow003",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.80, 0.80, 0.74), 5, 4, 14)},
-        props="liquidator", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK)),
+        props="liquidator", two_hand="shaft", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK)),
     "headchef": dict(   # head chef: the giant -- tall toque, twin cleavers (drawn x1.4 in game)
         phenotype=dict(gender=1.0, age=0.85, muscle=0.75, weight=1.0, proportions=0.25, height=0.75),
         targets={"stomach-pregnant-incr": 1.0, "measure-waist-circ-incr": 0.8, "neck-double-incr": 1.0,
@@ -88,7 +89,8 @@ SPECS = {
         skin="old_caucasian_male", eyebrows="eyebrow005",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.96, 0.95, 0.92), 18, 14, 6)},
-        props="headchef", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
+        props="headchef", attack_synth="dual", spread_arms=(36, 8, 14),   # walk/run: keep the twin cleavers apart (left, right, wrists)
+        clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
 }
 AIM_RIFLE = ("79_96", 58, 100, True, 6)            # two-handed steady aim, held (looped while engaged)
 AIM_HEAVY = ("80_03", 40, 96, True, 6)
@@ -101,14 +103,14 @@ SPECS.update({
         skin="young_caucasian_male2", eyebrows="eyebrow003",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.40, 0.43, 0.29), 4, 3, 10)},
-        props="rifleman", clips=dict(BASE_CLIPS, attack=AIM_RIFLE)),
+        props="rifleman", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE)),
     "gunner": dict(   # machine-gunner: heavy, bursts
         phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.8, proportions=0.3, height=0.62),
         targets={"measure-neck-circ-incr": 0.6, "torso-scale-horiz-incr": 0.35},
         skin="middleage_caucasian_male", eyebrows="eyebrow010",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.30, 0.32, 0.26), 6, 4, 14)},
-        props="gunner", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, attack=AIM_HEAVY)),
+        props="gunner", aim_gun="line", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, attack=AIM_RIFLE)),   # shouldered, like the rifleman (the heavy-aim mocap held the gun at his sternum)
     "mutant": dict(   # glowing mutant: irradiated skin, throws radiation bolts
         phenotype=dict(gender=1.0, age=0.5, muscle=0.75, weight=0.3, proportions=0.4, height=0.58),
         targets={"stomach-pregnant-decr": 0.5, "torso-muscle-dorsi-incr": 0.5},
@@ -116,14 +118,14 @@ SPECS.update({
         clothes=["male_casualsuit06", "shoes02"],
         recolor={"casualsuit06": ((0.42, 0.40, 0.33), 12, 8, 22)},
         skin_tint=((0.70, 0.95, 0.62), 26),        # sickly green + glowing lesions
-        props="mutant", clips=dict(BASE_CLIPS, attack=THROW)),
+        props="mutant", attack_in_place=True, clips=dict(BASE_CLIPS, attack=THROW)),
     "priest": dict(   # irradiated priest: hooded robe, lantern; raises the dead
         phenotype=dict(gender=1.0, age=0.92, muscle=0.35, weight=0.35, proportions=0.4, height=0.6),
         targets={},
         skin="old_caucasian_male", eyebrows="eyebrow005",
         clothes=["male_worksuit01", "shoes02"],
         recolor={"worksuit": ((0.10, 0.10, 0.11), 0, 0, 6)},
-        props="priest", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK, cast=CAST)),   # melee = the base swing; cast = raising the dead
+        props="priest", one_hand_attack=True, clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK, cast=CAST)),   # melee = the base swing; cast = raising the dead
     "revenant": dict(   # burned firefighter: charred skin, brass-crested helmet, fire axe -- fast
         phenotype=dict(gender=1.0, age=0.45, muscle=0.8, weight=0.35, proportions=0.6, height=0.66),
         targets={"stomach-pregnant-decr": 0.6, "torso-muscle-dorsi-incr": 0.4},
@@ -131,7 +133,7 @@ SPECS.update({
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.26, 0.20, 0.15), 3, 2, 40)},
         skin_tint=((0.24, 0.16, 0.12), 150, (1.0, 0.42, 0.08), (0.03, 0.025, 0.02)),   # char + glowing ember cracks
-        props="revenant", clips=dict(BASE_CLIPS)),
+        props="revenant", two_hand="shaft", two_hand_clips=("attack",), clips=dict(BASE_CLIPS)),   # both hands on the axe for the swing
     "fiend": dict(   # mutated liquidator: bloated, cracked mask, four tentacles burst from the back
         phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.75, proportions=0.3, height=0.72),
         targets={"torso-scale-horiz-incr": 0.5, "measure-shoulder-dist-incr": 0.5, "neck-double-incr": 0.6},
@@ -139,7 +141,8 @@ SPECS.update({
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.74, 0.73, 0.66), 22, 16, 26)},
         skin_tint=((0.82, 0.66, 0.70), 30, (0.55, 0.06, 0.10), (0.30, 0.18, 0.28)),
-        props="fiend", tentacles=True, clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
+        props="fiend", tentacles=True, attack_synth="rake",   # no hand weapon: a two-handed overhead claw rake
+        clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
 })
 SPEC = SPECS[ENEMY]
 
@@ -183,11 +186,37 @@ def first_image(mat):
     return None
 
 
-def simple_material(name, image=None, rgb=(0.8, 0.8, 0.8), rough=0.8, metal=0.0, emit=None, alpha_clip=False):
+def gltf_output_group():
+    """The node group the glTF exporter reads extra outputs (occlusion) from."""
+    g = bpy.data.node_groups.get("glTF Material Output")
+    if g is None:
+        g = bpy.data.node_groups.new("glTF Material Output", "ShaderNodeTree")
+        g.interface.new_socket("Occlusion", in_out="INPUT", socket_type="NodeSocketFloat")
+    return g
+
+
+def attach_detail(m, normal_img, orm_img):
+    nt = m.node_tree; b = nt.nodes["Principled BSDF"]
+    if normal_img is not None:          # tangent-space normal map (exported as normalTexture)
+        normal_img.colorspace_settings.name = "Non-Color"
+        tn = nt.nodes.new("ShaderNodeTexImage"); tn.image = normal_img
+        nm = nt.nodes.new("ShaderNodeNormalMap")
+        nt.links.new(tn.outputs["Color"], nm.inputs["Color"]); nt.links.new(nm.outputs["Normal"], b.inputs["Normal"])
+    if orm_img is not None:             # packed R=occlusion G=roughness B=specular, rides the occlusionTexture slot
+        orm_img.colorspace_settings.name = "Non-Color"
+        to = nt.nodes.new("ShaderNodeTexImage"); to.image = orm_img; to.name = "ORM"
+        go = nt.nodes.new("ShaderNodeGroup"); go.node_tree = gltf_output_group()
+        nt.links.new(to.outputs["Color"], go.inputs["Occlusion"])
+        m["orm"] = orm_img.name
+
+
+def simple_material(name, image=None, rgb=(0.8, 0.8, 0.8), rough=0.8, metal=0.0, emit=None, alpha_clip=False,
+                    normal_img=None, orm_img=None):
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     nt = m.node_tree
     b = nt.nodes["Principled BSDF"]
+    attach_detail(m, normal_img, orm_img)
     b.inputs["Roughness"].default_value = rough
     b.inputs["Metallic"].default_value = metal
     if image is not None:
@@ -254,6 +283,115 @@ def splatter(arr, n, rmin, rmax, color, seed, alpha=0.9):
                 arr[y0:y1, x0:x1, ch] = arr[y0:y1, x0:x1, ch] * (1 - m) + color[ch] * m * (0.75 + 0.25 * arr[y0:y1, x0:x1, ch])
 
 
+# ---- surface detail: normal maps + packed ORM (occlusion / roughness / specular) ----
+DETAIL = os.environ.get("ENEMY_DETAIL", "1") != "0"
+
+
+def named_image(mat, key):
+    if not mat or not mat.use_nodes:
+        return None
+    for n in mat.node_tree.nodes:
+        if n.type == "TEX_IMAGE" and n.image and key in n.image.name.lower():
+            return n.image
+    return None
+
+
+def blur(a, r):
+    """~Gaussian blur (two separable box passes) of a 2-D float array."""
+    for _ in range(2):
+        for ax in (0, 1):
+            pad = [(r + 1, r) if i == ax else (0, 0) for i in range(2)]
+            c = np.cumsum(np.pad(a, pad, mode="edge"), axis=ax)
+            n = a.shape[ax]
+            a = (np.take(c, range(2 * r + 1, n + 2 * r + 1), axis=ax) - np.take(c, range(0, n), axis=ax)) / (2 * r + 1)
+    return a
+
+
+def height_to_normal(h, strength):
+    gy, gx = np.gradient(h)                       # rows run bottom-up in Blender images: +gy is +V (OpenGL/glTF)
+    n = np.stack([-gx * strength, -gy * strength, np.ones_like(h)], -1)
+    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+    return n * 0.5 + 0.5
+
+
+def img_np(img, size=None):
+    if img is None:
+        return None
+    if size and tuple(img.size) != (size[1], size[0]):
+        img = img.copy(); img.scale(size[1], size[0])
+    return to_np(img)
+
+
+def save_maps(tag, nrm, orm, sss=0.0):
+    """nrm: HxWx3 in 0..1 (or None), orm: HxWx3 -> Blender images (PNG in build/enemy_tex).
+    ORM alpha = 1 - subsurface (skin = 0): the shader bleeds light through skin's shadow edge."""
+    out = []
+    for suffix, arr in (("_n", nrm), ("_orm", orm)):
+        if arr is None:
+            out.append(None); continue
+        alpha = np.full(arr.shape[:2] + (1,), 1.0 - sss, np.float32) if suffix == "_orm" else np.ones(arr.shape[:2] + (1,), np.float32)
+        rgba = np.concatenate([arr, alpha], -1)
+        out.append(from_np(tag + suffix, rgba))
+    return out
+
+
+def splat_mask(before, after):
+    d = np.abs(after[..., :3] - before[..., :3]).sum(-1)
+    return np.clip(d * 6.0, 0, 1)
+
+
+def vein_mask(shape, seed):
+    """Branching vein network: ridges of two noise octaves, clustered by a coarse mask."""
+    v = np.zeros(shape, np.float32)
+    for cells, w in ((34, 1.0), (80, 0.6)):
+        r = 1.0 - np.abs(smooth_noise(*shape, cells, seed + cells) * 2 - 1)
+        v = np.maximum(v, np.clip((r - 0.93) * 14, 0, 1) * w)
+    return v * np.clip((smooth_noise(*shape, 5, seed) - 0.35) * 3, 0, 1)
+
+
+def skin_maps(tag, a, lesion_mask, img=None):
+    """Skin: pores + wrinkles + creases from the diffuse's own detail, raised lesions, veins."""
+    veins = vein_mask(a.shape[:2], 404)
+    if img is not None:                               # veins show faintly blue-grey through the skin
+        a[..., 0] *= 1 - 0.16 * veins; a[..., 1] *= 1 - 0.10 * veins; a[..., 2] *= 1 - 0.02 * veins
+        img.pixels.foreach_set(a.astype(np.float32).ravel()); img.save()
+    lum = 0.3 * a[..., 0] + 0.59 * a[..., 1] + 0.11 * a[..., 2]
+    fine = blur(lum, 1) - blur(lum, 10)            # wrinkles, creases, blemishes
+    rng = np.random.default_rng(77)
+    pores = blur(rng.standard_normal(lum.shape).astype(np.float32), 1) * 0.05
+    h = fine * 1.35 + pores + blur(lesion_mask, 3) * 0.14 + blur(veins, 1) * 0.05
+    nrm = height_to_normal(h, 9.5)
+    sweat = smooth_noise(*lum.shape, 14, 5)
+    orm = np.stack([np.ones_like(lum),                               # occlusion (geometry bake multiplies in)
+                    np.clip(0.62 - 0.22 * sweat - 0.35 * lesion_mask, 0.12, 1),   # roughness: sweaty / weeping = glossier
+                    np.clip(0.30 + 0.15 * sweat + 0.45 * lesion_mask, 0, 1)], -1)  # specular strength
+    return save_maps(tag, nrm, orm, sss=1.0)
+
+
+def cloth_maps(tag, a, asset_n, asset_ao, blood_mask, fresh_mask):
+    shape = a.shape[:2]
+    nrm = None
+    if asset_n is not None:                           # the asset's folds, deepened
+        v = asset_n[..., :3] * 2 - 1
+        v[..., :2] *= 1.7
+        nrm = v / np.linalg.norm(v, axis=-1, keepdims=True) * 0.5 + 0.5
+    lum = 0.3 * a[..., 0] + 0.59 * a[..., 1] + 0.11 * a[..., 2]
+    weave = blur(lum, 1) - blur(lum, 4)               # fabric grain from the texture itself
+    h = weave * 0.9 + blur(blood_mask, 2) * 0.06      # crusted blood stands proud a touch
+    det = height_to_normal(h, 6.0)
+    if nrm is None:
+        nrm = det
+    else:                                             # detail on top of the asset's folds/seams (whiteout blend)
+        n1 = nrm * 2 - 1; n2 = det * 2 - 1
+        n = np.stack([n1[..., 0] + n2[..., 0], n1[..., 1] + n2[..., 1], n1[..., 2] * n2[..., 2]], -1)
+        nrm = n / np.linalg.norm(n, axis=-1, keepdims=True) * 0.5 + 0.5
+    ao = asset_ao[..., 0] if asset_ao is not None else np.ones(shape, np.float32)
+    orm = np.stack([ao,
+                    np.clip(0.88 - 0.35 * blood_mask - 0.45 * fresh_mask, 0.15, 1),
+                    np.clip(0.05 + 0.35 * blood_mask + 0.55 * fresh_mask, 0, 1)], -1)
+    return save_maps(tag, nrm, orm)
+
+
 SIZE = 2048
 for o in meshes:
     src = first_image(o.data.materials[0] if o.data.materials else None)
@@ -265,10 +403,18 @@ for o in meshes:
         a = to_np(src)
         for ch in range(3):
             a[..., ch] = np.clip(a[..., ch] * tint[ch], 0, 1)
+        a0 = a.copy()
         splatter(a, n_les // 2, 0.015, 0.04, bruise_c, seed=32, alpha=0.6)   # char / necrotic bruising
         splatter(a, n_les, 0.006, 0.02, les_c, seed=31, alpha=0.9)          # weeping lesions / ember cracks
         img = from_np(f"{ENEMY}_skin", a)
-        o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6))
+        nimg, oimg = skin_maps(f"{ENEMY}_skin", a, splat_mask(a0, a), img) if DETAIL else (None, None)
+        o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6, normal_img=nimg, orm_img=oimg))
+        continue
+    if DETAIL and ("male_generic" in o.name or "male1591" in o.name) and src is not None:
+        a = to_np(src)                                 # untinted skin still gets pores, creases and sheen
+        img = from_np(f"{ENEMY}_skin", a)
+        nimg, oimg = skin_maps(f"{ENEMY}_skin", a, np.zeros(a.shape[:2], np.float32), img)
+        o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6, normal_img=nimg, orm_img=oimg))
         continue
     rule = next((v for k, v in SPEC["recolor"].items() if k in o.name), None)
     if rule is not None and src is not None:
@@ -289,18 +435,35 @@ for o in meshes:
         for ch in range(3):
             out[..., ch] = np.clip(base[ch] * shade * 1.12 - 0.10 * (1 - grime) * (ch == 2), 0, 1)
         out[..., 3] = a[..., 3]
+        s0 = out.copy()
         if n_blood: splatter(out, n_blood, 0.006, 0.016, (0.30, 0.03, 0.02), seed=11, alpha=0.75)   # dried blood
+        s1 = out.copy()
         if n_drop:  splatter(out, n_drop, 0.003, 0.008, (0.42, 0.03, 0.02), seed=12, alpha=0.85)    # fresh droplets
+        s2 = out.copy()
         if n_grease: splatter(out, n_grease, 0.02, 0.05, (0.45, 0.40, 0.28), seed=13, alpha=0.22)  # grease / soot
         tag = f"{ENEMY}_{o.name.split('.')[-1]}"
         img = from_np(tag, out)
-        o.data.materials.clear(); o.data.materials.append(simple_material(tag, img, rough=0.9))
+        nimg = oimg = None
+        if DETAIL:
+            m0 = o.data.materials[0] if o.data.materials else None
+            shp = out.shape[:2]
+            nimg, oimg = cloth_maps(tag, out, img_np(named_image(m0, "normal"), shp), img_np(named_image(m0, "_ao"), shp),
+                                    splat_mask(s0, s1), splat_mask(s1, s2))
+        o.data.materials.clear(); o.data.materials.append(simple_material(tag, img, rough=0.9, normal_img=nimg, orm_img=oimg))
     elif "low-poly" in o.name:   # eyes: irradiated glow
         o.data.materials.clear(); o.data.materials.append(simple_material("cook_eyes", None, (0.45, 1.0, 0.25), 0.3, emit=(0.45, 1.0, 0.25)))
     elif src is not None:
         alpha = any(k in o.name for k in ("eyebrow", "eyelash"))
-        nm = o.data.materials[0].name if o.data.materials else o.name
-        o.data.materials.clear(); o.data.materials.append(simple_material(nm, src, rough=0.85, alpha_clip=alpha))
+        m0 = o.data.materials[0] if o.data.materials else None
+        nm = m0.name if m0 else o.name
+        nimg = oimg = None
+        if DETAIL and not alpha:
+            sa = to_np(src); shp = sa.shape[:2]
+            an, aa = img_np(named_image(m0, "normal"), shp), img_np(named_image(m0, "_ao"), shp)
+            if an is not None or aa is not None:
+                nimg, oimg = cloth_maps(f"{ENEMY}_{nm}", sa, an, aa, np.zeros(shp, np.float32), np.zeros(shp, np.float32))
+        o.data.materials.clear(); o.data.materials.append(simple_material(nm, src, rough=0.85, alpha_clip=alpha,
+                                                                           normal_img=nimg, orm_img=oimg))
 
 # =============================================================== 3. props (rigidly skinned to one bone each)
 props = []
@@ -406,15 +569,50 @@ M_brass = simple_material("brass", None, (0.70, 0.52, 0.22), 0.35, metal=0.9)
 M_red = paint("neckerchief", (0.55, 0.07, 0.06), grime=0.25, seed=8, stripes=(16, (0.9, 0.85, 0.8)))
 
 
+HANDB = {}
+
+
+def hand_basis(side):
+    """The real fist, from the hand mesh: palm normal = the thin axis of the hand's vertices
+    (signed toward where the relaxed fingertips droop), `side` = across the palm toward the
+    thumb, `hole` = where a handle sits once the fingers close (just palm-side of the knuckles).
+    A handle runs along `side` through `hole`; a pistol grip's barrel runs along `along`."""
+    if side in HANDB:
+        return HANDB[side]
+    pb = rig.data.bones; mw = rig.matrix_world
+    hand = mw @ pb[f"{side}Hand"].head_local
+    fb = mw @ pb[f"{side}FingerBase"].tail_local       # the KNUCKLES (the Hand bone is a 4 cm stub)
+    th = mw @ pb[f"{side[0]}Thumb"].tail_local
+    gi = body.vertex_groups.get(f"{side}FingerBase")      # the palm is skinned to FingerBase
+    pts = []
+    for v in body.data.vertices:
+        g = max(v.groups, key=lambda g: g.weight, default=None)
+        if gi is not None and g is not None and g.group == gi.index:
+            pts.append(tuple(body.matrix_world @ v.co))
+    X = np.array(pts); c = X.mean(0)
+    n = Vector(tuple(np.linalg.svd(X - c)[2][2]))
+    along = (fb - hand).normalized()
+    n = (n - along * n.dot(along)).normalized()
+    # palm side = where the relaxed fingertips droop (the thumb rests BACK-of-hand on this rig;
+    # signing by it curled every fist backwards and put handles on the back of the hand)
+    tip = mw @ pb[f"{side}HandFinger1"].tail_local
+    drift = tip - (hand + along * (tip - hand).dot(along))
+    if drift.dot(n) < 0:
+        n = -n
+    sd = along.cross(n).normalized()
+    if (th - hand).dot(sd) < 0:
+        sd = -sd
+    # one finger bone bends only at the knuckles, so the fingers close as straight pieces: the
+    # handle sits in the wedge between palm and bent fingers, ~3 cm back from the knuckles
+    HANDB[side] = dict(hand=hand, hole=fb - along * 0.032 + n * 0.027, along=along, n=n, side=sd)
+    print(f"enemy: {side} hand: palm n {tuple(round(x, 2) for x in n)} along {tuple(round(x, 2) for x in along)}")
+    return HANDB[side]
+
+
 def hand_frame(side):
-    """Fist centre + the thumb direction (handles run along it, through the fist)."""
-    pb = rig.data.bones
-    hand = rig.matrix_world @ pb[f"{side}Hand"].head_local
-    fb = rig.matrix_world @ pb[f"{side}FingerBase"].head_local
-    th = rig.matrix_world @ pb[f"{'L' if side == 'Left' else 'R'}Thumb"].tail_local
-    fist = hand.lerp(fb, 0.6) + Vector((0, 0, -0.025))
-    fwd = (th - hand); fwd.z = 0; fwd.normalize()
-    return fist, fwd
+    """Fist hole + the handle direction (across the palm, out past the thumb)."""
+    b = hand_basis(side)
+    return b["hole"].copy(), b["side"].copy()
 
 
 def box_basis(name, centre, X, Y, Z, size, mat, bone, bevel=0.002):
@@ -524,7 +722,7 @@ def cleaver(side, bone, scale=1.0):
     f, w = hand_frame(side)
     side_v = w.cross(Vector((0, 0, 1))).normalized()
     # handle: oval wooden grip with three brass rivets, steel bolster where it meets the blade
-    h = cyl(f"cleaver_handle_{side}", f - w * 0.06 * scale, f + w * 0.08 * scale, 0.019 * scale, M_wood, bone, verts=16)
+    h = cyl(f"cleaver_handle_{side}", f - w * 0.05 * scale, f + w * 0.07 * scale, 0.019 * scale, M_wood, bone, verts=16)
     for v in h.data.vertices:           # oval section (flatter across the blade plane)
         d = v.co.dot(side_v); v.co -= side_v * d * 0.35
     for k in (-0.035, 0.0, 0.035):
@@ -559,9 +757,9 @@ def meat_hook(side, bone, scale=1.0):
 
 def knife(side, bone):
     f, w = hand_frame(side)
-    cyl(f"knife_handle_{side}", f - w * 0.06, f + w * 0.08, 0.017, M_dark, bone, verts=10)
+    cyl(f"knife_handle_{side}", f - w * 0.05, f + w * 0.065, 0.017, M_dark, bone, verts=10)
     side_v = w.cross(Vector((0, 0, 1)))
-    c = f + w * 0.24
+    c = f + w * 0.215
     blade = box_basis(f"knife_blade_{side}", c, w, side_v, Vector((0, 0, 1)), (0.30, 0.004, 0.05), M_steel, bone, bevel=0.0015)
     for v in blade.data.vertices:   # taper to a point, edge curving up to the tip (local coords)
         t = v.co.dot(w) / 0.15
@@ -654,7 +852,9 @@ def apron(top_z, bottom_z, half_w, mat, pad=0.03, bib=False):
     bpy.context.view_layer.objects.active = o
     m = o.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.008
     bpy.ops.object.modifier_apply(modifier="solid")
-    bpy.ops.object.shade_smooth()
+    # smooth on the mesh itself: the shade_smooth operator only touches SELECTED objects, and
+    # the apron is never selected -- it shipped flat-shaded, a mosaic under the glossy rubber
+    o.data.polygons.foreach_set("use_smooth", [True] * len(o.data.polygons))
     o.data.materials.append(mat)
     # weights: above the hips, copy the NEAREST body vertex's skin weights so the bib rides
     # the chest exactly (rigid spine weights let the posed belly push through it); below
@@ -719,42 +919,79 @@ def jacket_buttons():
 
 
 def forearm_frame(side):
-    """Grip point + barrel axis along the forearm (guns hang low at rest, point ahead when aiming)."""
-    pb = rig.data.bones
-    el = rig.matrix_world @ pb[f"{side}ForeArm"].head_local
-    wr = rig.matrix_world @ pb[f"{side}Hand"].head_local
-    fb = rig.matrix_world @ pb[f"{side}FingerBase"].head_local
-    d = (wr - el).normalized()
-    up = (Vector((0, 0, 1)) - d * d.z).normalized()
-    side_v = d.cross(up).normalized()
-    return wr.lerp(fb, 0.5), d, up, side_v
+    """Pistol grip in the fist: grip axis across the palm (thumb end = top), barrel along the
+    knuckles. Returns grip centre, barrel dir, up (toward the thumb), side."""
+    b = hand_basis(side)
+    up = b["side"].copy()
+    d = (b["along"] - up * b["along"].dot(up)).normalized()
+    return b["hole"].copy(), d, up, d.cross(up).normalized()
 
 
-def rifle(scale=1.0, heavy=False):
+GUN = {}   # rifle(): its parts + rest-pose grip frame, so the aim pass can seat it on the aim pose
+
+
+def curved_mag(name, top, d, sv, up, mat, bone, S=1.0, length=0.21, radius=0.42, depth=0.05, width=0.03, n=14):
+    """A single closed magazine: a depth x width box section swept from `top` (inside the
+    receiver) down an arc that curves forward (towards d), slightly deeper at the base."""
+    d, sv, up = d.normalized(), sv.normalized(), up.normalized()
+    L, R = length * S, radius * S
+    bm = bmesh.new()
+    rings = []
+    for i in range(n + 1):
+        ph = (i / n) * (L / R)
+        c = top + (-up) * (R * math.sin(ph)) + d * (R * (1 - math.cos(ph)))
+        nv = d * math.cos(ph) + up * math.sin(ph)          # in-plane, across the section
+        dep = depth * S * (1.0 + 0.12 * i / n)               # flares a touch toward the floorplate
+        rings.append([bm.verts.new(c + nv * (a * dep / 2) + sv * (b * width * S / 2))
+                      for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))])
+    for r0, r1 in zip(rings, rings[1:]):
+        for k in range(4):
+            bm.faces.new((r0[k], r0[(k + 1) % 4], r1[(k + 1) % 4], r1[k]))
+    bm.faces.new(list(reversed(rings[0]))); bm.faces.new(rings[-1])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    me = bpy.data.meshes.new(name); bm.to_mesh(me); bm.free()
+    o = bpy.data.objects.new(name, me); bpy.context.collection.objects.link(o)
+    bpy.context.view_layer.objects.active = o
+    m = o.modifiers.new("bevel", "BEVEL"); m.width = 0.002; m.segments = 2
+    m.limit_method = "ANGLE"                                  # edges only, not the gentle arc steps
+    bpy.ops.object.modifier_apply(modifier="bevel")
+    o.data.materials.append(mat); props.append((o, bone)); return o
+
+
+def rifle(scale=1.0, heavy=False, lift=0.085):
     g, d, up, sv = forearm_frame("Right")
+    n0 = len(props)
+    GUN.update(start=n0, grip=g.copy(), d=d.copy(), up=up.copy(), lift=lift * scale, scale=scale)
+    # the fist holds the PISTOL GRIP; the receiver/stock line rides above the wrist (at fist
+    # height the stock sat inside the forearm in every pose)
+    g0 = g; g = g + up * lift * scale
     M_gun = paint("gunmetal", (0.12, 0.12, 0.13), grime=0.3, seed=21)
     M_furn = paint("furniture", (0.34, 0.20, 0.10), grime=0.4, seed=22)
     S = scale
     box_basis("receiver", g + d * 0.10 * S + up * 0.04 * S, d, sv, up, (0.30 * S, 0.05 * S, 0.075 * S), M_gun, "RightHand")
     box_basis("dust_cover", g + d * 0.11 * S + up * 0.083 * S, d, sv, up, (0.26 * S, 0.044 * S, 0.012 * S), M_gun, "RightHand")
-    box_basis("pistol_grip", g + up * -0.02 * S, d, sv, up, (0.04 * S, 0.035 * S, 0.10 * S), M_furn, "RightHand")
-    box_basis("stock", g - d * 0.20 * S + up * 0.02 * S, d, sv, up, (0.26 * S, 0.042 * S, 0.09 * S), M_furn, "RightHand")
+    box_basis("pistol_grip", g0 + up * (lift * 0.5 + 0.005) * S, d, sv, up, (0.04 * S, 0.035 * S, (lift + 0.04) * S), M_furn, "RightHand")
+    # short (folded-style) stock: a full one, modelled along the forearm, ran through the
+    # forearm in every carry and through the raised upper arm in the aim
+    sl = 0.05 if heavy else 0.08         # the heavy gun's longer reach put its stock in the raised upper arm
+    box_basis("stock", g - d * (0.07 + sl / 2) * S + up * 0.02 * S, d, sv, up, (sl * S, 0.042 * S, 0.08 * S), M_furn, "RightHand")
     box_basis("handguard", g + d * 0.33 * S + up * 0.045 * S, d, sv, up, (0.20 * S, 0.055 * S, 0.06 * S), M_furn, "RightHand")
     blen = 0.62 if heavy else 0.42
     cyl("barrel", g + d * 0.25 * S + up * 0.05 * S, g + d * (0.25 + blen) * S + up * 0.05 * S, 0.012 * S, M_gun, "RightHand", verts=12)
     cyl("muzzle", g + d * (0.25 + blen) * S + up * 0.05 * S, g + d * (0.29 + blen) * S + up * 0.05 * S, 0.018 * S, M_gun, "RightHand", verts=12)
     cyl("front_sight", g + d * (0.20 + blen) * S + up * 0.06 * S, g + d * (0.20 + blen) * S + up * 0.10 * S, 0.005 * S, M_gun, "RightHand", verts=6)
     if heavy:   # drum + bipod + carry handle
-        cyl("drum", g + d * 0.10 * S - up * 0.05 * S - sv * 0.06 * S, g + d * 0.10 * S - up * 0.05 * S + sv * 0.06 * S, 0.11 * S, M_gun, "RightHand", verts=28)
+        # pan magazine ON TOP of the receiver (Degtyaryov-style): a drum underneath sat in the
+        # path of the supporting forearm in every aim
+        pc = g + d * 0.36 * S + up * 0.105 * S         # forward, clear of the cheek at the aim
+        cyl("drum", pc - up * 0.018 * S, pc + up * 0.018 * S, 0.09 * S, M_gun, "RightHand", verts=32)
+        cyl("drum_hub", pc + up * 0.018 * S, pc + up * 0.03 * S, 0.03 * S, M_gun, "RightHand", verts=16)
         for k in (-1, 1):
             cyl(f"bipod_{k}", g + d * (0.25 + blen * 0.8) * S + up * 0.04 * S, g + d * (0.32 + blen * 0.8) * S - up * 0.22 * S + sv * 0.07 * k * S, 0.006 * S, M_gun, "RightHand", verts=6)
-        cyl("handle", g + d * 0.05 * S + up * 0.12 * S, g + d * 0.20 * S + up * 0.12 * S, 0.01 * S, M_gun, "RightHand", verts=8)
-    else:       # the curved magazine: three stacked, increasingly-angled boxes
-        for k in range(3):
-            a = 0.18 * k
-            dd = (d * math.sin(a) - up * math.cos(a)).normalized()
-            box_basis(f"mag_{k}", g + d * (0.16 + 0.03 * k) * S + dd * (0.06 + 0.055 * k) * S, d.cross(sv).cross(sv) * -1 if False else (dd.cross(sv)).normalized(), sv, -dd,
-                      (0.05 * S, 0.03 * S, 0.06 * S), M_gun, "RightHand", bevel=0.002)
+        # (no carry handle: the pan sits where it was)
+    else:       # the curved magazine: ONE piece, a box section swept down a forward-curving arc
+        curved_mag("magazine", g + d * 0.16 * S + up * 0.012 * S, d, sv, up, M_gun, "RightHand", S)
+    GUN["parts"] = [o for o, _ in props[n0:]]
 
 
 def steel_helmet():
@@ -883,6 +1120,24 @@ def robe():
     mm = hood.modifiers.new("solid", "SOLIDIFY"); mm.thickness = 0.012
     bpy.context.view_layer.objects.active = hood; bpy.ops.object.modifier_apply(modifier="solid")
     bpy.ops.object.shade_smooth()
+
+
+def iron_cross():
+    """Priest's weapon: a heavy iron processional cross, gripped low on the shaft, swung as a club."""
+    f, w = hand_frame("Right")
+    M_iron = paint("cross_iron", (0.16, 0.15, 0.14), grime=0.45, seed=29)
+    a, b = f - w * 0.10, f + w * 0.58
+    cyl("cross_shaft", a, b, 0.016, M_iron, "RightHand", verts=10)
+    cyl("cross_butt", a - w * 0.03, a, 0.022, M_iron, "RightHand", verts=10)
+    side_v = w.cross(Vector((0, 0, 1)))
+    if side_v.length < 1e-6:
+        side_v = w.cross(Vector((1, 0, 0)))
+    side_v.normalize()
+    c = b - w * 0.08                                  # the crossbar, near the head
+    box_basis("cross_bar", c, side_v, w, side_v.cross(w), (0.30, 0.035, 0.035), M_iron, "RightHand", bevel=0.004)
+    box_basis("cross_head", b + w * 0.02, w, side_v, side_v.cross(w), (0.07, 0.05, 0.035), M_iron, "RightHand", bevel=0.004)
+    for k in (-1, 1):                                 # flared ends on the bar
+        box_basis(f"cross_tip_{k}", c + side_v * 0.15 * k, side_v, w, side_v.cross(w), (0.025, 0.06, 0.045), M_iron, "RightHand", bevel=0.004)
 
 
 def lantern():
@@ -1104,7 +1359,7 @@ PROPS = {
     "rifleman": lambda: (steel_helmet(), respirator(), rifle()),
     "gunner": lambda: (steel_helmet(), bandolier(), rifle(1.15, heavy=True)),
     "mutant": lambda: (growths(),),
-    "priest": lambda: (robe(), lantern()),
+    "priest": lambda: (robe(), lantern(), iron_cross()),
     "cook": lambda: (toque(), respirator(), cleaver("Right", "RightHand"), meat_hook("Left", "LeftHand")),
     "linecook": lambda: (kitchen_cap(), respirator(), knife("Right", "RightHand")),
     "butcher": lambda: (apron(None, None, 0.25, paint("rubber_apron", (0.22, 0.10, 0.08), grime=0.35, blood=10, drops=14, seed=9), bib=True),
@@ -1287,17 +1542,399 @@ def take(role):
     bpy.data.objects.remove(src, do_unlink=True)
     return crossfade(poses, xf) if xf else poses
 idle, walk, run, attack, death = (take(r) for r in ("idle", "walk", "run", "attack", "death"))
-# hit: the idle pose with a sharp recoil layered on (no clean CMU flinch exists)
-hit = []
-for i in range(14):
-    t = i / 13.0
-    env = math.sin(math.pi * min(1.0, t * 1.6)) * (1.0 - t * 0.35)
-    p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in idle[0].items()}
-    for bn, deg, axis in (("Spine1", -16, (1, 0, 0)), ("Spine", -8, (1, 0, 0)), ("Neck", -14, (1, 0, 0)),
-                          ("Head", -18, (1, 0, 0)), ("LeftArm", -25, (0, 0, 1)), ("RightArm", 25, (0, 0, 1))):
-        p[bn][0] = p[bn][0] @ Quaternion(axis, math.radians(deg * env))
-    p["Hips"][1] = p["Hips"][1] + Vector((0, -0.04 * env, 0))
-    hit.append(p)
+if SPEC.get("attack_in_place"):     # the throw stepped ~1.7 m sideways, then the model snapped back
+    RH = Rt0["Hips"]                 # hips location is stored in the hips' rest frame
+    w0 = RH @ attack[0]["Hips"][1]
+    for p in attack:
+        w = RH @ p["Hips"][1]
+        p["Hips"][1] = RH.inverted() @ Vector((w0.x, w0.y, w.z))   # keep the bob, drop the travel
+
+# attack_synth="grab" (fiend): no weapon to swing, so a procedural lunge -- lean back and
+# draw the arms in (wind-up), then lunge, both arms reaching out with clawed hands at the
+# strike (~0.45, matching ATK_STRIKE_FRAC and the tentacle whip), hold, recover.
+def world_rot(bn, axis, deg):
+    return Quaternion(Rt0[bn].inverted() @ Vector(axis), math.radians(deg))
+
+
+def curl_quats(side, angles):
+    """Finger-bone rotations curling `side`'s hand toward its palm by `angles` (degrees per
+    FingerBase / HandFinger1 / Thumb). The mocap has NO finger channels: without these keys
+    every hand stayed flat and splayed at the rest pose."""
+    n = hand_basis(side)["n"]; out = {}
+    for key, deg in angles.items():
+        bn = f"{side}{key}" if key != "Thumb" else f"{side[0]}Thumb"
+        if bn not in tbones:
+            continue
+        d = (rig.matrix_world @ tbones[bn].tail_local) - (rig.matrix_world @ tbones[bn].head_local)
+        ax = d.cross(n)                                      # about d x n the tip moves palm-ward
+        if ax.length > 1e-9:
+            out[bn] = Quaternion(Rt0[bn].inverted() @ ax.normalized(), math.radians(deg))
+    return out
+
+
+RELAX = {"FingerBase": 6, "HandFinger1": 32, "Thumb": 12}    # an empty hand at rest: softly curled
+
+
+def synth_grab(base, n=45):
+    out = []
+    for i in range(n):
+        t = i / (n - 1)
+        wind = math.sin(math.pi * min(1.0, t / 0.32)) if t < 0.32 else 0.0
+        reach = 0.0 if t < 0.28 else (min(1.0, (t - 0.28) / 0.16) if t < 0.62 else max(0.0, 1.0 - (t - 0.62) / 0.38))
+        reach = reach * reach * (3 - 2 * reach)                       # smoothstep
+        src = base[i % len(base)]
+        p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in src.items()}
+        lean = -10 * wind + 26 * reach                                # torso: rock back, then lunge
+        for bn, k in (("Spine", 0.35), ("Spine1", 0.45), ("Spine2", 0.20)):
+            if bn in p:
+                p[bn][0] = p[bn][0] @ Quaternion((1, 0, 0), math.radians(lean * k))
+        if "Neck" in p:
+            p["Neck"][0] = p["Neck"][0] @ Quaternion((1, 0, 0), math.radians(-14 * reach))   # eyes stay on the target
+        for side, sx in (("Left", 1), ("Right", -1)):
+            arm, fore, hand = f"{side}Arm", f"{side}ForeArm", f"{side}Hand"
+            if arm in p:   # wind-up: elbows back; strike: arms swing forward + up, slightly inward
+                p[arm][0] = p[arm][0] @ world_rot(arm, (1, 0, 0), 28 * wind - 102 * reach) @ world_rot(arm, (0, 1, 0), sx * 14 * reach)
+            if fore in p:
+                p[fore][0] = p[fore][0] @ world_rot(fore, (1, 0, 0), -40 * wind + 25 * reach)
+            if hand in p:  # clawed: wrists cocked back as the hands open to grab
+                p[hand][0] = p[hand][0] @ world_rot(hand, (1, 0, 0), 30 * reach)
+        p["Hips"][1] = p["Hips"][1] + Vector((0, -0.10 * reach + 0.03 * wind, -0.03 * reach))   # step into it
+        # claws: splayed wide as the arms come forward, SNAP shut at the strike (the grab reads)
+        close = 0.0 if t < 0.40 else min(1.0, (t - 0.40) / 0.06)
+        close *= 1.0 if t < 0.70 else max(0.0, 1.0 - (t - 0.70) / 0.25)
+        for side in ("Left", "Right"):
+            for bn, q in curl_quats(side, {"FingerBase": -4 + 14 * close, "HandFinger1": 8 + 95 * close,
+                                           "Thumb": 5 + 40 * close}).items():
+                p[bn] = [q, None]
+        out.append(p)
+    return out
+
+
+def fk_world(p, bn):
+    """World rotation of bone bn in pose p (same convention as sample(): W = Wpar @ L0 @ Q)."""
+    Q = p[bn][0].to_matrix()
+    par = tbones[bn].parent
+    if par is None:
+        return Rt0[bn] @ Q
+    return fk_world(p, par.name) @ (Rt0[par.name].inverted() @ Rt0[bn]) @ Q
+
+
+def turn_world(p, bn, axis, deg):
+    """Rotate bone bn by deg about a WORLD axis, from where the pose has it now (children follow)."""
+    par = tbones[bn].parent
+    B = (fk_world(p, par.name) @ (Rt0[par.name].inverted() @ Rt0[bn])) if par else Rt0[bn]
+    R = Matrix.Rotation(math.radians(deg), 3, Vector(axis))
+    p[bn][0] = (B.inverted() @ R @ B @ p[bn][0].to_matrix()).to_quaternion()
+
+
+def _swing(t, t0, t_hit, t1):
+    """0 before t0, wind-up 0->1 by t_hit-0.08, chop back through to -1 at t_hit, recover to 0 by t1."""
+    if t <= t0 or t >= t1:
+        return 0.0, 0.0
+    tw = t_hit - 0.10
+    if t < tw:                                   # wind-up: raise
+        k = (t - t0) / (tw - t0); return k * k * (3 - 2 * k), 0.0
+    if t < t_hit:                                # the chop: fast
+        k = (t - tw) / (t_hit - tw); return 1.0 - k, k
+    k = (t - t_hit) / (t1 - t_hit)               # follow-through, then settle
+    return 0.0, 1.0 - k * k * (3 - 2 * k)
+
+
+def synth_rake(base, n=45):
+    """Fiend: a two-handed overhead claw rake. Both arms rise high (claws splayed, body rearing
+    back), then rake down through the front as he lunges -- landing at 0.45 (ATK_STRIKE_FRAC) --
+    claws snapping shut, then recover. The tentacles whip forward with it (tentacle_motion)."""
+    out = []
+    for i in range(n):
+        t = i / (n - 1)
+        src = base[i % len(base)]
+        p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in src.items()}
+        up, down = _swing(t, 0.02, 0.45, 0.92)
+        for bn, k in (("Spine", 0.4), ("Spine1", 0.6)):          # rear back, then hunch into the rake
+            turn_world(p, bn, (1, 0, 0), (-14 * up + 26 * down) * k)
+        for side, sx in (("Left", 1), ("Right", -1)):
+            arm, fore, hand = f"{side}Arm", f"{side}ForeArm", f"{side}Hand"
+            turn_world(p, arm, (1, 0, 0), -(160 * up + 60 * down))      # up over the head, down through the front
+            turn_world(p, arm, (0, 1, 0), sx * (25 * up + 10 * down))   # spread wide on the way up
+            turn_world(p, fore, (1, 0, 0), -45 * up + 10 * down)
+            turn_world(p, hand, (1, 0, 0), -35 * up + 25 * down)        # claws cocked back, then flicked
+            close = min(1.0, down * 1.6)
+            for bn, q in curl_quats(side, {"FingerBase": -6 + 16 * close, "HandFinger1": 5 + 85 * close,
+                                           "Thumb": 4 + 36 * close}).items():
+                p[bn] = [q, None]
+        p["Hips"][1] = p["Hips"][1] + Vector((0, -0.12 * down + 0.04 * up, -0.04 * down))   # lunge
+        out.append(p)
+    return out
+
+
+def synth_dual(base, n=60):
+    """Two-weapon attack: right-hand overhand chop (lands at 0.28), then the left (0.78).
+    Each arm raises high and behind the head, then chops down across the body while the
+    torso twists into it. DUAL_STRIKES in main.c lands damage at those two moments."""
+    out = []
+    for i in range(n):
+        t = i / (n - 1)
+        src = base[i % len(base)]
+        p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in src.items()}
+        for side, sx, (t0, th, t1) in (("Right", -1, (0.00, 0.28, 0.50)), ("Left", 1, (0.50, 0.78, 1.00))):
+            up, down = _swing(t, t0, th, t1)
+            arm, fore, hand = f"{side}Arm", f"{side}ForeArm", f"{side}Hand"
+            for bn, k in (("Spine", 0.4), ("Spine1", 0.6)):     # twist into the blow + a forward drop
+                turn_world(p, bn, (0, 0, 1), sx * (-16 * up + 22 * down) * k)
+                turn_world(p, bn, (1, 0, 0), (-8 * up + 18 * down) * k)
+            # (model faces -Y) raise: arm swings forward and up over the head, slightly back;
+            # chop: down through the front to waist height. Elbow cocks the blade behind the head.
+            turn_world(p, arm, (1, 0, 0), -(185 * up + 70 * down))
+            turn_world(p, arm, (0, 1, 0), sx * (10 * up - 14 * down))
+            turn_world(p, fore, (1, 0, 0), -75 * up + 5 * down)
+            turn_world(p, hand, (1, 0, 0), -20 * up + 30 * down)
+            p["Hips"][1] = p["Hips"][1] + Vector((0, -0.05 * down, 0))
+        out.append(p)
+    return out
+
+
+# hit: the idle pose with a sharp recoil layered on (no clean CMU flinch exists). The arms
+# are turned about WORLD axes from wherever the idle has them (a local-axis twist drove some
+# rigs' arms back into the torso): they fly out to the sides and a little forward, elbows
+# bending, as the torso and head snap back.
+def synth_hit(base, n=14):
+    out = []
+    for i in range(n):
+        t = i / (n - 1)
+        env = math.sin(math.pi * min(1.0, t * 1.6)) * (1.0 - t * 0.35)
+        p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in base[0].items()}
+        for bn, deg in (("Spine1", -16), ("Spine", -8), ("Neck", -14), ("Head", -18)):
+            p[bn][0] = p[bn][0] @ Quaternion((1, 0, 0), math.radians(deg * env))
+        for side, sx in (("Left", -1), ("Right", 1)):      # model faces -Y; its left is +X
+            arm, fore = f"{side}Arm", f"{side}ForeArm"
+            turn_world(p, arm, (0, 1, 0), sx * 28 * env)    # out to the side
+            turn_world(p, arm, (1, 0, 0), -18 * env)        # and forward
+            turn_world(p, fore, (1, 0, 0), -22 * env)       # elbows bend
+        p["Hips"][1] = p["Hips"][1] + Vector((0, -0.04 * env, 0))   # knocked back
+        out.append(p)
+    return out
+
+
+hit = synth_hit(idle)
+
+# spread_arms=(left arm, right arm, wrists) degrees: the zombie lurch reaches both hands forward and IN, which
+# crossed the head chef's twin cleavers through each other. Swing each arm (and wrist) out
+# about the world vertical on the walk/run loops -- the same offset every frame, so the
+# loops still close.
+def spread_arms(poses, left_deg, right_deg, hand_deg):
+    for p in poses:   # per side: the lurch is lopsided (right arm already wide, left across the belly)
+        for side, sx, arm_deg in (("Left", 1, left_deg), ("Right", -1, right_deg)):   # model faces -Y; its left is +X
+            turn_world(p, f"{side}Arm", (0, 0, 1), sx * arm_deg)
+            turn_world(p, f"{side}Hand", (0, 0, 1), sx * hand_deg)
+    return poses
+
+
+if SPEC.get("spread_arms"):
+    walk, run = (spread_arms(ps, *SPEC["spread_arms"]) for ps in (walk, run))
+
+# one_hand_attack (priest): the base melee swing is two-handed -- his lantern arm keeps its idle
+# pose (local rotations, frame by frame), so only the right hand strikes
+if SPEC.get("one_hand_attack"):
+    keep = [b for b in tbones.keys() if b.startswith(("LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"))]
+    for i, p in enumerate(attack):
+        src = idle[i % len(idle)]
+        for bn in keep:
+            if bn in src and bn in p:
+                p[bn][0] = src[bn][0].copy()
+
+if SPEC.get("attack_synth") == "grab":
+    attack = synth_grab(idle)
+elif SPEC.get("attack_synth") == "rake":
+    attack = synth_rake(idle)
+elif SPEC.get("attack_synth") == "dual":
+    attack = synth_dual(idle)
+
+# aim_gun (rifleman, gunner): the gun is modelled along the right forearm at rest, but in the
+# aim clip that forearm runs ACROSS the face (high elbow, hand at the cheek) -- the barrel
+# pointed off to his left and the forward left hand held nothing. Seat it properly:
+#  1. yaw the whole aim clip so the line right hand -> left hand points straight ahead
+#     (the shooter's bladed stance; the game aims the enemy's facing at the player),
+#  2. rotate the gun in the right hand (rest space, about the grip) so that, at mid-clip,
+#     the barrel lies along that line, out over the supporting left hand, sights up.
+def fk_pos(p, bn):
+    par = tbones[bn].parent
+    if par is None:
+        return Ht0[bn].copy()
+    return fk_pos(p, par.name) + fk_world(p, par.name) @ (Rt0[par.name].inverted() @ (Ht0[bn] - Ht0[par.name]))
+
+
+def ik_arm(p, side, T, pole=None):
+    """Two-bone IK: bend the elbow so shoulder->wrist spans |T - shoulder|, swing the upper arm
+    so the wrist lands on T, then (with a pole) roll the arm about shoulder->T so the elbow
+    points along the pole. Returns the miss in metres."""
+    arm, fore, hand = f"{side}Arm", f"{side}ForeArm", f"{side}Hand"
+    S_, E, W = fk_pos(p, arm), fk_pos(p, fore), fk_pos(p, hand)
+    l1, l2 = (E - S_).length, (W - E).length
+    D = min((T - S_).length, (l1 + l2) * 0.999)
+    want = math.acos(max(-1.0, min(1.0, (l1 * l1 + l2 * l2 - D * D) / (2 * l1 * l2))))
+    have = (S_ - E).angle(W - E)
+    n = (E - S_).cross(W - E)
+    if n.length < 1e-6:
+        n = (pole if pole is not None else Vector((0, 0, 1))).cross(E - S_)
+    n.normalize()
+    best = None
+    for sgn in (1, -1):                                 # the bend direction that reaches D
+        q = p[fore][0].copy()
+        turn_world(p, fore, n, sgn * math.degrees(have - want))
+        dd = abs((fk_pos(p, hand) - S_).length - D)
+        if best is None or dd < best[0]:
+            best = (dd, p[fore][0].copy())
+        p[fore][0] = q
+    p[fore][0] = best[1]
+    W = fk_pos(p, hand)
+    a0, a1 = (W - S_), (T - S_)
+    ax = a0.cross(a1)
+    if ax.length > 1e-6:
+        turn_world(p, arm, ax.normalized(), math.degrees(a0.angle(a1)))
+    if pole is not None:                                # roll the elbow toward the pole
+        axis = (T - S_).normalized()
+        e = fk_pos(p, fore) - S_; e -= axis * e.dot(axis)
+        pl = pole - axis * pole.dot(axis)
+        if e.length > 1e-6 and pl.length > 1e-6:
+            ang = e.angle(pl)
+            if e.cross(pl).dot(axis) < 0:
+                ang = -ang
+            turn_world(p, arm, axis, math.degrees(ang))
+    return (fk_pos(p, hand) - T).length
+
+
+def seat_hand(p, side, point, axis, palm_dir, pole=None, along_dir=None):
+    """Close `side`'s fist on a handle: orient the hand so the handle (`axis`) runs across the
+    palm with the palm facing `palm_dir`, IK the wrist so the fist hole sits on `point`."""
+    hb = hand_basis(side); hn = f"{side}Hand"
+    axis = axis.normalized()
+    Rcur = fk_world(p, hn) @ Rt0[hn].inverted()
+    sd = axis if (Rcur @ hb["side"]).dot(axis) >= 0 else -axis
+    hand_sign = 1.0 if hb["side"].cross(hb["n"]).dot(hb["along"]) > 0 else -1.0
+    if along_dir is not None:      # knuckles this way (the forearm comes into the handle from the side)
+        ad = (along_dir - sd * along_dir.dot(sd)).normalized()
+        n = (ad.cross(sd) * hand_sign).normalized()
+    else:
+        n = (palm_dir - sd * palm_dir.dot(sd)).normalized()
+    al = sd.cross(n).normalized() * hand_sign
+    Fr = Matrix((hb["along"], hb["side"], hb["n"])).transposed()
+    Fd = Matrix((al, sd, n)).transposed()
+    Wrot = Fd @ Fr.inverted()                                # rest world -> posed world, for the hand
+    off = Wrot @ (hb["hole"] - hb["hand"])
+    ik_arm(p, side, point - off, pole)
+    par = tbones[hn].parent.name
+    B = fk_world(p, par) @ (Rt0[par].inverted() @ Rt0[hn])
+    p[hn][0] = (B.inverted() @ Wrot @ Rt0[hn]).to_quaternion()
+    return (fk_pos(p, hn) + off - point).length
+
+
+# aim_gun="line": rifle shouldered, left hand out along the barrel -> steps 1 + 2.
+# aim_gun="forward": heavy gun gripped with both hands together (no hand-to-hand line) ->
+#     step 2 only, barrel level and straight ahead.
+if SPEC.get("aim_gun") and GUN.get("parts"):
+    if SPEC["aim_gun"] == "hip":
+        # heavy gun from the hip: the idle (breathing, weight shifts) with the right fist on the
+        # grip at belt height ~30 cm out front, elbow back and down -- the mocap aim held the
+        # fist at his sternum and the drum went through his chest
+        attack = [{b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in fr.items()} for fr in idle]
+        yaw = -30.0                    # bladed, left shoulder forward: the left hand can reach the guard
+        for p in attack:
+            turn_world(p, "Hips", (0, 0, 1), yaw)
+        for p in attack:
+            Hp, Sp = fk_pos(p, "Hips"), fk_pos(p, "RightArm")
+            Ry = Matrix.Rotation(math.radians(yaw), 3, Vector((0, 0, 1)))     # body-relative: -X right, -Y ahead
+            ik_arm(p, "Right", Hp + Ry @ Vector((-0.20, -0.22, 0.17)), pole=Ry @ Vector((-0.5, 0.6, -0.6)))
+    mid = attack[len(attack) // 2]
+    yaw = yaw if SPEC["aim_gun"] == "hip" else 0.0
+    if SPEC.get("aim_drop"):        # hands at the chin put the heavy gun's receiver in his face
+        for p in attack:
+            for side in ("Left", "Right"):
+                turn_world(p, f"{side}Arm", (1, 0, 0), SPEC["aim_drop"])
+    if SPEC["aim_gun"] == "line":
+        a = fk_pos(mid, "LeftHand") - fk_pos(mid, "RightHand")
+        yaw = math.degrees(math.atan2(-1.0, 0.0) - math.atan2(a.y, a.x))     # model faces -Y
+        for p in attack:
+            turn_world(p, "Hips", (0, 0, 1), yaw)
+        # legs: this mocap locks the left knee straight and bends the right one BACKWARDS
+        # (goat-legged). Stand him on the idle's relaxed legs instead, turned with the yaw so
+        # the feet follow the bladed stance (world-space match, so the aim's pelvis tilt
+        # doesn't swing them)
+        Ryaw = Matrix.Rotation(math.radians(yaw), 3, Vector((0, 0, 1)))
+        ref = idle[0]
+        for p in attack:
+            for side in ("Left", "Right"):
+                up = f"{side}UpLeg"
+                par = tbones[up].parent.name
+                B = fk_world(p, par) @ (Rt0[par].inverted() @ Rt0[up])
+                p[up][0] = (B.inverted() @ Ryaw @ fk_world(ref, up)).to_quaternion()
+                for bn in (f"{side}Leg", f"{side}Foot", f"{side}ToeBase"):
+                    if bn in p and bn in ref:
+                        p[bn][0] = ref[bn][0].copy()
+        # the gun rides above the fist: drop the cheek hand so it passes UNDER the helmet brim
+        for p in attack:
+            ik_arm(p, "Right", fk_pos(p, "RightHand") - Vector((0, 0, SPEC.get("aim_hand_drop", 0.12))))
+        a = (fk_pos(mid, "LeftHand") - fk_pos(mid, "RightHand")).normalized()
+    else:
+        a = Vector((0, -1, 0))
+    R = fk_world(mid, "RightHand") @ Rt0["RightHand"].inverted()           # rest world -> posed world
+    def frame(d, up):
+        d = d.normalized(); up = (up - d * up.dot(d)).normalized()
+        return Matrix((d, up, d.cross(up))).transposed()
+    cur = frame(R @ GUN["d"], R @ GUN["up"])
+    want = frame(a, Vector((0, 0, 1)))
+    # the gun stays seated in the fist; the WRIST turns it onto the aim line, every frame
+    turned = math.degrees((want @ cur.inverted()).to_quaternion().angle)
+    for p in attack:
+        Rp = fk_world(p, "RightHand") @ Rt0["RightHand"].inverted()
+        Wd = want @ frame(Rp @ GUN["d"], Rp @ GUN["up"]).inverted()
+        par = tbones["RightHand"].parent.name
+        B = fk_world(p, par) @ (Rt0[par].inverted() @ Rt0["RightHand"])
+        p["RightHand"][0] = (B.inverted() @ Wd @ B @ p["RightHand"][0].to_matrix()).to_quaternion()
+    Q = Matrix.Identity(3)
+    print(f"enemy: aim_gun yaw {yaw:.1f} deg, wrist turned {turned:.1f} deg")
+    # left hand onto the handguard: the mocap's support hand reaches ~0.57 m out, past the muzzle
+    # of our shorter rifle (hip mode: it starts at his side) -- IK puts it under the wood
+    if SPEC["aim_gun"] in ("line", "hip"):
+        d_r, up_r = Q @ GUN["d"], Q @ GUN["up"]
+        gl = GUN["grip"] - Ht0["RightHand"]                  # grip offset from the right wrist, rest
+        err = 0.0
+        for p in attack:
+            Rp = fk_world(p, "RightHand") @ Rt0["RightHand"].inverted()
+            grip = fk_pos(p, "RightHand") + Rp @ gl
+            dp, upp = (Rp @ d_r).normalized(), (Rp @ up_r).normalized()
+            # handguard centre is grip + 0.33 d + (lift + 0.045) up; the wrist sits a hand's length
+            # back along it and below, so the palm cups the wood from underneath
+            hold = grip + dp * 0.33 * GUN["scale"] + upp * (GUN["lift"] + 0.045 * GUN["scale"])
+            err = max(err, seat_hand(p, "Left", hold, dp, upp))   # palm up under the wood
+        print(f"enemy: aim_gun left hand on the handguard, max miss {err * 100:.1f} cm")
+    # carry (gunner): a big turn of the gun in the hand leaves it sticking out sideways/backwards
+    # in the other clips -- turn the right wrist there so it is carried low, muzzle ahead and down
+    # hold (gunner): a heavy gun stays in both hands -- idle/walk/run/hit take the hip hold's arms
+    # (local rotations, so it rides the upper body), the gun carried across him
+    if SPEC.get("gun_hold"):
+        ARMS = [b for b in tbones.keys() if b.startswith(("LeftShoulder", "RightShoulder", "LeftArm", "RightArm",
+                "LeftForeArm", "RightForeArm", "LeftHand", "RightHand", "LeftFinger", "RightFinger", "LThumb", "RThumb"))]
+        ref = attack[len(attack) // 2]
+        ref = {bn: ref[bn][0].copy() for bn in ARMS if bn in ref}
+        for clip in (idle, walk, run, hit, attack):
+            for p in clip:
+                for bn, q in ref.items():
+                    if bn in p:
+                        p[bn][0] = q.copy()
+        print(f"enemy: gun_hold arms copied into idle/walk/run/hit/attack ({len(ARMS)} bones)")
+    elif SPEC.get("gun_carry"):
+        d_r, up_r = Q @ GUN["d"], Q @ GUN["up"]
+        carry = Vector((0.25, -0.75, -0.6)).normalized()      # ahead, down, a little across the body
+        worst = 0.0
+        for clip in (idle, walk, run, hit):
+            for p in clip:
+                Rp = fk_world(p, "RightHand") @ Rt0["RightHand"].inverted()
+                W = frame(carry, Vector((0, 0, 1))) @ frame(Rp @ d_r, Rp @ up_r).inverted()
+                par = tbones["RightHand"].parent.name
+                B = fk_world(p, par) @ (Rt0[par].inverted() @ Rt0["RightHand"])
+                p["RightHand"][0] = (B.inverted() @ W @ B @ p["RightHand"][0].to_matrix()).to_quaternion()
+                worst = max(worst, math.degrees(W.to_quaternion().angle))
+        print(f"enemy: gun_carry wrist turn up to {worst:.0f} deg")
 
 # tentacles (fiend): a travelling wave down each chain on every clip -- loops close exactly
 # (whole cycles per clip), the attack whips them all forward over the shoulders, death
@@ -1333,6 +1970,293 @@ def tentacle_motion(poses, role):
     return poses
 
 
+# ---------------------------------------------------------------- de-clip: weapons out of bodies
+# Mocap arms were never holding OUR props: cleavers swung through thighs, lanterns hung inside
+# robes, two blades crossed through each other. Per frame, every hand-held prop is sampled as
+# points and posed rigidly with its hand; the body is a set of capsules fitted to the skinned
+# meshes (body, clothes, apron, robe...). Anything inside a capsule -- or too close to the other
+# hand's prop -- swings that upper arm away, a few degrees at a time, until clear. Corrections
+# are then smoothed through time (no jitter), and a second pass mops up what smoothing gave back.
+# tools/chef/check_clips.py verifies the exported glb against the real meshes.
+def _declip_setup():
+    import numpy as _np
+    wpn = {}
+    for side in ("Left", "Right"):
+        objs = [o for o, b in props if b == f"{side}Hand"]
+        if objs:
+            vs, fs = [], []
+            for o in objs:
+                base = len(vs)
+                vs += [tuple(o.matrix_world @ v.co) for v in o.data.vertices]
+                fs += [tuple(base + i for i in pl.vertices) for pl in o.data.polygons]
+            wpn[side] = (_np.array(vs), fs)
+    if not wpn:
+        return None
+    # body = skinned body + clothes + draped props (apron, robe, growths, belts...)
+    body_objs = [o for o in meshes if "low-poly" not in o.name] + \
+                [o for o, b in props if b not in ("LeftHand", "RightHand")]      # incl. hats, masks, helmets
+    # each face's bone (most-weighted group of its first vertex; rigid props: their bone)
+    rigid = {o.name: b for o, b in props}
+    fbone = {}
+    for o in body_objs:
+        gname = {g.index: g.name for g in o.vertex_groups}
+        rb = rigid.get(o.name)
+        vb = []
+        for v in o.data.vertices:
+            g = max(v.groups, key=lambda g: g.weight, default=None)
+            vb.append(rb if rb else (gname.get(g.group) if g else ""))
+        fbone[o.name] = [vb[pl.vertices[0]] for pl in o.data.polygons]
+    return wpn, body_objs, fbone
+
+
+DECLIP = _declip_setup() if not TENT_BONES else None
+
+
+def _apply_pose(p):
+    for n, (q, l) in p.items():
+        pb = rig.pose.bones[n]
+        pb.rotation_quaternion = q
+        if l is not None:
+            pb.location = l
+    bpy.context.view_layer.update()
+
+
+def declip(poses, loop, label=""):
+    if DECLIP is None or not poses:
+        return poses
+    import numpy as _np
+    wpn, body_objs, _ = DECLIP
+    gun = bool(GUN.get("parts"))
+    if rig.animation_data:
+        rig.animation_data.action = None
+    topo, fbone = {}, {}      # from the EVALUATED meshes (mask modifiers drop hidden skin)
+    rigid = {o.name: b for o, b in props}
+
+    def ignore(bn, side):
+        own = (f"{side}Hand", f"{side}Finger", f"{side}HandFinger", f"{side[0]}Thumb", f"{side}ForeArm")
+        if bn.startswith(own):
+            return True                       # the fist holds the grip; the wrist sits on the handle
+        if gun and bn.startswith(("LeftHand", "RightHand", "LeftFinger", "RightFinger", "LThumb", "RThumb",
+                                  "LeftForeArm", "RightForeArm", "LeftArm", "RightArm")):
+            return True                       # a gun is held by both arms: the aim owns that
+        return False
+
+    def body_trees():
+        dg = bpy.context.evaluated_depsgraph_get()
+        out = []
+        for o in body_objs:
+            ev = o.evaluated_get(dg); me = ev.to_mesh()
+            if o.name not in topo:
+                topo[o.name] = [tuple(pl.vertices) for pl in me.polygons]
+                gname = {g.index: g.name for g in o.vertex_groups}
+                rb = rigid.get(o.name); vb = []
+                for v in me.vertices:
+                    g = max(v.groups, key=lambda g: g.weight, default=None)
+                    vb.append(rb if rb else (gname.get(g.group, "") if g else ""))
+                fbone[o.name] = [vb[f[0]] for f in topo[o.name]]
+            co = _np.empty(len(me.vertices) * 3); me.vertices.foreach_get("co", co); co = co.reshape(-1, 3)
+            M = _np.array([tuple(r) for r in ev.matrix_world])
+            co = co @ M[:3, :3].T + M[:3, 3]
+            ev.to_mesh_clear()
+            out.append((o.name, co, BVHTree.FromPolygons(co.tolist(), topo[o.name])))
+        return out
+
+    def weapon(side):
+        pb = rig.pose.bones[f"{side}Hand"]
+        M = rig.matrix_world @ pb.matrix @ pb.bone.matrix_local.inverted() @ rig.matrix_world.inverted()
+        X, fs = wpn[side]
+        Mn = _np.array([tuple(r) for r in M])
+        Y = X @ Mn[:3, :3].T + Mn[:3, 3]
+        return Y, fs, BVHTree.FromPolygons(Y.tolist(), fs)
+
+    def contacts(Wt, trees, side):
+        """(weapon-side centroid, outward body normal sum, count) over overlapping triangle pairs."""
+        Y, fs, tw = Wt
+        cen, push, n = Vector((0, 0, 0)), Vector((0, 0, 0)), 0
+        for nm, co, tb in trees:
+            fb = fbone[nm]; tp = topo[nm]
+            for iw, ib in tw.overlap(tb):
+                if ignore(fb[ib], side):
+                    continue
+                f = tp[ib]
+                a0, a1, a2 = (Vector(tuple(co[f[k]])) for k in (0, 1, 2))
+                nrm = (a1 - a0).cross(a2 - a0)
+                if nrm.length > 1e-12:
+                    push += nrm.normalized()
+                cen += Vector(tuple(Y[list(fs[iw])].mean(0))); n += 1
+        return (cen / n if n else None), push, n
+
+    def swing(side, where, push, deg, bone="Arm"):
+        S = rig.matrix_world @ rig.pose.bones[f"{side}{bone}"].head
+        lever = where - S
+        ax = lever.cross(push)
+        if ax.length < 1e-9 or lever.length < 1e-3:
+            return None
+        return (side, deg, ax.normalized(), bone)
+
+    def solve(p, iters=20, wrist_after=10):
+        # upper-arm swings first; if a long prop (shovel, cross) is still in the head after
+        # wrist_after rounds, the wrist joins in and tips the prop itself away
+        moved = 0
+        for it in range(iters):
+            _apply_pose(p)
+            trees = body_trees()
+            W = {s: weapon(s) for s in wpn}
+            turns = []
+            for side, Wt in W.items():
+                where, push, n = contacts(Wt, trees, side)
+                if n and push.length > 1e-9:
+                    t = swing(side, where, push.normalized(), min(6.0, 1.5 + 0.08 * n))
+                    if t: turns.append(t)
+                    if it >= wrist_after and not gun:
+                        t = swing(side, where, push.normalized(), min(8.0, 2.0 + 0.1 * n), bone="Hand")
+                        if t: turns.append(t)
+            if len(W) == 2:
+                ov = W["Left"][2].overlap(W["Right"][2])
+                if ov:
+                    cL = Vector(tuple(W["Left"][0].mean(0))); cR = Vector(tuple(W["Right"][0].mean(0)))
+                    sep = cL - cR
+                    sep = sep.normalized() if sep.length > 1e-6 else Vector((1, 0, 0))
+                    for side, sv in (("Left", sep), ("Right", -sep)):
+                        t = swing(side, Vector(tuple(W[side][0].mean(0))), sv, 3.0)
+                        if t: turns.append(t)
+            if not turns:
+                break
+            for side, deg, ax, bone in turns:
+                turn_world(p, f"{side}{bone}", ax, deg)
+            moved += 1
+        return moved
+
+    arms = [f"{s}{b}" for s in ("Left", "Right") for b in ("Arm", "Hand")]
+    before = [{a: p[a][0].copy() for a in arms} for p in poses]
+    n_fixed = sum(1 for p in poses if solve(p) > 0)
+    n = len(poses)
+    deltas = [{a: poses[i][a][0] @ before[i][a].inverted() for a in arms} for i in range(n)]
+    for i in range(n):          # smooth the corrections through time (wrap for loops)...
+        for a in arms:
+            ref = deltas[i][a]; acc = [0.0, 0.0, 0.0, 0.0]
+            for k in range(-3, 4):
+                j = (i + k) % n if loop else min(n - 1, max(0, i + k))
+                q = deltas[j][a]; q = q if q.dot(ref) >= 0 else -q
+                # bigger corrections weigh more: they pull their neighbours, not the reverse
+                w = (1.0 / (1 + abs(k))) * (1.0 + 4.0 * (1.0 - abs(q.w)))
+                acc = [acc[0] + q.w * w, acc[1] + q.x * w, acc[2] + q.y * w, acc[3] + q.z * w]
+            qa = Quaternion(acc); qa.normalize()
+            poses[i][a][0] = qa @ before[i][a]
+    left = sum(1 for p in poses if solve(p, iters=45, wrist_after=3) > 0)   # ...then mop up the residue
+    print(f"enemy: declip {label}: {n_fixed}/{n} frames corrected, {left} re-touched after smoothing")
+    return poses
+
+
+# knees: retargeted mocap sometimes bends a knee BACKWARDS (goat legs -- the base melee attack,
+# the rifle aim). Measure each knee's bend about its hinge (rest X: + flexes the shin back);
+# a negative bend is mirrored to a forward one, the thigh swings so the ankle lands where it
+# was, and the foot keeps its world angle (stays planted).
+def fix_knees(poses, label):
+    nfix = 0
+    for side in ("Left", "Right"):
+        up, lg, ft = f"{side}UpLeg", f"{side}Leg", f"{side}Foot"
+        if lg not in tbones or ft not in tbones:
+            continue
+        hinge = (Rt0[lg].inverted() @ Vector((1, 0, 0))).normalized()
+        for p in poses:
+            q = p[lg][0]
+            v = Vector((q.x, q.y, q.z))
+            ang = 2 * math.atan2(v.dot(hinge), q.w)
+            if ang > math.radians(-1.0):
+                continue
+            A0, Wf = fk_pos(p, ft), fk_world(p, ft)
+            p[lg][0] = Quaternion(hinge, -ang + math.radians(4))
+            H, A1 = fk_pos(p, up), fk_pos(p, ft)
+            a0, a1 = A1 - H, A0 - H
+            ax = a0.cross(a1)
+            if ax.length > 1e-9:
+                turn_world(p, up, ax.normalized(), math.degrees(a0.angle(a1)))
+            B = fk_world(p, lg) @ (Rt0[lg].inverted() @ Rt0[ft])
+            p[ft][0] = (B.inverted() @ Wf).to_quaternion()
+            nfix += 1
+    if nfix:
+        print(f"enemy: knees {label}: {nfix} backward knees flexed forward")
+    return poses
+
+
+idle, walk, run, attack, hit, death = (fix_knees(ps, lb) for ps, lb in
+    ((idle, "idle"), (walk, "walk"), (run, "run"), (attack, "attack"), (hit, "hit"), (death, "death")))
+
+if DECLIP is not None:
+    idle, walk, run, hit, death = (declip(ps, lp, label=lb) for ps, lp, lb in
+                                   ((idle, True, "idle"), (walk, True, "walk"), (run, True, "run"),
+                                    (hit, False, "hit"), (death, False, "death")))
+    if not GUN.get("parts"):        # gun aims are hand-built (aim_gun); melee swings get de-clipped
+        attack = declip(attack, False, label="attack")
+
+# grip: a hand that holds a prop is a closed fist on EVERY frame. fist() adds a curl on top of
+# the mocap, so open-handed clips (the run's flat palms) left knives floating off open
+# fingers; here the finger bones are SET to a fixed grip, whatever the mocap did.
+GRIP = {"FingerBase": 10, "HandFinger1": 108, "Thumb": 45}   # FingerBase = the PALM: barely bend it
+GRIP_SIDES = sorted({b[:-4] for _, b in props if b in ("LeftHand", "RightHand")} |
+                    ({"Left"} if (GUN.get("parts") or SPEC.get("two_hand")) else set()))
+
+
+GRIPQ = {}
+for _sd in GRIP_SIDES:
+    GRIPQ.update(curl_quats(_sd, GRIP))
+RELAXQ = {}
+for _sd in ("Left", "Right"):
+    if _sd not in GRIP_SIDES and f"{_sd}HandFinger1" in tbones:
+        RELAXQ.update(curl_quats(_sd, RELAX))
+
+
+def grip(poses):
+    for p in poses:          # the mocap has no finger channels: ADD them (they stayed flat at rest)
+        for bn, q in GRIPQ.items():
+            p[bn] = [q.copy(), None]
+        for bn, q in RELAXQ.items():                     # empty hands: relaxed, unless a synth set them
+            if bn not in p:
+                p[bn] = [q.copy(), None]
+    return poses
+
+
+# two_hand="shaft" (liquidator's shovel, revenant's axe swing): the left fist rides the shaft,
+# nearest to where the mocap had it (clamped along the shaft); two_hand_clips picks the clips
+if SPEC.get("two_hand") == "shaft":
+    hbR = hand_basis("Right"); worst = 0.0
+    TH = {"idle": idle, "walk": walk, "run": run, "hit": hit, "attack": attack}
+    for cn in SPEC.get("two_hand_clips", ("idle", "walk", "run", "hit", "attack")):
+        for p in TH[cn]:
+            Rr = fk_world(p, "RightHand") @ Rt0["RightHand"].inverted()
+            hole = fk_pos(p, "RightHand") + Rr @ (hbR["hole"] - hbR["hand"])
+            ax = (Rr @ hbR["side"]).normalized()
+            hbL = hand_basis("Left")
+            Rl = fk_world(p, "LeftHand") @ Rt0["LeftHand"].inverted()
+            lh = fk_pos(p, "LeftHand") + Rl @ (hbL["hole"] - hbL["hand"])
+            t = max(0.30, min(0.70, (lh - hole).dot(ax)))
+            pt = hole + ax * t
+            pd = pt - lh
+            pd = pd if pd.length > 1e-4 else Rl @ hbL["n"]
+            fa = fk_pos(p, "LeftHand") - fk_pos(p, "LeftForeArm")     # forearm comes in across the shaft
+            miss = seat_hand(p, "Left", pt, ax, pd.normalized(), along_dir=fa)
+            if miss > 0.01:      # out of reach (a de-clipped wind-up tips the shaft away): slide the
+                best = None      # left fist down the shaft toward the right hand until it closes on it
+                for tt in (0.25, 0.20, 0.16, 0.12):
+                    if tt >= t:
+                        continue
+                    q = {b: [v[0].copy(), (v[1].copy() if v[1] is not None else None)] for b, v in p.items()}
+                    pt2 = hole + ax * tt
+                    m2 = seat_hand(q, "Left", pt2, ax, (pt2 - lh).normalized() if (pt2 - lh).length > 1e-4 else pd.normalized(), along_dir=fa)
+                    if best is None or m2 < best[0]:
+                        best = (m2, q)
+                if best and best[0] < miss:
+                    miss = best[0]
+                    p.update(best[1])
+            if miss > 0.02:
+                print(f"enemy: two_hand {cn} frame {TH[cn].index(p)} miss {miss * 100:.1f} cm")
+            worst = max(worst, miss)
+    print(f"enemy: two_hand left fist on the shaft, max miss {worst * 100:.1f} cm")
+
+idle, walk, run, attack, hit, death = (grip(ps) for ps in (idle, walk, run, attack, hit, death))
+print(f"enemy: grip {GRIP_SIDES} closed, relaxed {sorted({b[:4] for b in RELAXQ})} on every frame")
+
 idle, walk, run, attack, hit, death = (tentacle_motion(ps, r) for ps, r in
     ((idle, "idle"), (walk, "walk"), (run, "run"), (attack, "attack"), (hit, "hit"), (death, "death")))
 
@@ -1340,7 +2264,7 @@ for name, poses, step in (("idle", idle, 1), ("walk", walk, 1), ("run", run, 1),
                           ("attack", attack, 2), ("hit", hit, 1), ("death", death, 2)):
     clips.append(bake(name, poses, step))
 if "cast" in SPEC["clips"]:     # optional spell clip (priest), separate from the melee swing
-    clips.append(bake("cast", take("cast"), 2))
+    clips.append(bake("cast", grip(declip(fix_knees(take("cast"), "cast"), False, label="cast")), 2))
 for act in clips:
     tr = rig.animation_data.nla_tracks.new(); tr.name = act.name
     tr.strips.new(act.name, int(act.frame_range[0]), act)
@@ -1378,6 +2302,103 @@ if PREVIEW:
             shot(c.name, max(1, fr), "side" if c.name != "death" else "three")
     for tr in rig.animation_data.nla_tracks:
         tr.mute = False
+
+# =============================================================== 5b. prop surface detail
+# Every remaining material (props, eyes, gear) gets a procedural normal map + ORM by what it
+# is made of: brushed steel, pebbled rubber, cotton weave, wood grain, chipped paint, wet flesh.
+PROFILES = [   # (name keywords, pattern, roughness, specular, normal strength)
+    (("steel", "iron", "gunmetal", "blade", "cleaver", "knife"), "brushed", 0.22, 0.95, 3.0),
+    (("brass",), "brushed", 0.30, 0.75, 3.0),
+    (("spade", "rust"), "pitted", 0.80, 0.15, 7.0),
+    (("helmet", "axe_head", "air_tank", "tank"), "chipped", 0.45, 0.45, 5.0),
+    (("rubber_apron", "apron"), "smooth", 0.28, 0.55, 2.0),     # big wet rubber sheet: glossy, faint texture
+    (("rubber", "filter", "mask"), "pebble", 0.50, 0.30, 3.5),
+    (("leather", "strap", "belt"), "pebble", 0.55, 0.25, 4.0),
+    (("hat", "cloth", "neckerchief", "robe", "canvas", "apron", "toque"), "weave", 0.90, 0.04, 1.6),
+    (("wood", "furniture", "haft", "handle"), "grain", 0.65, 0.12, 3.0),
+    (("growth", "tentacle", "flesh", "tumour", "tumor"), "blobby", 0.30, 0.60, 5.0),
+    (("blood",), "blobby", 0.10, 0.90, 2.5),
+    (("eye", "lens"), "flat", 0.05, 1.00, 0.0),
+]
+
+
+def blur_x(a, r):
+    c = np.cumsum(np.pad(a, [(0, 0), (r + 1, r)], mode="wrap"), axis=1)
+    n = a.shape[1]
+    return (c[:, 2 * r + 1:n + 2 * r + 1] - c[:, 0:n]) / (2 * r + 1)
+
+
+def pattern_height(kind, S, seed):
+    rng = np.random.default_rng(seed)
+    nz = lambda: rng.standard_normal((S, S)).astype(np.float32)
+    yy, xx = np.mgrid[0:S, 0:S].astype(np.float32)
+    if kind == "brushed":     # long streaks + a few scratches
+        h = blur_x(nz(), 28) * 3.0
+        sc = (rng.random((S, S)) > 0.9993).astype(np.float32)
+        h -= blur_x(blur(sc, 1), 40) * 18.0
+        return h
+    if kind == "smooth":
+        return blur(nz(), 3) * 0.3 + smooth_noise(S, S, 6, seed) * 1.5
+    if kind == "pebble":
+        return blur(nz(), 2) * 1.2 + blur(nz(), 6) * 0.8
+    if kind == "pitted":
+        pits = (rng.random((S, S)) > 0.996).astype(np.float32)
+        return blur(nz(), 2) * 1.0 + blur(nz(), 8) * 1.5 - blur(pits, 2) * 6.0
+    if kind == "chipped":     # smooth paint with flaked chips
+        chips = (smooth_noise(S, S, 40, seed) > 0.78).astype(np.float32)
+        return blur(nz(), 3) * 0.4 - blur(chips, 1) * 0.6
+    if kind == "weave":
+        p = 2.6                                       # fine cotton: a felt texture, not a grid
+        return 0.10 * (np.sin(2 * np.pi * xx / p) * np.sin(2 * np.pi * yy / p)) + blur(nz(), 1) * 0.35 + blur(nz(), 5) * 0.4
+    if kind == "grain":
+        return np.sin(2 * np.pi * (xx / S * 36.0 + 5.0 * smooth_noise(S, S, 7, seed))) * 0.5 + blur(nz(), 1) * 0.2
+    if kind == "blobby":
+        return smooth_noise(S, S, 12, seed) * 2.0 + smooth_noise(S, S, 36, seed + 1) * 1.0
+    return np.zeros((S, S), np.float32)
+
+
+def material_image(m):
+    if not m or not m.use_nodes:
+        return None
+    for n in m.node_tree.nodes:
+        if n.type == "TEX_IMAGE" and n.image and n.name != "ORM":
+            return n.image
+    return None
+
+
+# geometry AO is baked only into body + clothes (clean, non-overlapping UVs); props share
+# materials across overlapping islands, so a bake there would be garbage
+BAKE_SET = {m.name for m in bpy.data.materials if "orm" in m.keys()}
+if DETAIL:
+    done = 0
+    for m in list(bpy.data.materials):
+        if not m.use_nodes or "orm" in m.keys() or m.users == 0:
+            continue
+        if getattr(m, "blend_method", "") == "CLIP":
+            continue                                     # eyebrows / lashes: alpha cards
+        key = m.name.lower()
+        prof = next((p for p in PROFILES if any(k in key for k in p[0])), (None, "pebble", 0.70, 0.12, 4.0))
+        _, kind, rough, spec, strength = prof
+        img = material_image(m)
+        S = min(512, img.size[0]) if img is not None else 512
+        h = pattern_height(kind, S, abs(hash(m.name)) % 1000)
+        mask = np.zeros((S, S), np.float32)
+        if img is not None:                              # the painted texture's own grime + any blood on it
+            a = img_np(img, (S, S))
+            lum = 0.3 * a[..., 0] + 0.59 * a[..., 1] + 0.11 * a[..., 2]
+            h = h + (blur(lum, 1) - blur(lum, 6)) * 2.0
+            base_red = float(np.median(a[..., 0] - np.maximum(a[..., 1], a[..., 2])))
+            if base_red < 0.15:                          # wet blood on a non-red surface
+                mask = np.clip((a[..., 0] - np.maximum(a[..., 1], a[..., 2]) - 0.15) * 5.0, 0, 1)
+        nrm = height_to_normal(h, strength) if strength > 0 else None
+        var = smooth_noise(S, S, 16, 9)
+        orm = np.stack([np.ones((S, S), np.float32),
+                        np.clip(rough + 0.12 * (var - 0.5) - 0.5 * mask, 0.05, 1),
+                        np.clip(spec * (0.8 + 0.4 * var) + 0.6 * mask, 0, 1)], -1)
+        nimg, oimg = save_maps(f"{ENEMY}_{m.name}", nrm, orm)
+        attach_detail(m, nimg, oimg)
+        done += 1
+    print("enemy: prop detail on", done, "materials")
 
 # =============================================================== 6. export
 # One mesh object for the whole enemy (body + clothes + every prop): glTF then holds one
@@ -1422,13 +2443,126 @@ if os.environ.get("ENEMY_DECIMATE"):
     bpy.ops.object.modifier_move_to_index(modifier="lod", index=0)
     bpy.ops.object.modifier_apply(modifier="lod")
     print("enemy: decimated to", len(body.data.polygons), "faces")
+if DETAIL:
+    # Bake ambient occlusion from the real geometry (helmet over the face, collar on the neck,
+    # arms against the torso) in the rest pose, and multiply it into each ORM's R channel.
+    rig.data.pose_position = "REST"
+    scene.render.engine = "CYCLES"; scene.cycles.samples = 48; scene.cycles.device = "CPU"
+    bakes, scratch = [], []
+    for m in body.data.materials:
+        if m is None:
+            continue
+        if "orm" not in m.keys() or m.name not in BAKE_SET:
+            # Blender bakes into the ACTIVE image node of EVERY material on the mesh: give the
+            # others a throwaway target, or their own textures (hat, mask, shoes) get overwritten
+            if m.use_nodes:
+                si = bpy.data.images.new(m.name + "_scratch", 8, 8)
+                n = m.node_tree.nodes.new("ShaderNodeTexImage"); n.image = si
+                for x in m.node_tree.nodes: x.select = False
+                n.select = True; m.node_tree.nodes.active = n
+                scratch.append((m, n, si))
+            continue
+        orm = bpy.data.images[m["orm"]]
+        bi = bpy.data.images.new(m.name + "_aobake", 1024, 1024, alpha=False)
+        bi.colorspace_settings.name = "Non-Color"
+        n = m.node_tree.nodes.new("ShaderNodeTexImage"); n.image = bi
+        for x in m.node_tree.nodes: x.select = False
+        n.select = True; m.node_tree.nodes.active = n
+        bakes.append((m, n, bi, orm))
+    if bakes:
+        bpy.ops.object.select_all(action="DESELECT"); body.select_set(True); bpy.context.view_layer.objects.active = body
+        scene.render.bake.margin = 8
+        bpy.ops.object.bake(type="AO")
+        # curvature (Cycles pointiness), baked as emission into a second image per material
+        curv = {}
+        for m, n, bi, orm in bakes:
+            ci = bpy.data.images.new(m.name + "_curv", 1024, 1024, alpha=False); ci.colorspace_settings.name = "Non-Color"
+            n.image = ci
+            nt = m.node_tree; out = next(x for x in nt.nodes if x.type == "OUTPUT_MATERIAL")
+            prev = out.inputs["Surface"].links[0].from_socket if out.inputs["Surface"].links else None
+            geo = nt.nodes.new("ShaderNodeNewGeometry"); em = nt.nodes.new("ShaderNodeEmission")
+            nt.links.new(geo.outputs["Pointiness"], em.inputs["Color"]); nt.links.new(em.outputs["Emission"], out.inputs["Surface"])
+            curv[m.name] = (ci, prev, geo, em, out)
+        bpy.ops.object.bake(type="EMIT")
+        for m, n, bi, orm in bakes:
+            ci, prev, geo, em, out = curv[m.name]; nt = m.node_tree
+            if prev is not None: nt.links.new(prev, out.inputs["Surface"])
+            nt.nodes.remove(geo); nt.nodes.remove(em)
+            n.image = bi
+        for m, n, bi, orm in bakes:
+            ao = to_np(bi)[..., 0]
+            o_ = to_np(orm)
+            ky, kx = o_.shape[0] // ao.shape[0], o_.shape[1] // ao.shape[1]
+            ao = np.kron(ao, np.ones((ky, kx), np.float32))[:o_.shape[0], :o_.shape[1]]
+            ao = blur(np.clip(ao, 0, 1), 2)
+            # curvature -> cavities (grime, occlusion) and worn ridges (lighter edges)
+            ci = curv[m.name][0]
+            pt = to_np(ci)[..., 0]
+            c = pt - blur(pt, 8)
+            k = 1.0 / (np.percentile(np.abs(c), 96) + 1e-6)
+            cav = np.kron(np.clip(-c * k, 0, 1), np.ones((ky, kx), np.float32))[:o_.shape[0], :o_.shape[1]]
+            edge = np.kron(np.clip(c * k, 0, 1), np.ones((ky, kx), np.float32))[:o_.shape[0], :o_.shape[1]]
+            cav, edge = blur(cav, 2), blur(edge, 2)
+            skin = "_skin" in m.name
+            o_[..., 0] = np.clip(o_[..., 0] * (0.35 + 0.65 * ao) * (1 - (0.20 if skin else 0.35) * cav), 0, 1)
+            o_[..., 1] = np.clip(o_[..., 1] + (0.0 if skin else 0.08) * cav, 0, 1)   # grime is duller
+            orm.pixels.foreach_set(o_.astype(np.float32).ravel()); orm.save()
+            base = next((l.from_node.image for l in m.node_tree.nodes["Principled BSDF"].inputs["Base Color"].links
+                         if l.from_node.type == "TEX_IMAGE"), None)
+            if base is not None:
+                d_ = to_np(base)
+                if d_.shape[:2] != o_.shape[:2]:
+                    cy_, cx_ = d_.shape[0] // o_.shape[0] or 1, d_.shape[1] // o_.shape[1] or 1
+                    cav2, edge2 = np.kron(cav, np.ones((cy_, cx_), np.float32)), np.kron(edge, np.ones((cy_, cx_), np.float32))
+                    cav2, edge2 = cav2[:d_.shape[0], :d_.shape[1]], edge2[:d_.shape[0], :d_.shape[1]]
+                else:
+                    cav2, edge2 = cav, edge
+                grime = np.array((0.20, 0.16, 0.11), np.float32)          # oily soot settles in folds
+                g = (0.18 if skin else 0.45) * cav2
+                for ch in range(3):
+                    d_[..., ch] = d_[..., ch] * (1 - g) + grime[ch] * g * d_[..., ch] * 2.0
+                    if not skin:
+                        d_[..., ch] = np.clip(d_[..., ch] + 0.07 * edge2 * (1 - d_[..., ch]), 0, 1)   # worn, lighter ridges
+                base.pixels.foreach_set(d_.astype(np.float32).ravel()); base.save()
+            bpy.data.images.remove(ci)
+            m.node_tree.nodes.remove(n); bpy.data.images.remove(bi)
+        print("enemy: baked AO into", len(bakes), "materials")
+    for m, n, si in scratch:
+        m.node_tree.nodes.remove(n); bpy.data.images.remove(si)
+    rig.data.pose_position = "POSE"
 bpy.ops.object.select_all(action="DESELECT")
 for o in bpy.data.objects:
     if o.type in ("MESH", "ARMATURE"):
         o.select_set(True)
-bpy.ops.export_scene.gltf(filepath=OUT, export_format="GLB", use_selection=True, export_yup=True,
+bpy.ops.export_scene.gltf(export_tangents=DETAIL, filepath=OUT, export_format="GLB", use_selection=True, export_yup=True,
                           export_animations=True, export_animation_mode="NLA_TRACKS", export_skins=True,
                           export_apply=True, export_materials="EXPORT", export_image_format="AUTO",
                           export_frame_range=False, export_force_sampling=True)
 print("enemy: wrote", OUT, os.path.getsize(OUT) // 1024, "KB;",
       sum(len(o.data.vertices) for o in bpy.data.objects if o.type == "MESH"), "verts total")
+
+# =============================================================== 7. distance LOD
+# <out>_lod.glb: the same figure decimated to ~30% of its triangles, mesh + skin ONLY (no
+# animations, placeholder materials). The game draws it with the full model's materials and
+# bone palette, so it must keep one primitive per material, in the same order -- checked
+# here and again at load.
+LOD_RATIO = float(os.environ.get("ENEMY_LOD", "0.3"))
+if LOD_RATIO > 0:
+    used_before = sorted({p.material_index for p in body.data.polygons})
+    dm = body.modifiers.new("lod", "DECIMATE"); dm.ratio = LOD_RATIO
+    bpy.context.view_layer.objects.active = body
+    bpy.ops.object.modifier_move_to_index(modifier="lod", index=0)
+    bpy.ops.object.modifier_apply(modifier="lod")
+    used_after = sorted({p.material_index for p in body.data.polygons})
+    if used_after != used_before:
+        print("enemy: LOD dropped materials", sorted(set(used_before) - set(used_after)), "-- no LOD written")
+    else:
+        lod_out = OUT[:-4] + "_lod.glb"
+        bpy.ops.object.select_all(action="DESELECT")
+        for o in bpy.data.objects:
+            if o.type in ("MESH", "ARMATURE"):
+                o.select_set(True)
+        bpy.ops.export_scene.gltf(filepath=lod_out, export_format="GLB", use_selection=True, export_yup=True,
+                                  export_animations=False, export_skins=True, export_apply=True,
+                                  export_materials="PLACEHOLDER")
+        print("enemy: wrote LOD", lod_out, os.path.getsize(lod_out) // 1024, "KB;", len(body.data.vertices), "verts")

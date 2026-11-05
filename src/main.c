@@ -898,6 +898,9 @@ static void DrawScorch(void){
 #define ENEMY_MELEE_DMG    16.0f      // hp per landed swing (timed attack window -- the default)
 #define ATK_STRIKE_FRAC    0.45f      // fraction through the attack clip where the swing lands (the dodge window is everything before it)
 #define ENEMY_BLEND        0.15f      // seconds of crossfade on every clip change (no pose snaps)
+#define DUAL_STRIKE_A      0.28f      // two-weapon attack (synth_dual in the builder): right blade lands...
+#define DUAL_STRIKE_B      0.78f      // ...then the left
+#define DUAL_DMG           0.6f       // each blade: 60% of a single chop
 #define ATK_COOLDOWN       1.2f       // min seconds between swings that can hurt
 #define ENEMY_ATTACK_RANGE  1.8f       // enters attack/melee within this range
 // Headshot zone: a narrower box at the TOP of the enemy silhouette. A shot
@@ -946,6 +949,7 @@ static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; co
     {  5, 120.0f, 6.8f, 24.0f, 1.00f, {238,236,232,255}, "revenant",   AK_MELEE,    0, 0,    0, 0 },   // burned firefighter: sprints in with a fire axe
     {  8, 340.0f, 3.4f, 28.0f, 1.06f, {238,236,232,255}, "fiend",      AK_MELEE,  2.8f, 0,   0, 0 },   // tentacled liquidator: tanky, tentacles out-reach a swing
 };
+static int EnemyDualWield(int t){ return t==EN_COOK || t==EN_BUTCHER || t==EN_HEADCHEF; }
 // melee reach: the tentacled fiend lashes from further out (range doubles as reach for AK_MELEE)
 #define ENEMY_REACH(t) ((kEnemy[t].kind==AK_MELEE && kEnemy[t].range>0) ? kEnemy[t].range : ENEMY_ATTACK_RANGE)
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; int swing, prevClip; float prevT, blendT; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
@@ -958,7 +962,8 @@ static int             g_corpseNext = 0;
 // animation index, so models with different clip orders/frame counts coexist.
 enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_CAST, CL_NROLES };   // CL_CAST: spell clip (priest raising the dead); falls back to attack
 typedef struct { Model model; ModelAnimation *anim; int animN; int clip[CL_NROLES]; int deathFrame; int ok;
-                 int gpu; Matrix *invBind, *bones; } EnemyRig;   // gpu: skinned in the vertex shader (EnemySkinInit)
+                 int gpu; Matrix *invBind, *bones;
+                 Model lod; int hasLod; } EnemyRig;   // lod: <name>_lod.glb, ~30% triangles, drawn past ENEMY_LOD_DIST   // gpu: skinned in the vertex shader (EnemySkinInit)
 static EnemyRig        g_rig[EN_NTYPES];
 static EnemyRig *RigOf(int type){ return g_rig[type].ok ? &g_rig[type] : &g_rig[EN_COOK]; }   // missing model -> the cook stands in
 static ModelAnimation *RigClip(int type, int role){ EnemyRig *r=RigOf(type); return &r->anim[r->clip[role]]; }
@@ -981,34 +986,51 @@ static int EnemySkinInit(void){
     // a faint rim so silhouettes separate from the walls.
     const char *vs="#version 330\n"
         "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor; in vec3 vertexNormal;\n"
-        "in vec4 vertexBoneIndices; in vec4 vertexBoneWeights;\n"
+        "in vec4 vertexBoneIndices; in vec4 vertexBoneWeights; in vec4 vertexTangent;\n"
         "uniform mat4 mvp; uniform mat4 matModel; uniform mat4 boneMatrices[64];\n"
-        "out vec2 fragTexCoord; out vec4 fragColor; out vec3 fragPos; out vec3 fragNormal;\n"
+        "out vec2 fragTexCoord; out vec4 fragColor; out vec3 fragPos; out vec3 fragNormal; out vec4 fragTangent;\n"
         "void main(){\n"
-        "  vec4 p=vec4(vertexPosition,1.0), s=vec4(0.0); vec3 n=vec3(0.0); float wsum=0.0;\n"
+        "  vec4 p=vec4(vertexPosition,1.0), s=vec4(0.0); vec3 n=vec3(0.0), t=vec3(0.0); float wsum=0.0;\n"
         "  for (int i=0;i<4;i++){ float w=vertexBoneWeights[i]; if (w>0.0){ mat4 B=boneMatrices[int(vertexBoneIndices[i])];\n"
-        "      s+=w*(B*p); n+=w*(mat3(B)*vertexNormal); wsum+=w; } }\n"
-        "  if (wsum<=0.0){ s=p; n=vertexNormal; } else s/=wsum;\n"
+        "      s+=w*(B*p); n+=w*(mat3(B)*vertexNormal); t+=w*(mat3(B)*vertexTangent.xyz); wsum+=w; } }\n"
+        "  if (wsum<=0.0){ s=p; n=vertexNormal; t=vertexTangent.xyz; } else s/=wsum;\n"
         "  vec4 wp=matModel*vec4(s.xyz,1.0);\n"
         "  fragPos=wp.xyz; fragNormal=normalize(mat3(matModel)*n);\n"
+        "  fragTangent=vec4(mat3(matModel)*t, vertexTangent.w);\n"
         "  fragTexCoord=vertexTexCoord; fragColor=vertexColor; gl_Position=mvp*vec4(s.xyz,1.0);\n"
         "}\n";
+    // Surface detail (per material, neutral defaults when a model has none -- EnemyRigGPU):
+    //   texture2 = tangent-space normal map; texOrm = packed R occlusion, G roughness, B specular.
+    // Occlusion darkens the ambient fully and the lamps by half; specular is a Blinn-Phong
+    // highlight per lamp whose tightness follows roughness (wet blood / sweat glint, canvas doesn't).
     const char *fs="#version 330\n"
-        "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal;\n"
-        "uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
+        "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal; in vec4 fragTangent;\n"
+        "uniform sampler2D texture0; uniform sampler2D texture2; uniform sampler2D texOrm; uniform vec4 colDiffuse;\n"
         "uniform vec3 lPos[5]; uniform vec3 lCol[5]; uniform float lR[5]; uniform int lN;\n"
         "uniform vec3 ambient; uniform vec3 viewPos;\n"
         "out vec4 finalColor;\n"
         "void main(){\n"
         "  vec4 t=texture(texture0, fragTexCoord); if (t.a<0.35) discard;\n"
-        "  vec3 N=normalize(fragNormal); vec3 V=normalize(viewPos-fragPos);\n"
-        "  if (dot(N,V)<0.0) N=-N;\n"
-        "  vec3 lit=ambient;\n"
+        "  vec3 Ng=normalize(fragNormal); vec3 V=normalize(viewPos-fragPos);\n"
+        "  float side=dot(Ng,V)<0.0?-1.0:1.0; Ng*=side;\n"
+        "  vec3 N=Ng; vec3 T=fragTangent.xyz-Ng*dot(Ng,fragTangent.xyz);\n"
+        "  if (dot(T,T)>1e-8){ T=normalize(T); vec3 B=cross(Ng,T)*(fragTangent.w<0.0?-1.0:1.0);\n"
+        "    vec3 m=texture(texture2,fragTexCoord).xyz*2.0-1.0; m.xy*=side; N=normalize(mat3(T,B,Ng)*m); }\n"
+        "  vec4 orm=texture(texOrm,fragTexCoord); float ao=orm.r, rough=orm.g, spi=orm.b, sss=1.0-orm.a;\n"
+        "  float shin=mix(96.0,6.0,rough), ndv=max(dot(N,V),0.0);\n"
+        "  float fres=0.65+0.35*pow(1.0-ndv,5.0)*4.0;\n"   // wet surfaces flare at grazing angles
+        "  vec3 dif=vec3(0.0), spe=vec3(0.0), sub=vec3(0.0);\n"
         "  for (int i=0;i<5;i++){ if (i>=lN) break; vec3 dl=lPos[i]-fragPos; float d=length(dl);\n"
-        "    if (d<lR[i]){ float ndl=max(dot(N,dl/max(d,1e-4)),0.0); lit+=lCol[i]*ndl*(1.0-d/lR[i])*1.05; } }\n"
-        "  float rim=pow(1.0-max(dot(N,V),0.0),3.0);\n"
-        "  lit+=rim*0.22*vec3(0.75,0.8,0.9);\n"
-        "  vec3 c=t.rgb*colDiffuse.rgb*fragColor.rgb*clamp(lit,0.0,1.6);\n"
+        "    if (d<lR[i]){ vec3 L=dl/max(d,1e-4); float att=(1.0-d/lR[i]); float nl=dot(N,L); float ndl=max(nl,0.0);\n"
+        "      dif+=lCol[i]*ndl*att*1.05;\n"
+        "      float wrap=max((nl+0.45)/1.45,0.0);\n"   // skin: light bleeds red past the shadow edge
+        "      sub+=lCol[i]*max(wrap-ndl,0.0)*att*vec3(1.0,0.32,0.22);\n"
+        "      spe+=lCol[i]*pow(max(dot(N,normalize(L+V)),0.0),shin)*att*ndl*(shin+8.0)/40.0; } }\n"
+        "  float rim=pow(1.0-ndv,3.0);\n"
+        "  float sheen=pow(1.0-ndv,4.0)*clamp((rough-0.78)*4.5,0.0,1.0)*0.30;\n"   // fabric fuzz
+        "  vec3 lit=ambient*ao + dif*mix(1.0,ao,0.5) + sub*sss*0.9 + rim*0.22*vec3(0.75,0.8,0.9)*ao + sheen*ao;\n"
+        "  spe*=fres;\n"
+        "  vec3 c=t.rgb*colDiffuse.rgb*fragColor.rgb*clamp(lit,0.0,1.6) + spe*spi*mix(1.0,ao,0.5);\n"
         "  finalColor=vec4(c, t.a*colDiffuse.a);\n"
         "}\n";
     g_skinShader=LoadShaderFromMemory(vs,fs);
@@ -1018,6 +1040,9 @@ static int EnemySkinInit(void){
         g_skinLoc[0]=GetShaderLocation(g_skinShader,"lPos");  g_skinLoc[1]=GetShaderLocation(g_skinShader,"lCol");
         g_skinLoc[2]=GetShaderLocation(g_skinShader,"lR");    g_skinLoc[3]=GetShaderLocation(g_skinShader,"lN");
         g_skinLoc[4]=GetShaderLocation(g_skinShader,"ambient"); g_skinLoc[5]=GetShaderLocation(g_skinShader,"viewPos");
+        g_skinShader.locs[SHADER_LOC_MAP_NORMAL]=GetShaderLocation(g_skinShader,"texture2");
+        g_skinShader.locs[SHADER_LOC_MAP_OCCLUSION]=GetShaderLocation(g_skinShader,"texOrm");
+        g_skinShader.locs[SHADER_LOC_VERTEX_TANGENT]=GetShaderLocationAttrib(g_skinShader,"vertexTangent");
         if (g_skinBonesLoc>=0) g_skinReady=1;
     }
     DebugLog("gpuskin","\"ok\":%d,\"loc\":%d",g_skinReady,g_skinBonesLoc);
@@ -1027,6 +1052,43 @@ static Matrix XformMat(Transform t){
     return MatrixMultiply(MatrixMultiply(MatrixScale(t.scale.x,t.scale.y,t.scale.z), QuaternionToMatrix(t.rotation)),
                           MatrixTranslate(t.translation.x,t.translation.y,t.translation.z));
 }
+static void EnemyMeshBonesGPU(Mesh *ms){
+    rlEnableVertexArray(ms->vaoId);
+    rlLoadVertexBuffer(ms->boneIndices, ms->vertexCount*4*(int)sizeof(unsigned char), false);
+    rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES, 4, RL_UNSIGNED_BYTE, false, 0, 0);
+    rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES);
+    rlLoadVertexBuffer(ms->boneWeights, ms->vertexCount*4*(int)sizeof(float), false);
+    rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS, 4, RL_FLOAT, false, 0, 0);
+    rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS);
+    rlDisableVertexArray();
+}
+// Distance LOD: <path>_lod.glb is the same figure decimated (mesh + skin only). It borrows
+// the full model's materials and bone palette, so it is posed by the same RigPose call.
+// The builder keeps one mesh per material in the same order; anything else -> no LOD.
+static void EnemyLodLoad(EnemyRig *rg, const char *path){
+    if (!rg->gpu) return;
+    char lp[200]; snprintf(lp,sizeof lp,"%s",path);
+    char *dot=strstr(lp,".glb"); if (!dot) return; snprintf(dot,sizeof lp-(dot-lp),"_lod.glb");
+    if (!FileExists(lp)) return;
+    Model L=LoadModel(lp);
+    Model *M=&rg->model;
+    if (L.meshCount!=M->meshCount || L.skeleton.boneCount!=M->skeleton.boneCount){
+        DebugLog("enemy","\"lod\":\"%s\",\"rejected\":\"meshes %d vs %d, bones %d vs %d\"",lp,L.meshCount,M->meshCount,L.skeleton.boneCount,M->skeleton.boneCount);
+        UnloadModel(L); return;
+    }
+    for (int i=0;i<L.meshCount;i++){ Mesh *ms=&L.meshes[i];
+        if (!ms->boneIndices || !ms->boneWeights){ UnloadModel(L); return; }
+        if (!ms->tangents && ms->texcoords && ms->normals) GenMeshTangents(ms);
+        EnemyMeshBonesGPU(ms);
+        L.meshMaterial[i]=M->meshMaterial[i];
+    }
+    for (int i=0;i<L.materialCount;i++) UnloadMaterial(L.materials[i]);
+    RL_FREE(L.materials); L.materials=M->materials; L.materialCount=M->materialCount;   // shared (never unloaded twice)
+    RL_FREE(L.boneMatrices); L.boneMatrices=M->boneMatrices;                            // shared pose
+    int lv=0, fv=0; for (int i=0;i<L.meshCount;i++){ lv+=L.meshes[i].vertexCount; fv+=M->meshes[i].vertexCount; }
+    rg->lod=L; rg->hasLod=1;
+    DebugLog("enemy","\"lod\":\"%s\",\"verts\":%d,\"full\":%d",lp,lv,fv);
+}
 // Hand the rig's meshes their bone attributes (locations 7/8) and swap its materials to
 // the skinning shader. The position VBO keeps the bind pose raylib uploaded at load.
 static void EnemyRigGPU(EnemyRig *rg){
@@ -1035,20 +1097,25 @@ static void EnemyRigGPU(EnemyRig *rg){
     for (int i=0;i<m->meshCount;i++){ Mesh *ms=&m->meshes[i];
         if (!ms->boneIndices || !ms->boneWeights || ms->vertexCount<=0 || !ms->vaoId) return;   // all-or-nothing
     }
+    for (int i=0;i<m->meshCount;i++) EnemyMeshBonesGPU(&m->meshes[i]);
+    // neutral detail maps for materials that ship none (older models / plain props):
+    // flat normal, full light, matte, no highlight -> they render exactly as before
+    static Texture2D flatN={0}, defOrm={0};
+    if (!flatN.id){
+        Image a=GenImageColor(1,1,(Color){128,128,255,255}); flatN=LoadTextureFromImage(a); UnloadImage(a);
+        Image b=GenImageColor(1,1,(Color){255,204,0,255});   defOrm=LoadTextureFromImage(b); UnloadImage(b);
+    }
     for (int i=0;i<m->meshCount;i++){ Mesh *ms=&m->meshes[i];
-        rlEnableVertexArray(ms->vaoId);
-        rlLoadVertexBuffer(ms->boneIndices, ms->vertexCount*4*(int)sizeof(unsigned char), false);
-        rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES, 4, RL_UNSIGNED_BYTE, false, 0, 0);
-        rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES);
-        rlLoadVertexBuffer(ms->boneWeights, ms->vertexCount*4*(int)sizeof(float), false);
-        rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS, 4, RL_FLOAT, false, 0, 0);
-        rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS);
-        rlDisableVertexArray();
+        if (!ms->tangents && ms->texcoords && ms->normals) GenMeshTangents(ms);   // the glTF exporter leaves them out
     }
     for (int i=0;i<m->materialCount;i++){
         m->materials[i].shader=g_skinShader;
-        Texture2D *t=&m->materials[i].maps[MATERIAL_MAP_DIFFUSE].texture;   // raylib loads POINT-filtered: jaggy up close
-        if (t->id>0 && t->id!=rlGetTextureIdDefault() && t->mipmaps<=1){ GenTextureMipmaps(t); SetTextureFilter(*t, TEXTURE_FILTER_TRILINEAR); }
+        MaterialMap *mm=m->materials[i].maps;
+        if (mm[MATERIAL_MAP_NORMAL].texture.id==0)    mm[MATERIAL_MAP_NORMAL].texture=flatN;
+        if (mm[MATERIAL_MAP_OCCLUSION].texture.id==0) mm[MATERIAL_MAP_OCCLUSION].texture=defOrm;
+        int ids[3]={MATERIAL_MAP_DIFFUSE,MATERIAL_MAP_NORMAL,MATERIAL_MAP_OCCLUSION};
+        for (int k=0;k<3;k++){ Texture2D *t=&mm[ids[k]].texture;   // raylib loads POINT-filtered: jaggy up close
+            if (t->id>0 && t->width>1 && t->id!=rlGetTextureIdDefault() && t->mipmaps<=1){ GenTextureMipmaps(t); SetTextureFilter(*t, TEXTURE_FILTER_TRILINEAR); } }
     }
     rg->invBind=(Matrix*)MemAlloc(sizeof(Matrix)*nb); rg->bones=NULL;   // the pose lives in model.boneMatrices
     for (int b=0;b<nb;b++) rg->invBind[b]=MatrixInvert(XformMat(m->skeleton.bindPose[b]));   // once, not per frame
@@ -1168,6 +1235,7 @@ static int LoadEnemyRig(EnemyRig *rg, const char *path){
 #endif
     rg->ok=(rg->model.meshCount>0);
     if (rg->ok && rg->animN>0) EnemyRigGPU(rg);
+    if (rg->ok) EnemyLodLoad(rg, fp);
     BoundingBox eb=GetModelBoundingBox(rg->model);
     DebugLog("enemy","\"file\":\"%s\",\"gpu\":%d,\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"clips\":[%d,%d,%d,%d,%d,%d],\"settleFrame\":%d,\"size\":[%.2f,%.2f,%.2f]",
              fp, rg->gpu, rg->model.meshCount, rg->model.skeleton.boneCount, rg->animN,
@@ -1865,12 +1933,43 @@ static void EnemyHitscan(Enemy *e, float d){
     EnemySfx(g_eShotSnd,g_hasEShot,d);
     DebugLog("eshot","\"type\":\"%s\",\"d\":%.1f,\"hit\":%d", kEnemy[e->type].name, d, hit);
 }
+// the mutant's throw (CMU 124_01, a pitch) is baked at 60 fps; the hand lets go 86% in
+#define BOLT_THROW_FPS    60.0f
+#define BOLT_RELEASE_FRAC 0.857f
+static float BoltReleaseSec(Enemy *e){
+    ModelAnimation *a=RigClip(e->type,CL_ATTACK); return ANIM_FRAMES(*a)*BOLT_RELEASE_FRAC/BOLT_THROW_FPS;
+}
+// Where a bone of a posed enemy is in the world: the clip's model-space bone transform at
+// `frame`, through the same scale/yaw/position DrawModelEx uses for this enemy.
+static int RigBoneIndex(const EnemyRig *rg, const char *name){
+    for (int i=0;i<rg->model.skeleton.boneCount;i++) if (!strcmp(rg->model.skeleton.bones[i].name,name)) return i;
+    return -1;
+}
+static Vector3 RigBoneWorld(int type, int clip, float frame, const char *bone, Vector3 at, float yawDeg){
+    EnemyRig *rg=RigOf(type); int b=RigBoneIndex(rg,bone);
+    ModelAnimation *an=RigClip(type,clip);
+    if (b<0 || !an || an->keyframeCount<=0) return at;
+    Transform t=RigSample(an,frame,b);
+    float esc=ENEMY_SCALE*kEnemy[type].scale;
+    Vector3 v=Vector3RotateByAxisAngle(Vector3Scale(t.translation,esc),(Vector3){0,1,0},yawDeg*DEG2RAD);
+    return Vector3Add(at,v);
+}
+// The bolt leaves the THROWING HAND at the release frame (a fixed point in front of the face
+// read as the fireball appearing behind his head on the side-on pitch). Falls back to the
+// usual origin if a wall stands between his eyes and his hand.
+static Vector3 EnemyBoltOrigin(const Enemy *e){
+    float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
+    Vector3 h=RigBoneWorld(e->type, e->clip, e->animT, "RightFingerBase", (Vector3){e->pos.x,e->drawY,e->pos.z}, yaw);
+    if (g_hasMap && g_mapCol.ready){ Vector3 eye=EnemyEye(e), d=Vector3Subtract(h,eye); float L=Vector3Length(d);
+        if (L>1e-3f){ float w=MapRayNearest(eye,Vector3Scale(d,1.0f/L),L); if (w>0.0f && w<L) return EnemyShotOrigin(e); } }
+    return h;
+}
 static void EnemyBolt(Enemy *e, float d){
     if (!EnemyClearShot(e)){ e->los=0; e->losT=0.25f; return; }
-    Vector3 m=EnemyShotOrigin(e), tgt=Vector3Add(g_cam.position,(Vector3){0,-0.3f,0});
+    Vector3 m=EnemyBoltOrigin(e), tgt=Vector3Add(g_cam.position,(Vector3){0,-0.3f,0});
     Vector3 v=Vector3Scale(Vector3Normalize(Vector3Subtract(tgt,m)),13.0f);
     for (int i=0;i<MAX_BOLTS;i++) if (!g_bolts[i].active){ g_bolts[i]=(Bolt){m,v,3.0f,kEnemy[e->type].shotDmg,1}; break; }
-    DebugLog("ebolt","\"d\":%.1f",d);
+    DebugLog("ebolt","\"d\":%.1f,\"from\":[%.2f,%.2f,%.2f],\"enemy\":[%.2f,%.2f,%.2f]",d,m.x,m.y,m.z,e->pos.x,e->drawY,e->pos.z);
     EnemySfx(g_eBoltSnd,g_hasEBolt,d);
 }
 static void BoltsReset(void){ memset(g_bolts,0,sizeof g_bolts); memset(g_beams,0,sizeof g_beams); }
@@ -1987,7 +2086,7 @@ static void UpdateEnemies(float dt){
             if (engage && e->hitT<=0 && (kind==AK_HITSCAN || kind==AK_BOLT) && d>ENEMY_ATTACK_RANGE){
                 if (e->burstLeft>0){ if (e->fireT<=0){ EnemyHitscan(e,d); e->burstLeft--; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; } }
                 else if (e->fireT<=0){
-                    if (kind==AK_BOLT){ EnemyBolt(e,d); e->fireT=kEnemy[e->type].rate; }
+                    if (kind==AK_BOLT){ /* released by the throw clip at BOLT_RELEASE_FRAC (anim advance) */ }
                     else { EnemyHitscan(e,d); e->burstLeft=kEnemy[e->type].burst-1; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; }
                 }
             }
@@ -1998,6 +2097,9 @@ static void UpdateEnemies(float dt){
             if (e->swing && !casting) engage=1;
             // clip priority: flinch > attack (engaged) > idle-when-stuck > run (chasing)
             int want = (e->hitT>0) ? g_eHit : (casting ? CL_CAST : (engage ? g_eAttack : (stuck ? g_eIdle : g_eRun)));
+            // bolt throwers only wind up when the throw will be ready by the release frame;
+            // until then they stand (idle) rather than mime a throw with nothing in it
+            if (want==g_eAttack && kind==AK_BOLT && d>ENEMY_ATTACK_RANGE && e->clip!=g_eAttack && e->fireT>BoltReleaseSec(e)) want=g_eIdle;
             if (want!=e->clip){
                 if (want==g_eAttack && e->roarT<=0 && g_audio && g_hasAttackSnd){   // lunging into an attack -> roar
                     PlaySound(g_attackSnd); e->roarT=2.5f;                          // cooldown so it doesn't spam at the range edge
@@ -2005,7 +2107,7 @@ static void UpdateEnemies(float dt){
                 e->prevClip=e->clip; e->prevT=e->animT; e->blendT=ENEMY_BLEND;   // crossfade, never snap
                 DebugLog("clipsw","\"i\":%d,\"from\":%d,\"to\":%d,\"atT\":%.1f,\"d\":%.2f",i,e->clip,want,e->animT,d);
                 e->clip=want; e->animT=0;
-                e->swing = (want==g_eAttack && (kind==AK_MELEE || kind==AK_RAISE || d<=ENEMY_ATTACK_RANGE));
+                e->swing = (want==g_eAttack && (kind==AK_MELEE || kind==AK_RAISE || kind==AK_BOLT || d<=ENEMY_ATTACK_RANGE));
             }
             if (e->blendT>0) e->blendT-=dt;
             if (e->hitT<=0 && !engage && !stuck){            // chase: follow the nav flow field, else beeline
@@ -2072,7 +2174,8 @@ static void UpdateEnemies(float dt){
             } else if (e->atkCd>0) e->atkCd-=dt;
             if (RigOf(e->type)->animN>0){                      // advance current clip (looping)
                 int nf=ANIM_FRAMES(*RigClip(e->type,e->clip));
-                float spd=(e->clip==g_eAttack && (kEnemy[e->type].kind==AK_MELEE || kEnemy[e->type].kind==AK_RAISE))?90.0f:30.0f;    // melee swings play fast; aims/casts at pace
+                int k2=kEnemy[e->type].kind;
+                float spd=(e->clip==g_eAttack && (k2==AK_MELEE || k2==AK_RAISE))?90.0f:((e->clip==g_eAttack && k2==AK_BOLT)?BOLT_THROW_FPS:30.0f);    // melee swings play fast; throws in real time; aims/casts at pace
                 float prevT=e->animT;
                 e->animT+=dt*spd;
                 // Timed melee (default): the swing damages ONCE, when the attack clip
@@ -2080,10 +2183,20 @@ static void UpdateEnemies(float dt){
                 // range before it lands) and a real cooldown separates hits, instead
                 // of the old unreadable touch-drain.
                 if (!g_meleeDrain && e->clip==g_eAttack && nf>0 && e->atkCd<=0 && e->hitT<=0){
-                    float strike=nf*ATK_STRIKE_FRAC;
-                    if (prevT<strike && e->animT>=strike && d<=ENEMY_REACH(e->type)*1.15f && !g_godMode && (kEnemy[e->type].kind==AK_MELEE || d<=ENEMY_ATTACK_RANGE)){
-                        g_playerHp-=kEnemy[e->type].meleeDmg; e->atkCd=ATK_COOLDOWN;   // per-type swing damage
+                    // dual wielders (cook, butcher, head chef) land each blade separately
+                    int dual=EnemyDualWield(e->type), ns=dual?2:1;
+                    const float fr[2]={ dual?DUAL_STRIKE_A:ATK_STRIKE_FRAC, DUAL_STRIKE_B };
+                    for (int k=0;k<ns && e->atkCd<=0;k++){ float strike=nf*fr[k];
+                        if (prevT<strike && e->animT>=strike && d<=ENEMY_REACH(e->type)*1.15f && !g_godMode && (kEnemy[e->type].kind==AK_MELEE || d<=ENEMY_ATTACK_RANGE)){
+                            g_playerHp-=kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f);   // per-type swing damage
+                            DebugLog("melee","\"type\":\"%s\",\"blade\":%d,\"dmg\":%.1f,\"hp\":%.0f",kEnemy[e->type].name,k,kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f),g_playerHp);
+                            e->atkCd = dual ? 0.25f : ATK_COOLDOWN;
+                        }
                     }
+                }
+                if (k2==AK_BOLT && e->clip==g_eAttack && e->hitT<=0 && d>ENEMY_ATTACK_RANGE){   // the bolt leaves the hand at release
+                    float rel=nf*BOLT_RELEASE_FRAC;
+                    if (prevT<rel && e->animT>=rel && e->fireT<=0){ EnemyBolt(e,d); e->fireT=kEnemy[e->type].rate; }
                 }
                 if (nf>0 && e->animT>=nf){ e->animT-=nf; e->swing=0; }   // swing finished -> free to chase again
             }
@@ -2908,6 +3021,17 @@ static void DrawBurnMarks(Vector3 base, float vscale, const float *by, const flo
     }
 }
 
+// Distance LOD: past ENEMY_LOD_DIST from the camera an enemy draws its decimated mesh
+// (same materials, same pose). --no-lod / CHERNOBYL_NO_LOD turn it off (A/B, screenshots).
+#define ENEMY_LOD_DIST 12.0f
+static int g_noLod = 0;
+static Model *EnemyLodModel(EnemyRig *rg, Vector3 at){
+    if (!rg->hasLod || g_noLod) return &rg->model;
+    float dx=at.x-g_cam.position.x, dz=at.z-g_cam.position.z;
+    static float d2=-1.0f;
+    if (d2<0.0f){ const char *e=getenv("CHERNOBYL_LOD_DIST"); float d=e?(float)atof(e):ENEMY_LOD_DIST; d2=d*d; }   // dev: tune/test
+    return (dx*dx+dz*dz > d2) ? &rg->lod : &rg->model;
+}
 // Draw all alive/dying enemies. The shared model is posed to each enemy's own
 // animation cursor right before drawing, so they animate independently.
 static void DrawEnemies(void){
@@ -2952,7 +3076,7 @@ static void DrawEnemies(void){
         if (rg->gpu) EnemyLightUpload(e->pos);
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
         float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type size: the head chef looms
-        DrawModelEx(rg->model, dpos, (Vector3){0,1,0}, yaw,   // no sink: dying body falls onto the floor, not through
+        DrawModelEx(*EnemyLodModel(rg,dpos), dpos, (Vector3){0,1,0}, yaw,   // no sink: dying body falls onto the floor, not through
                     (Vector3){esc,esc,esc}, kEnemy[e->type].tint);
         if (e->burnN>0) DrawBurnMarks(dpos, 1.0f, e->burnY, e->burnR, e->burnN);   // localised char where the flame touched
         if (e->state==1 && e->hp<e->maxHp && !e->boss){       // HP bar above damaged enemies (bosses get the HUD bar)
@@ -2967,7 +3091,7 @@ static void DrawEnemies(void){
         for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active && RigOf(g_corpses[c].type)==rg){
             float csc=ENEMY_SCALE*kEnemy[g_corpses[c].type].scale;
             if (rg->gpu) EnemyLightUpload(g_corpses[c].pos);
-            DrawModelEx(rg->model, g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
+            DrawModelEx(*EnemyLodModel(rg,g_corpses[c].pos), g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
                         (Vector3){csc,csc,csc}, kEnemy[g_corpses[c].type].tint);
             if (g_corpses[c].burnN>0){   // prone body: compress the mark heights so soot sits on it, not floating above
                 Vector3 b={g_corpses[c].pos.x, g_corpses[c].pos.y+0.05f, g_corpses[c].pos.z};
@@ -3859,6 +3983,7 @@ static void EndCurrentMap(void){
 #endif
 
 #include "intro.h"                      // title intro (archival montage + Hell March)
+#include "viewer.h"                     // --viewer: side-by-side enemy model comparison
 
 int main(int argc, char **argv) {
     int vmWeapon=-1; float vmOv[7]={0}; int vmHas=0;          // dev: --weapon / --vm framing overrides
@@ -3881,6 +4006,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
         else if (!strcmp(argv[i],"--kite")) g_kite=1;
         else if (!strcmp(argv[i],"--no-intro")) g_noIntro=1;                // skip the title intro
+        else if (!strcmp(argv[i],"--no-lod")) g_noLod=1;                    // always draw full-detail enemies
+        else if (!strcmp(argv[i],"--viewer") && i+1<argc) g_viewA=argv[++i];        // model viewer (see viewer.h)
+        else if (!strcmp(argv[i],"--viewer-b") && i+1<argc) g_viewB=argv[++i];
+        else if (!strcmp(argv[i],"--viewer-shots") && i+1<argc) g_viewShots=argv[++i];
         else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
         else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
         else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
@@ -3951,8 +4080,10 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (g_viewA){ int r=!strcmp(g_viewA,"all")?RunGallery():RunViewer(); CloseWindow(); return r; }   // --viewer: no game, no audio
     InitAudioDevice();                 // weapon fire sounds; harmless if it fails
     if (g_mute || getenv("CHERNOBYL_MUTE")) SetMasterVolume(0.0f);   // silent test runs
+    if (getenv("CHERNOBYL_NO_LOD")) g_noLod=1;
     g_audio = IsAudioDeviceReady();
     DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
 
