@@ -151,6 +151,11 @@ static int RunGallery(void){
           while (f && poseN<16){ poseF[poseN++]=(float)atof(f+1); f=strchr(f+1,','); } }
         paused=1; } }
     if (getenv("CHERNOBYL_GALLERY_TURN")) turn=(float)atof(getenv("CHERNOBYL_GALLERY_TURN"));   // dev: camera angle
+    // CHERNOBYL_GALLERY_START="name[:clip]" (dev-enemies.sh gunner 4): open on that enemy / clip, playing
+    { const char *ss=getenv("CHERNOBYL_GALLERY_START");
+      if (ss && *ss){ char nm[32]={0}; const char *c=strchr(ss,':'); size_t n=c?(size_t)(c-ss):strlen(ss);
+        if (n<sizeof nm){ memcpy(nm,ss,n); for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) type=t; }
+        if (c){ int k=atoi(c+1); if (k>=1 && k<=GS_N) st=k-1; } } }
     EnableCursor();
     while (!WindowShouldClose()){
         float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
