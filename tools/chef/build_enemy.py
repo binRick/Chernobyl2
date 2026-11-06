@@ -112,7 +112,7 @@ SPECS.update({
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.30, 0.32, 0.26), 6, 4, 14)},
         props="gunner", aim_gun="line", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, attack=AIM_RIFLE),
-        aim_hand_drop=0.14, aim_hand_out=0.10, aim_hand_fwd=0.06),   # the big receiver clears the helmet, the stock the belt   # shouldered, like the rifleman (the heavy-aim mocap held the gun at his sternum)
+        aim_hand_drop=0.14, aim_hand_out=0.10, aim_hand_fwd=0.08),   # the big receiver clears the helmet, the stock the belt and his forearm   # shouldered, like the rifleman (the heavy-aim mocap held the gun at his sternum)
     "mutant": dict(   # glowing mutant: irradiated skin, throws radiation bolts
         phenotype=dict(gender=1.0, age=0.5, muscle=0.75, weight=0.3, proportions=0.4, height=0.58),
         targets={"stomach-pregnant-decr": 0.5, "torso-muscle-dorsi-incr": 0.5},
