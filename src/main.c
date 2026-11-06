@@ -1771,6 +1771,12 @@ static void UpdateGrenades(float dt){
             if (L>1e-4f){ Vector3 d=Vector3Scale(seg,1.0f/L); float wd=MapRayNearest(prev,d,L+0.15f);
                 if (wd>0.0f && wd<=L+0.1f){ hp=Vector3Add(prev,Vector3Scale(d,wd)); hit=1; } }
         } else if (g->pos.y<=0.12f){ hp=(Vector3){g->pos.x,0.12f,g->pos.z}; hit=1; }   // arena floor
+        if (L>1e-4f){                                       // a body in the way, before the wall/floor: burst on it
+            Vector3 d=Vector3Scale(seg,1.0f/L); float ed; Vector3 ep; int head=0;
+            float reach = hit ? Vector3Distance(prev,hp) : L;
+            int ei=HitEnemy(prev,d,reach,&ed,&ep,&head);
+            if (ei>=0){ hp=ep; hit=1; DebugLog("grenade","\"direct\":%d", ei); }
+        }
         if (!hit && g->life<=0.0f){ hit=1; hp=g->pos; }     // fuse ran out -> air burst
         if (hit){ GrenadeExplode(hp); g->active=0; }
     }
