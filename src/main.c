@@ -191,12 +191,13 @@ static float   g_vmRoll  = VM_ROLL0;
 // Shared viewmodel placement per weapon class. Every gun is measured at load into a
 // canonical frame (ComputeVmFrame), then drawn at its class's slot: the gun's centre
 // at `pos` (view space, camera at origin looking -Z), scaled to `len` view units,
-// barrel converging on the crosshair `conv` units ahead. One table -> every weapon
+// barrel converging on the crosshair `conv` units ahead (far: barrels point straight forward,
+// parallel to the view -- a near point tipped them up and to the left). One table -> every weapon
 // sits in the same place at the same size; per-weapon trims (N mode) ride on top.
 enum { VM_RIFLE=0, VM_HEAVY=1, VM_NCLASS };
 static struct { float len; Vector3 pos; float conv; } kVmClass[VM_NCLASS]={   // VMCLASS0..1="len x y z conv" env overrides (dev)
-    { 0.70f, { 0.200f, -0.160f, -0.50f }, 0.9f },   // rifles, SMGs, shotguns, launcher
-    { 0.80f, { 0.200f, -0.220f, -0.75f }, 6.0f },   // minigun / LMG / flamethrower: held out at the hip, barrel near-level, whole gun in view
+    { 0.70f, { 0.200f, -0.160f, -0.50f }, 60.0f },  // rifles, SMGs, shotguns, launcher
+    { 0.80f, { 0.200f, -0.220f, -0.75f }, 60.0f },  // minigun / LMG / flamethrower: held out at the hip, barrel near-level, whole gun in view
 };
 typedef struct {
     Model           model;
@@ -251,6 +252,8 @@ typedef struct {
     float           spread;                      // aim cone half-angle per pellet, degrees
     float           recoilKick;                  // camera pitch kick per shot, degrees
     int             shellReload;                 // 1: reload clip inserts ONE shell -> loop it until full (benelli)
+    float           shellFirst, shellCycle; int shellCount;   // >0: ONE reload clip inserting shellCount shells,
+                                                 // the first at frame shellFirst then every shellCycle (remington)
     int             magSize;                     // rounds per mag / fuel units per tank (0 = no ammo: knife)
     int             reserveStart;                // reserve a fresh run starts with
     int             mag, reserve;                // live counts
@@ -741,6 +744,134 @@ typedef struct { Vector3 pos, vel; float life, life0, size, rest; Color col; int
 static Tracer g_tracers[MAX_TRACERS];
 static Spark  g_sparks[MAX_SPARKS];
 
+// Next free particle, searched from a moving cursor (a full array costs one pass, not one per particle).
+static int g_sparkCur=0;
+static Spark *SparkAlloc(void){
+    for (int n=0;n<MAX_SPARKS;n++){
+        int s=g_sparkCur; g_sparkCur=(g_sparkCur+1)%MAX_SPARKS;
+        if (g_sparks[s].life<=0) return &g_sparks[s];
+    }
+    return NULL;
+}
+
+// ---- Settled blood -----------------------------------------------------------
+// Blood that has landed never moves again, so it is baked once into a GPU mesh and drawn with a
+// single call. It used to be re-sent every frame as thousands of small cylinders, which cost more
+// than the rest of the frame once a fight got going, and it filled the particle array for good.
+// Two rings share the mesh: fine spatter gobs and the larger pools. A full ring overwrites its
+// oldest stain, so the floor keeps taking new blood for the whole run.
+#define DISC_MAXSIDES 12
+static float g_discCos[DISC_MAXSIDES+1][DISC_MAXSIDES+1], g_discSin[DISC_MAXSIDES+1][DISC_MAXSIDES+1];
+static void DiscTable(void){
+    static int built=0; if (built) return; built=1;
+    for (int n=3;n<=DISC_MAXSIDES;n++) for (int i=0;i<=n;i++){
+        float a=(float)i*6.2831853f/(float)n; g_discCos[n][i]=cosf(a); g_discSin[n][i]=sinf(a); }
+}
+#define STAIN_GOBS    4096
+#define STAIN_GOB_V   48                                  // 2 discs x 8 triangles
+#define STAIN_POOLS   256
+#define STAIN_POOL_N  26
+#define STAIN_POOL_V  (STAIN_POOL_N*10*3)                 // 26 discs x 10 triangles
+#define STAIN_POOL0   (STAIN_GOBS*STAIN_GOB_V)
+#define STAIN_VERTS   (STAIN_POOL0 + STAIN_POOLS*STAIN_POOL_V)
+static Mesh     g_stainMesh;
+static Material g_stainMat;
+static int g_stainReady=0, g_stainTried=0, g_stainColBuf=-1, g_stainAny=0;
+static int g_stainGobNext=0, g_stainPoolNext=0;
+static int g_stainLo[2]={STAIN_VERTS,STAIN_VERTS}, g_stainHi[2]={0,0};   // vertex ranges waiting for upload (gobs, pools)
+
+static int StainInit(void){
+    if (g_stainReady) return 1;
+    if (g_stainTried || !IsWindowReady()) return 0;
+    g_stainTried=1; DiscTable();
+    g_stainMesh=(Mesh){0};
+    g_stainMesh.vertexCount=STAIN_VERTS; g_stainMesh.triangleCount=STAIN_VERTS/3;
+    g_stainMesh.vertices=(float*)MemAlloc(STAIN_VERTS*3*sizeof(float));          // zeroed: unused slots are empty triangles
+    g_stainMesh.colors=(unsigned char*)MemAlloc(STAIN_VERTS*4);
+    UploadMesh(&g_stainMesh, true);
+    for (int i=1;i<7;i++) if (g_stainMesh.vboId && g_stainMesh.vboId[i]!=0){ g_stainColBuf=i; break; }   // the colour buffer's slot
+    g_stainMat=LoadMaterialDefault();
+    g_stainReady=(g_stainMesh.vboId && g_stainMesh.vboId[0]!=0 && g_stainColBuf>0);
+    return g_stainReady;
+}
+// One face-up disc into the mesh at vertex *vi (centre, later rim point, earlier rim point = facing up).
+static void StainDisc(int *vi, float x, float y, float z, float r, int sides, Color c){
+    float *v=g_stainMesh.vertices+(*vi)*3; unsigned char *k=g_stainMesh.colors+(*vi)*4;
+    for (int i=0;i<sides;i++){
+        v[0]=x; v[1]=y; v[2]=z;
+        v[3]=x+g_discCos[sides][i+1]*r; v[4]=y; v[5]=z+g_discSin[sides][i+1]*r;
+        v[6]=x+g_discCos[sides][i]*r;   v[7]=y; v[8]=z+g_discSin[sides][i]*r;
+        for (int q=0;q<3;q++){ k[q*4]=c.r; k[q*4+1]=c.g; k[q*4+2]=c.b; k[q*4+3]=c.a; }
+        v+=9; k+=12;
+    }
+    *vi+=sides*3;
+}
+static void StainMark(int ring, int lo, int hi){
+    if (lo<g_stainLo[ring]) g_stainLo[ring]=lo;
+    if (hi>g_stainHi[ring]) g_stainHi[ring]=hi;
+    g_stainAny=1;
+}
+// A settled gob: a small lumpy spatter dot, two offset discs trailing ahead of the impact.
+static void StainAddGob(const Spark *sp){
+    if (!StainInit()) return;
+    int slot=g_stainGobNext; g_stainGobNext=(slot+1)%STAIN_GOBS;
+    int vi=slot*STAIN_GOB_V, v0=vi;
+    float ax=sp->ix, az=sp->iz; if (ax==0.0f && az==0.0f){ ax=1.0f; az=0.0f; }
+    float y=sp->rest+0.016f+(float)(slot&7)*0.001f;       // a thin film on the floor; stepped so overlapping dots never fight for depth
+    unsigned int s=sp->seed?sp->seed:1u;
+    Color col={ (unsigned char)(sp->col.r*0.62f), (unsigned char)(sp->col.g*0.5f), (unsigned char)(sp->col.b*0.5f), sp->col.a };   // landed blood is darker than the spray: unlit bright red glowed on a dim floor
+    for (int b=0;b<2;b++){                                // offset discs break the circular outline
+        unsigned int h=s*2654435761u + (unsigned int)b*2246822519u;
+        float t1=(float)((h>>3)&255)/255.0f, t2=(float)((h>>11)&255)/255.0f, t3=(float)((h>>19)&255)/255.0f;
+        float along=(t1*1.4f-0.2f)*sp->size;              // mostly forward of impact (the spatter trails ahead)
+        float side =(t2-0.5f)*1.2f*sp->size;              // lateral scatter
+        float ox=ax*along - az*side, oz=az*along + ax*side;
+        float r=sp->size*(0.30f+0.30f*t3);                // small, varied
+        StainDisc(&vi, sp->pos.x+ox, y, sp->pos.z+oz, r, 8, col);
+    }
+    StainMark(0, v0, vi);
+}
+// A pool: many small overlapping discs filling a ragged circle, which reads as one wet stain.
+static void StainAddPool(float x, float floorY, float z, float R, unsigned int seed, Color col){
+    if (!StainInit()) return;
+    int slot=g_stainPoolNext; g_stainPoolNext=(slot+1)%STAIN_POOLS;
+    int vi=STAIN_POOL0+slot*STAIN_POOL_V, v0=vi;
+    float y=floorY+0.007f+(float)(slot&7)*0.001f;         // under the spatter dots, stepped like them
+    unsigned int s=seed?seed:1u;
+    for (int b=0;b<STAIN_POOL_N;b++){
+        unsigned int h=s*2654435761u + (unsigned int)b*2654435789u; h^=h>>13; h*=0x9E3779B1u;
+        float t1=(float)((h>>3)&1023)/1023.0f, t2=(float)((h>>13)&1023)/1023.0f, t3=(float)((h>>23)&255)/255.0f;
+        float a=t1*6.2831853f, rr=sqrtf(t2)*R;            // sqrt -> evenly fill the disc area
+        float dr=R*(0.34f+0.16f*t3)*(1.0f-0.45f*(rr/R));  // solid centre, smaller discs toward the ragged edge
+        StainDisc(&vi, x+cosf(a)*rr, y, z+sinf(a)*rr, dr, 10, col);
+    }
+    StainMark(1, v0, vi);
+}
+// Send whatever was added since the last call to the GPU: at most one range per ring.
+static void StainFlush(void){
+    if (!g_stainReady) return;
+    for (int r=0;r<2;r++) if (g_stainHi[r]>g_stainLo[r]){
+        int lo=g_stainLo[r], n=g_stainHi[r]-lo;
+        UpdateMeshBuffer(g_stainMesh, 0, g_stainMesh.vertices+lo*3, n*3*(int)sizeof(float), lo*3*(int)sizeof(float));
+        UpdateMeshBuffer(g_stainMesh, g_stainColBuf, g_stainMesh.colors+lo*4, n*4, lo*4);
+        g_stainLo[r]=STAIN_VERTS; g_stainHi[r]=0;
+    }
+}
+static void StainDraw(void){
+    if (!g_stainReady || !g_stainAny) return;
+    StainFlush();
+    DrawMesh(g_stainMesh, g_stainMat, MatrixIdentity());
+}
+// New map: the old floor's blood goes with it.
+static void StainReset(void){
+    memset(g_sparks,0,sizeof g_sparks);
+    if (!g_stainReady) return;
+    memset(g_stainMesh.vertices,0,STAIN_VERTS*3*sizeof(float));
+    g_stainGobNext=0; g_stainPoolNext=0;
+    g_stainLo[0]=0; g_stainHi[0]=STAIN_POOL0; g_stainLo[1]=STAIN_POOL0; g_stainHi[1]=STAIN_VERTS;
+    StainFlush(); g_stainAny=0;
+}
+
 // Scorch decals: persistent soot marks the flamethrower burns onto whatever it hits.
 // Each is a cluster of flat dark discs lying on the surface (oriented to its normal).
 typedef struct { Vector3 pos, n; float r; unsigned int seed; int active; } Scorch;
@@ -795,6 +926,22 @@ static void SpawnFlame(Vector3 o, Vector3 fwd){
         g_smoke[s]=p; return;
     }
 }
+// Enemy gunfire: a two-frame burst of flame at the barrel and a wisp of smoke, so a shot
+// has a visible source and not just a tracer appearing from his chest.
+static void SpawnMuzzleFlash(Vector3 o, Vector3 dir){
+    int made=0;
+    for (int s=0;s<MAX_SMOKE && made<2;s++){
+        if (g_smoke[s].life>0) continue;
+        Smoke p={0};
+        p.pos=Vector3Add(o, Vector3Scale(dir, 0.10f+0.14f*made));
+        p.vel=Vector3Scale(dir, 2.5f);
+        p.life0=0.055f+GetRandomValue(0,25)/1000.0f; p.life=p.life0;
+        p.sz0=(made?0.16f:0.30f)+GetRandomValue(0,8)/100.0f; p.sz1=p.sz0*1.35f;
+        p.hot=1; p.flame=1;
+        g_smoke[s]=p; made++;
+    }
+    SpawnSmoke(Vector3Add(o, Vector3Scale(dir,0.15f)), 1);
+}
 // Unignited fuel: the flamethrower's warm-up spit -- a pale liquid jet that arcs DOWN
 // under gravity (heavy, not buoyant) and does no damage. Same nozzle/aim as the flame.
 static void SpawnLiquid(Vector3 o, Vector3 fwd){
@@ -825,6 +972,36 @@ static void UpdateSmoke(float dt){
         }
         p->pos = Vector3Add(p->pos, Vector3Scale(p->vel,dt));
     }
+}
+// Contact shadows: a soft dark disc on the floor under every standing enemy. Without one a
+// figure floats -- nothing ties the feet to the ground. Queued while the enemies draw, then
+// blended in one batch (depth-tested, no depth write) so walls and bodies still cover them.
+#define MAX_BLOBS 96
+static Vector3 g_blobPos[MAX_BLOBS]; static float g_blobR[MAX_BLOBS], g_blobA[MAX_BLOBS]; static int g_blobN=0;
+static Texture2D g_blobTex={0};
+static void GroundBlob(Vector3 at, float r, float a){
+    if (g_blobN<MAX_BLOBS){ g_blobPos[g_blobN]=at; g_blobR[g_blobN]=r; g_blobA[g_blobN]=a; g_blobN++; }
+}
+static void DrawGroundBlobs(void){
+    if (g_blobN<=0) return;
+    if (!g_blobTex.id){
+        Image im=GenImageGradientRadial(64,64,0.0f,(Color){0,0,0,255},(Color){0,0,0,0});
+        g_blobTex=LoadTextureFromImage(im); UnloadImage(im); SetTextureFilter(g_blobTex,TEXTURE_FILTER_BILINEAR);
+    }
+    rlDrawRenderBatchActive(); rlDisableDepthMask();
+    rlSetTexture(g_blobTex.id);
+    rlBegin(RL_QUADS);
+    for (int i=0;i<g_blobN;i++){
+        float x=g_blobPos[i].x, y=g_blobPos[i].y+0.025f, z=g_blobPos[i].z, r=g_blobR[i];
+        rlColor4ub(255,255,255,(unsigned char)(Clamp(g_blobA[i],0.0f,1.0f)*255.0f)); rlNormal3f(0,1,0);
+        rlTexCoord2f(0,0); rlVertex3f(x-r,y,z-r);
+        rlTexCoord2f(0,1); rlVertex3f(x-r,y,z+r);
+        rlTexCoord2f(1,1); rlVertex3f(x+r,y,z+r);
+        rlTexCoord2f(1,0); rlVertex3f(x+r,y,z-r);
+    }
+    rlEnd(); rlSetTexture(0);
+    rlDrawRenderBatchActive(); rlEnableDepthMask();
+    g_blobN=0;
 }
 static void DrawSmoke(Camera3D cam){
     if (!g_hasSmokeTex) return;
@@ -858,6 +1035,8 @@ static void DrawSmoke(Camera3D cam){
 // burned surface (built in the surface's tangent plane, oriented to its normal), so
 // overlapping marks build up grime. Depth-tested with the world so walls occlude them.
 static void DrawScorch(void){
+    DiscTable();
+    rlBegin(RL_TRIANGLES);
     for (int i=0;i<MAX_SCORCH;i++){
         Scorch *s=&g_scorch[i]; if (!s->active) continue;
         Vector3 n=s->n;
@@ -871,11 +1050,17 @@ static void DrawScorch(void){
             float a=t1*6.2831853f, rr=sqrtf(t2)*s->r;
             Vector3 c=Vector3Add(s->pos, Vector3Add(Vector3Scale(T,cosf(a)*rr), Vector3Scale(B,sinf(a)*rr)));
             float dr=s->r*(0.30f+0.22f*t3)*(1.0f-0.4f*(rr/s->r));   // solid centre, smaller flecks toward the edge
-            Vector3 p0=Vector3Add(c, Vector3Scale(n, 0.012f));     // float just off the surface (no z-fight)
-            Vector3 p1=Vector3Add(c, Vector3Scale(n, 0.028f));
-            DrawCylinderEx(p0,p1, dr,dr, 10, (Color){18,15,13,(unsigned char)(110+(int)(t3*60))});
+            Vector3 p1=Vector3Add(c, Vector3Scale(n, 0.028f));     // float just off the surface (no z-fight)
+            rlColor4ub(18,15,13,(unsigned char)(110+(int)(t3*60)));
+            for (int q=0;q<10;q++){                                // one flat fan facing out of the surface
+                float c0=g_discCos[10][q]*dr, s0=g_discSin[10][q]*dr, c1=g_discCos[10][q+1]*dr, s1=g_discSin[10][q+1]*dr;
+                rlVertex3f(p1.x,p1.y,p1.z);
+                rlVertex3f(p1.x+T.x*c0+B.x*s0, p1.y+T.y*c0+B.y*s0, p1.z+T.z*c0+B.z*s0);
+                rlVertex3f(p1.x+T.x*c1+B.x*s1, p1.y+T.y*c1+B.y*s1, p1.z+T.z*c1+B.z*s1);
+            }
         }
     }
+    rlEnd();
 }
 
 // ---- Enemies (assets/<type>.glb -- MakeHuman + CMU mocap, built by tools/chef/build_enemy.py) ---
@@ -952,18 +1137,44 @@ static const struct { int cost; float hp, speed, meleeDmg, scale; Color tint; co
 static int EnemyDualWield(int t){ return t==EN_COOK || t==EN_BUTCHER || t==EN_HEADCHEF; }
 // melee reach: the tentacled fiend lashes from further out (range doubles as reach for AK_MELEE)
 #define ENEMY_REACH(t) ((kEnemy[t].kind==AK_MELEE && kEnemy[t].range>0) ? kEnemy[t].range : ENEMY_ATTACK_RANGE)
-typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; int swing, prevClip; float prevT, blendT; } Enemy; // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
+#define MAX_WOUNDS  10      // bullet wounds kept per body (oldest replaced)
+#define ENEMY_MAX_BONES 64  // skinning palette size; also each enemy's stored pose
+#define LOCO_BLEND 0.22f       // seconds to fade between gaits (idle / walk / run / limp)
+#define LIMP_CLIP_MPS_D 0.52f  // limp take's walking speed if it can't be measured
+#define FLAME_FLINCH_GAP 1.5  // seconds between flame-caused flinches (each tick re-flinching froze him)
+typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; int swing, prevClip; float prevT, blendT; int hitRole; double flameFlinchAt;
+                 int deathRole; float deathYaw, limpT, knockT; Vector3 pushV;
+                 int wN, wNext; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS];   // bullet wounds, pinned to bones
+                 struct ModelAnimation *drawAn; float drawFrame, drawYaw;
+                 // --- motion (EnemyPose / UpdateEnemies): he has momentum, turns at a rate, and his legs and torso are posed apart
+                 Vector3 vel, mv, lastPos;        // vel: commanded ground velocity (accel-limited, takes hit impulses); mv: measured, smoothed
+                 float yaw, yawRate, twist, headTw, lean, pitch;   // body facing (deg) + torso/head turned to the player + lean into turns/accel
+                 int loco, locoPrev, back; float locoT, locoPrevT, locoBlend, legW;   // lower-body clip (idle/walk/run/limp) + crossfade; legW: legs from loco (1) or the action clip (0)
+                 float flank, atkRest, atkRate, stagT, hitAcc, hitAccT, aimT, modeT, lostT; int mode, side, shots, rehit;   // approach side, post-swing rest, stagger, ranged stance
+                 int poseOK, fromOK, blendAll; Transform pose[ENEMY_MAX_BONES], from[ENEMY_MAX_BONES]; } Enemy;   // the pose last drawn (wounds are placed on it) // state: 0 dead,1 alive,2 dying; burnY/burnR/burnN = soot marks at the body heights the flame actually touched (NOT a whole-body tint); roarT=attack-roar cooldown; drawY=smoothed render height; stuckT=time chasing-but-not-moving (->idle); embedT=time wedged inside a wall (->respawn); fallV=render-only fall velocity while dropping off a ledge
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
-typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
+typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; int role;
+                 int wN; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS]; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
 static Corpse          g_corpses[MAX_CORPSES];
 static int             g_corpseNext = 0;
 // Enemy rigs. Clips are addressed by ROLE (CL_*), each rig maps a role to its own
 // animation index, so models with different clip orders/frame counts coexist.
-enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_CAST, CL_NROLES };   // CL_CAST: spell clip (priest raising the dead); falls back to attack
-typedef struct { Model model; ModelAnimation *anim; int animN; int clip[CL_NROLES]; int deathFrame; int ok;
+enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_CAST,
+       CL_HIT_HEAD, CL_HIT_LEFT, CL_HIT_RIGHT, CL_HIT_LEG,
+       CL_DEATH_HEAD, CL_DEATH_LEG, CL_DEATH_BLAST, CL_DEATH_RIDDLED, CL_KNOCK, CL_LIMP,
+       CL_STRIDE, CL_JOG, CL_NROLES };   // CL_STRIDE / CL_JOG: the gaits between the slow walk and the run (newer models)
+       // deaths by cause (headshot drop / legs shot out / thrown by a blast / riddled by a minigun) fall
+       // back to CL_DEATH; CL_KNOCK (flattened, gets up) to CL_HIT; CL_LIMP (after a leg hit) to CL_RUN   // CL_HIT = centre mass; the
+       // zone flinches (headshot / his left or right side / legs) fall back to CL_HIT on older models   // CL_CAST: spell clip (priest raising the dead); falls back to attack
+typedef struct { Model model; ModelAnimation *anim; int animN; int clip[CL_NROLES]; int deathFrame; int settle[CL_NROLES]; int ok;
                  int gpu; Matrix *invBind, *bones;
-                 Model lod; int hasLod; } EnemyRig;   // lod: <name>_lod.glb, ~30% triangles, drawn past ENEMY_LOD_DIST   // gpu: skinned in the vertex shader (EnemySkinInit)
+                 Model lod; int hasLod;
+                 // layered posing (RigLayerInit): which bones are torso/arms/head, how much of the chest twist and
+                 // head turn each takes, and how fast each gait clip really walks (so feet keep pace with the ground)
+                 int layer, bHips, bLB, bNeck, bHandR; unsigned char up[ENEMY_MAX_BONES]; float tw[ENEMY_MAX_BONES], hd[ENEMY_MAX_BONES], mps[CL_NROLES];
+                 unsigned found; int gaitN, gait[4]; } EnemyRig;   // found: roles the file really has (bit per role); gait[]: its walking gaits, slowest first
+                   // lod: <name>_lod.glb, ~30% triangles, drawn past ENEMY_LOD_DIST   // gpu: skinned in the vertex shader (EnemySkinInit)
 static EnemyRig        g_rig[EN_NTYPES];
 static EnemyRig *RigOf(int type){ return g_rig[type].ok ? &g_rig[type] : &g_rig[EN_COOK]; }   // missing model -> the cook stands in
 static ModelAnimation *RigClip(int type, int role){ EnemyRig *r=RigOf(type); return &r->anim[r->clip[role]]; }
@@ -974,9 +1185,10 @@ static ModelAnimation *RigClip(int type, int role){ EnemyRig *r=RigOf(type); ret
 // sync (profiled: 72% of the frame stalled in glBufferSubData). Instead the bind-pose
 // verts stay on the GPU untouched and a vertex shader skins them from a per-draw bone
 // matrix array (<= ENEMY_MAX_BONES). raylib's own GPU path is compiled out of this build.
-#define ENEMY_MAX_BONES 64
 static Shader g_skinShader; static int g_skinBonesLoc=-1, g_skinReady=-1;   // -1 untried, 0 failed, 1 ok
 static int g_skinLoc[6]={-1,-1,-1,-1,-1,-1};   // lPos lCol lR lN ambient viewPos
+static int g_skinEmiLoc=-1;
+static void EnemyGlowDim(float dim){ if (g_skinReady==1 && g_skinEmiLoc>=0) SetShaderValue(g_skinShader,g_skinEmiLoc,&dim,SHADER_UNIFORM_FLOAT); }   // 0 = eyes lit, 1 = out
 static int EnemySkinInit(void){
     if (g_skinReady>=0) return g_skinReady;
     // Skinned + LIT: position and normal skinned by the bone palette, then per-pixel
@@ -1000,12 +1212,13 @@ static int EnemySkinInit(void){
         "  fragTexCoord=vertexTexCoord; fragColor=vertexColor; gl_Position=mvp*vec4(s.xyz,1.0);\n"
         "}\n";
     // Surface detail (per material, neutral defaults when a model has none -- EnemyRigGPU):
-    //   texture2 = tangent-space normal map; texOrm = packed R occlusion, G roughness, B specular.
+    //   texture2 = tangent-space normal map; texOrm = packed R occlusion, G roughness, B specular;
+    //   texEmi = emission (glTF emissiveTexture), added unlit.
     // Occlusion darkens the ambient fully and the lamps by half; specular is a Blinn-Phong
     // highlight per lamp whose tightness follows roughness (wet blood / sweat glint, canvas doesn't).
     const char *fs="#version 330\n"
         "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal; in vec4 fragTangent;\n"
-        "uniform sampler2D texture0; uniform sampler2D texture2; uniform sampler2D texOrm; uniform vec4 colDiffuse;\n"
+        "uniform sampler2D texture0; uniform sampler2D texture2; uniform sampler2D texOrm; uniform sampler2D texEmi; uniform float emiDim; uniform vec4 colDiffuse;\n"
         "uniform vec3 lPos[5]; uniform vec3 lCol[5]; uniform float lR[5]; uniform int lN;\n"
         "uniform vec3 ambient; uniform vec3 viewPos;\n"
         "out vec4 finalColor;\n"
@@ -1028,9 +1241,10 @@ static int EnemySkinInit(void){
         "      spe+=lCol[i]*pow(max(dot(N,normalize(L+V)),0.0),shin)*att*ndl*(shin+8.0)/40.0; } }\n"
         "  float rim=pow(1.0-ndv,3.0);\n"
         "  float sheen=pow(1.0-ndv,4.0)*clamp((rough-0.78)*4.5,0.0,1.0)*0.30;\n"   // fabric fuzz
-        "  vec3 lit=ambient*ao + dif*mix(1.0,ao,0.5) + sub*sss*0.9 + rim*0.22*vec3(0.75,0.8,0.9)*ao + sheen*ao;\n"
+        "  vec3 lit=ambient*ao + dif*mix(1.0,ao,0.5) + sub*sss*0.6 + rim*0.22*vec3(0.75,0.8,0.9)*ao + sheen*ao;\n"
         "  spe*=fres;\n"
         "  vec3 c=t.rgb*colDiffuse.rgb*fragColor.rgb*clamp(lit,0.0,1.6) + spe*spi*mix(1.0,ao,0.5);\n"
+        "  c+=texture(texEmi,fragTexCoord).rgb*(1.0-emiDim);\n"   // self-lit: irradiated irises, mask lenses, embers; emiDim puts it out as he dies
         "  finalColor=vec4(c, t.a*colDiffuse.a);\n"
         "}\n";
     g_skinShader=LoadShaderFromMemory(vs,fs);
@@ -1042,6 +1256,8 @@ static int EnemySkinInit(void){
         g_skinLoc[4]=GetShaderLocation(g_skinShader,"ambient"); g_skinLoc[5]=GetShaderLocation(g_skinShader,"viewPos");
         g_skinShader.locs[SHADER_LOC_MAP_NORMAL]=GetShaderLocation(g_skinShader,"texture2");
         g_skinShader.locs[SHADER_LOC_MAP_OCCLUSION]=GetShaderLocation(g_skinShader,"texOrm");
+        g_skinShader.locs[SHADER_LOC_MAP_EMISSION]=GetShaderLocation(g_skinShader,"texEmi");
+        g_skinEmiLoc=GetShaderLocation(g_skinShader,"emiDim");
         g_skinShader.locs[SHADER_LOC_VERTEX_TANGENT]=GetShaderLocationAttrib(g_skinShader,"vertexTangent");
         if (g_skinBonesLoc>=0) g_skinReady=1;
     }
@@ -1100,10 +1316,11 @@ static void EnemyRigGPU(EnemyRig *rg){
     for (int i=0;i<m->meshCount;i++) EnemyMeshBonesGPU(&m->meshes[i]);
     // neutral detail maps for materials that ship none (older models / plain props):
     // flat normal, full light, matte, no highlight -> they render exactly as before
-    static Texture2D flatN={0}, defOrm={0};
+    static Texture2D flatN={0}, defOrm={0}, noEmi={0};
     if (!flatN.id){
         Image a=GenImageColor(1,1,(Color){128,128,255,255}); flatN=LoadTextureFromImage(a); UnloadImage(a);
         Image b=GenImageColor(1,1,(Color){255,204,0,255});   defOrm=LoadTextureFromImage(b); UnloadImage(b);
+        Image c=GenImageColor(1,1,(Color){0,0,0,255});       noEmi=LoadTextureFromImage(c);  UnloadImage(c);
     }
     for (int i=0;i<m->meshCount;i++){ Mesh *ms=&m->meshes[i];
         if (!ms->tangents && ms->texcoords && ms->normals) GenMeshTangents(ms);   // the glTF exporter leaves them out
@@ -1113,8 +1330,9 @@ static void EnemyRigGPU(EnemyRig *rg){
         MaterialMap *mm=m->materials[i].maps;
         if (mm[MATERIAL_MAP_NORMAL].texture.id==0)    mm[MATERIAL_MAP_NORMAL].texture=flatN;
         if (mm[MATERIAL_MAP_OCCLUSION].texture.id==0) mm[MATERIAL_MAP_OCCLUSION].texture=defOrm;
-        int ids[3]={MATERIAL_MAP_DIFFUSE,MATERIAL_MAP_NORMAL,MATERIAL_MAP_OCCLUSION};
-        for (int k=0;k<3;k++){ Texture2D *t=&mm[ids[k]].texture;   // raylib loads POINT-filtered: jaggy up close
+        if (mm[MATERIAL_MAP_EMISSION].texture.id==0 || mm[MATERIAL_MAP_EMISSION].texture.id==rlGetTextureIdDefault()) mm[MATERIAL_MAP_EMISSION].texture=noEmi;
+        int ids[4]={MATERIAL_MAP_DIFFUSE,MATERIAL_MAP_NORMAL,MATERIAL_MAP_OCCLUSION,MATERIAL_MAP_EMISSION};
+        for (int k=0;k<4;k++){ Texture2D *t=&mm[ids[k]].texture;   // raylib loads POINT-filtered: jaggy up close
             if (t->id>0 && t->width>1 && t->id!=rlGetTextureIdDefault() && t->mipmaps<=1){ GenTextureMipmaps(t); SetTextureFilter(*t, TEXTURE_FILTER_TRILINEAR); } }
     }
     rg->invBind=(Matrix*)MemAlloc(sizeof(Matrix)*nb); rg->bones=NULL;   // the pose lives in model.boneMatrices
@@ -1198,6 +1416,62 @@ static void RigPoseBlend(EnemyRig *rg, ModelAnimation *A, float fa, ModelAnimati
         rg->model.boneMatrices[b]=MatrixMultiply(rg->invBind[b], XformMat(t));
     }
 }
+// ---- Layered posing: legs from a locomotion clip, torso from the action ------------------
+static Transform XfLerp(Transform a, Transform c, float w){
+    Transform t; t.translation=Vector3Lerp(a.translation,c.translation,w);
+    t.rotation=QuaternionSlerp(a.rotation,c.rotation,w); t.scale=Vector3Lerp(a.scale,c.scale,w); return t;
+}
+static float AngDiff(float a, float b){ float d=fmodf(a-b,360.0f); if (d>180.0f) d-=360.0f; if (d<-180.0f) d+=360.0f; return d; }   // a-b in (-180,180]
+static int RigBoneNamed(const EnemyRig *rg, const char *name){
+    for (int i=0;i<rg->model.skeleton.boneCount;i++) if (!strcmp(rg->model.skeleton.bones[i].name,name)) return i;
+    return -1;
+}
+// How fast a gait clip walks, m/s at scale 1: the hips' speed over whichever foot is planted.
+static float ClipGroundSpeed(const EnemyRig *rg, int role){
+    const ModelAnimation *an=&rg->anim[rg->clip[role]]; int nf=an->keyframeCount;
+    int lf=RigBoneNamed(rg,"LeftFoot"), rf=RigBoneNamed(rg,"RightFoot"), hp=rg->bHips;
+    if (nf<4 || lf<0 || rf<0 || hp<0 || !an->keyframePoses) return 0.0f;
+    float sum=0; int n=0;
+    for (int f=0;f+1<nf;f++){
+        const Transform *a=an->keyframePoses[f], *c=an->keyframePoses[f+1];
+        int st=(a[lf].translation.y+c[lf].translation.y < a[rf].translation.y+c[rf].translation.y) ? lf : rf;   // the planted foot
+        float hx=(c[hp].translation.x-a[hp].translation.x)-(c[st].translation.x-a[st].translation.x);
+        float hz=(c[hp].translation.z-a[hp].translation.z)-(c[st].translation.z-a[st].translation.z);
+        sum+=sqrtf(hx*hx+hz*hz); n++;
+    }
+    return n>0 ? sum/n*30.0f : 0.0f;                       // clips are sampled at 30 Hz
+}
+static void RigLayerInit(EnemyRig *rg){
+    int nb=rg->model.skeleton.boneCount; const BoneInfo *bi=rg->model.skeleton.bones;
+    rg->layer=0; if (nb<=0 || nb>ENEMY_MAX_BONES || rg->animN<=0) return;
+    rg->bHips=RigBoneNamed(rg,"Hips"); rg->bLB=RigBoneNamed(rg,"LowerBack"); rg->bNeck=RigBoneNamed(rg,"Neck");
+    rg->bHandR=RigBoneNamed(rg,"RightFingerBase");
+    if (rg->bHips<0 || rg->bLB<0) return;
+    for (int b=0;b<nb;b++){
+        rg->up[b]=0; rg->tw[b]=0; rg->hd[b]=0;
+        for (int a=b,g=0; a>=0 && g<64; a=bi[a].parent,g++){          // nearest spine ancestor decides the share
+            const char *n=bi[a].name;
+            if (!rg->hd[b]){ if (!strcmp(n,"Head")) rg->hd[b]=1.0f; else if (!strcmp(n,"Neck1")) rg->hd[b]=0.65f; else if (!strcmp(n,"Neck")) rg->hd[b]=0.3f; }
+            if (!strcmp(n,"Spine1")){ rg->up[b]=1; rg->tw[b]=1.0f; break; }
+            if (!strcmp(n,"Spine")){ rg->up[b]=1; rg->tw[b]=0.62f; break; }
+            if (!strcmp(n,"LowerBack")){ rg->up[b]=1; rg->tw[b]=0.3f; break; }
+        }
+    }
+    // Gait speeds: the builder's own figure (<enemy>.gait, read in LoadEnemyRig) or, without one, measured off the feet
+    static const int gait[5]={CL_WALK,CL_STRIDE,CL_JOG,CL_RUN,CL_LIMP}; static const float fb[5]={1.3f,1.3f,2.6f,3.6f,LIMP_CLIP_MPS_D};
+    float est[5];
+    for (int k=0;k<5;k++){ est[k]=ClipGroundSpeed(rg,gait[k]);
+        if (!(rg->mps[gait[k]]>0.05f)) rg->mps[gait[k]]=(est[k]>0.2f && est[k]<9.0f)?est[k]:fb[k]; }
+    // the ladder: every gait the file has, slowest first, skipping ones that walk no faster than the last
+    rg->gaitN=0;
+    for (int k=0;k<4;k++){ int r=gait[k];
+        if (r!=CL_WALK && !(rg->found&(1u<<r))) continue;
+        if (rg->gaitN>0 && rg->mps[r] < rg->mps[rg->gait[rg->gaitN-1]]*1.12f) continue;
+        rg->gait[rg->gaitN++]=r; }
+    rg->layer=1;
+    DebugLog("riglayer","\"walk\":%.2f,\"stride\":%.2f,\"jog\":%.2f,\"run\":%.2f,\"limp\":%.2f,\"est\":[%.2f,%.2f,%.2f,%.2f,%.2f],\"gaits\":%d,\"bones\":%d",
+             rg->mps[CL_WALK],rg->mps[CL_STRIDE],rg->mps[CL_JOG],rg->mps[CL_RUN],rg->mps[CL_LIMP],est[0],est[1],est[2],est[3],est[4],rg->gaitN,nb);
+}
 // Load an enemy model + clips into a rig, resolving clip ROLES by name and the
 // death clip's settle frame. Returns 1 if the model has geometry.
 static int LoadEnemyRig(EnemyRig *rg, const char *path){
@@ -1207,22 +1481,42 @@ static int LoadEnemyRig(EnemyRig *rg, const char *path){
     if (!fp){ DebugLog("enemy","\"error\":\"%s not found\"",path); return 0; }
     rg->model=LoadModel(fp);
     rg->anim=LoadModelAnimations(fp,&rg->animN);
-    static const char *roleName[CL_NROLES]={"walk","idle","run","hit","attack","death","cast"};
-    for (int r=0;r<CL_NROLES;r++) rg->clip[r]=-1;
+    static const char *roleName[CL_NROLES]={"walk","idle","run","hit","attack","death","cast",
+                                            "hit_head","hit_left","hit_right","hit_leg",
+                                            "death_head","death_leg","death_blast","death_riddled","knockdown","limp","stride","jog"};
+    for (int r=0;r<CL_NROLES;r++){ rg->clip[r]=-1; rg->mps[r]=0; }
+    rg->found=0;
     for (int ci=0; ci<rg->animN; ci++){
-        const char *nm=rg->anim[ci].name;
-        for (int r=0;r<CL_NROLES;r++) if (strstr(nm,roleName[r])){ rg->clip[r]=ci; break; }
+        const char *nm=rg->anim[ci].name; int m=-1;
+        for (int r=0;r<CL_NROLES;r++) if (!strcmp(nm,roleName[r])) m=r;              // exact name first ("hit" vs "hit_head")
+        if (m<0) for (int r=0;r<=CL_CAST;r++) if (strstr(nm,roleName[r])){ m=r; break; }   // legacy: names with a prefix
+        if (m>=0 && (rg->clip[m]<0 || !strcmp(nm,roleName[m]))){ rg->clip[m]=ci; rg->found|=1u<<m; }
     }
-    for (int r=0;r<CL_NROLES;r++) if (rg->clip[r]<0) rg->clip[r]=(r==CL_CAST && rg->clip[CL_ATTACK]>=0)?rg->clip[CL_ATTACK]:0;
+    {   // <enemy>.gait beside the model: "role metres-per-second" per line, how fast each gait loop walks
+        char gp[200]; snprintf(gp,sizeof gp,"%s",fp); char *dot=strrchr(gp,'.');
+        if (dot && (size_t)(dot-gp)+6<sizeof gp){ strcpy(dot,".gait");
+            FILE *gf=fopen(gp,"r");
+            if (gf){ char rn[32]; float v;
+                while (fscanf(gf,"%31s %f",rn,&v)==2)
+                    for (int r=0;r<CL_NROLES;r++) if (!strcmp(rn,roleName[r]) && v>0.05f && v<12.0f) rg->mps[r]=v;
+                fclose(gf); } }
+    }
+    for (int r=0;r<CL_NROLES;r++) if (rg->clip[r]<0){
+        int fb = (r>=CL_HIT_HEAD && r<=CL_HIT_LEG) ? CL_HIT : (r>=CL_DEATH_HEAD && r<=CL_DEATH_RIDDLED) ? CL_DEATH
+               : (r==CL_KNOCK) ? CL_HIT : (r==CL_LIMP) ? CL_RUN : (r==CL_CAST) ? CL_ATTACK : (r==CL_STRIDE) ? CL_WALK : (r==CL_JOG) ? CL_RUN : -1;
+        rg->clip[r] = (fb>=0 && rg->clip[fb]>=0) ? rg->clip[fb] : 0;              // older models: the plain clip
+    }
     // Pick the death clip's "settled on the floor" frame. Many death anims end
     // with a trailing keyframe that snaps back to the standing start pose, so
     // freezing the corpse at the literal last frame leaves it standing. Walk
     // the root bone's vertical track and take the LATEST frame still near its
     // lowest point -- that's the body lying down, just before any spring-back.
-    rg->deathFrame = (rg->animN>0) ? ANIM_FRAMES(rg->anim[rg->clip[CL_DEATH]])-1 : 0;
+    static const int deathRoles[5]={CL_DEATH,CL_DEATH_HEAD,CL_DEATH_LEG,CL_DEATH_BLAST,CL_DEATH_RIDDLED};
+    for (int dr=0; dr<5; dr++){ int role=deathRoles[dr];
+    rg->deathFrame = (rg->animN>0) ? ANIM_FRAMES(rg->anim[rg->clip[role]])-1 : 0;
 #if defined(RAYLIB_VERSION_MAJOR) && RAYLIB_VERSION_MAJOR >= 6
     if (rg->animN>0 && rg->model.skeleton.boneCount>0){
-        ModelAnimation *d=&rg->anim[rg->clip[CL_DEATH]];
+        ModelAnimation *d=&rg->anim[rg->clip[role]];
         int nf=ANIM_FRAMES(*d), root=0;
         for (int b=0;b<rg->model.skeleton.boneCount;b++)
             if (strstr(rg->model.skeleton.bones[b].name,"Hips")||strstr(rg->model.skeleton.bones[b].name,"hips")){ root=b; break; }
@@ -1233,8 +1527,11 @@ static int LoadEnemyRig(EnemyRig *rg, const char *path){
             if (d->keyframePoses[f][root].translation.y<=thresh){ rg->deathFrame=f; break; }
     }
 #endif
+    rg->settle[role]=rg->deathFrame; }
+    rg->deathFrame=rg->settle[CL_DEATH];                // (the plain death's, as before)
     rg->ok=(rg->model.meshCount>0);
     if (rg->ok && rg->animN>0) EnemyRigGPU(rg);
+    if (rg->ok && rg->gpu) RigLayerInit(rg);
     if (rg->ok) EnemyLodLoad(rg, fp);
     BoundingBox eb=GetModelBoundingBox(rg->model);
     DebugLog("enemy","\"file\":\"%s\",\"gpu\":%d,\"meshes\":%d,\"bones\":%d,\"anims\":%d,\"clips\":[%d,%d,%d,%d,%d,%d],\"settleFrame\":%d,\"size\":[%.2f,%.2f,%.2f]",
@@ -1250,6 +1547,76 @@ static int LoadEnemyRig(EnemyRig *rg, const char *path){
 #define g_eAttack CL_ATTACK
 #define g_eDeath CL_DEATH
                               // start pose, so corpses must settle on an earlier "body on the floor" frame instead
+// Build the pose an enemy is drawn in (model space, kept in e->pose). Legs come from his locomotion
+// clip, played at the pace he is really covering ground; torso, arms and head come from the action
+// clip (swing / aim / cast / flinch) hung on those hips, then the chest twists and the head turns
+// toward the player and the whole body leans into turns. Clip changes ease in from a snapshot of the
+// last pose. Knockdowns and deaths take the whole body.
+#define EM_ADVANCE 0
+#define EM_AIM     1
+#define EM_MOVE    2
+static int EnemyActing(int clip){ return !(clip==CL_RUN || clip==CL_IDLE || clip==CL_WALK || clip==CL_LIMP || clip==CL_STRIDE || clip==CL_JOG); }
+static void EnemyPoseBuild(Enemy *e){
+    EnemyRig *rg=RigOf(e->type); int nb=rg->model.skeleton.boneCount;
+    if (!rg->layer || rg->animN<=0){ e->poseOK=0; return; }
+    Transform T[ENEMY_MAX_BONES];
+    float twist=0, head=0, lean=0, pitch=0;
+    if (e->state==2){
+        ModelAnimation *d=RigClip(e->type, e->deathRole?e->deathRole:CL_DEATH);
+        for (int b=0;b<nb;b++) T[b]=RigSample(d,e->animT,b);
+    } else {
+        ModelAnimation *L=RigClip(e->type,e->loco);
+        for (int b=0;b<nb;b++) T[b]=RigSample(L,e->locoT,b);
+        if (e->locoBlend>0){                                  // gait change: fade the old gait out
+            ModelAnimation *Lp=RigClip(e->type,e->locoPrev); float w=1.0f-e->locoBlend/LOCO_BLEND; w=w*w*(3.0f-2.0f*w);
+            for (int b=0;b<nb;b++) T[b]=XfLerp(RigSample(Lp,e->locoPrevT,b),T[b],w);
+        }
+        if (EnemyActing(e->clip)){
+            ModelAnimation *A=RigClip(e->type,e->clip); float lw=e->legW;
+            Vector3 aP=RigSample(A,e->animT,rg->bLB).translation, P=Vector3Lerp(aP,T[rg->bLB].translation,lw);
+            for (int b=0;b<nb;b++){
+                Transform a=RigSample(A,e->animT,b);
+                if (!rg->up[b]) T[b]=XfLerp(a,T[b],lw);
+                else { T[b]=a; T[b].translation=Vector3Add(P,Vector3Subtract(a.translation,aP)); }
+            }
+        }
+        if (e->clip!=CL_KNOCK){ twist=e->twist; head=e->headTw; lean=e->lean; pitch=e->pitch; }
+    }
+    if (fabsf(twist)>0.05f){                                   // chest turned toward the player, shared up the spine
+        Vector3 P=T[rg->bLB].translation;
+        for (int b=0;b<nb;b++) if (rg->up[b]){
+            Quaternion q=QuaternionFromAxisAngle((Vector3){0,1,0}, twist*rg->tw[b]*DEG2RAD);
+            T[b].translation=Vector3Add(P,Vector3RotateByQuaternion(Vector3Subtract(T[b].translation,P),q));
+            T[b].rotation=QuaternionMultiply(q,T[b].rotation);
+        }
+    }
+    if (fabsf(head)>0.05f && rg->bNeck>=0){                    // ...and the head the rest of the way
+        Vector3 P=T[rg->bNeck].translation;
+        for (int b=0;b<nb;b++) if (rg->hd[b]>0){
+            Quaternion q=QuaternionFromAxisAngle((Vector3){0,1,0}, head*rg->hd[b]*DEG2RAD);
+            T[b].translation=Vector3Add(P,Vector3RotateByQuaternion(Vector3Subtract(T[b].translation,P),q));
+            T[b].rotation=QuaternionMultiply(q,T[b].rotation);
+        }
+    }
+    if (fabsf(lean)>0.05f || fabsf(pitch)>0.05f){              // leaning into a turn / a hard start, about the feet
+        Quaternion q=QuaternionMultiply(QuaternionFromAxisAngle((Vector3){0,0,1},lean*DEG2RAD), QuaternionFromAxisAngle((Vector3){1,0,0},pitch*DEG2RAD));
+        for (int b=0;b<nb;b++){ T[b].translation=Vector3RotateByQuaternion(T[b].translation,q); T[b].rotation=QuaternionMultiply(q,T[b].rotation); }
+    }
+    if (e->blendT>0 && e->fromOK){                             // ease in from the pose he was in when the clip changed
+        float w=1.0f-e->blendT/ENEMY_BLEND; if (w<0) w=0; w=w*w*(3.0f-2.0f*w);
+        for (int b=0;b<nb;b++) if (e->blendAll || rg->up[b]) T[b]=XfLerp(e->from[b],T[b],w);
+    }
+    memcpy(e->pose,T,sizeof(Transform)*nb); e->poseOK=1;
+}
+static void EnemyPoseSnap(Enemy *e, int all){                 // call just before changing his clip
+    if (e->poseOK){ memcpy(e->from,e->pose,sizeof e->from); e->fromOK=1; } else e->fromOK=0;
+    e->blendT=ENEMY_BLEND; e->blendAll=all;
+}
+// Upload a stored pose to the rig's bone palette for drawing.
+static void RigPoseStored(EnemyRig *rg, const Transform *pose){
+    int nb=rg->model.skeleton.boneCount;
+    for (int b=0;b<nb;b++) rg->model.boneMatrices[b]=MatrixMultiply(rg->invBind[b], XformMat(pose[b]));
+}
 static int             g_hasEnemy = 0;
 static int             g_kills = 0;
 static int             g_headshots = 0;        // running headshot-kill tally (HUD)
@@ -1297,6 +1664,16 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
     g_enemies[i].fireT=kEnemy[type].rate*0.5f; g_enemies[i].losT=0; g_enemies[i].los=0; g_enemies[i].burstLeft=0;
     g_enemies[i].raiseC=-1; g_enemies[i].chanT=0;
     g_enemies[i].swing=0; g_enemies[i].blendT=0;
+    g_enemies[i].hitRole=CL_HIT; g_enemies[i].deathRole=CL_DEATH; g_enemies[i].limpT=0; g_enemies[i].knockT=0; g_enemies[i].flameFlinchAt=-100.0;   // a reused slot starts clean
+    g_enemies[i].pushV=(Vector3){0,0,0};
+    g_enemies[i].wN=0; g_enemies[i].wNext=0; g_enemies[i].drawAn=NULL;
+    { Enemy *e=&g_enemies[i];                              // motion state: standing, turned to the player, his own pace and approach side
+      e->spd*=1.0f+GetRandomValue(-8,8)/100.0f;
+      e->vel=e->mv=(Vector3){0,0,0}; e->lastPos=pos;
+      e->yaw=atan2f(g_pos.x-pos.x, g_pos.z-pos.z)*RAD2DEG + ENEMY_YAW_OFFSET; e->yawRate=e->twist=e->headTw=e->lean=e->pitch=0;
+      e->loco=e->locoPrev=CL_IDLE; e->back=0; e->locoT=(float)GetRandomValue(0,40); e->locoPrevT=0; e->locoBlend=0; e->legW=1;
+      e->flank=GetRandomValue(-100,100)/100.0f; e->atkRest=0; e->atkRate=1; e->stagT=0; e->hitAcc=e->hitAccT=0; e->aimT=e->modeT=e->lostT=0;
+      e->mode=EM_ADVANCE; e->side=GetRandomValue(0,1)?1:-1; e->shots=0; e->rehit=0; e->poseOK=e->fromOK=e->blendAll=0; }
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
@@ -1556,15 +1933,14 @@ static Texture2D MakeChecker(int sz, Color a, Color b, int cells) {
 }
 
 static void SpawnImpact(Vector3 p, Vector3 n) {
-    for (int i=0;i<14;i++) for (int s=0;s<MAX_SPARKS;s++){
-        if (g_sparks[s].life>0) continue;
+    for (int i=0;i<14;i++){
+        Spark *slot=SparkAlloc(); if (!slot) break;
         Vector3 v={ n.x+GetRandomValue(-100,100)/100.0f, n.y+GetRandomValue(-20,120)/100.0f, n.z+GetRandomValue(-100,100)/100.0f };
         v=Vector3Scale(Vector3Normalize(v), 3.0f+GetRandomValue(0,300)/100.0f);
         float lf=0.4f+GetRandomValue(0,30)/100.0f;
         Spark sp={0}; sp.pos=p; sp.vel=v; sp.life=lf; sp.life0=lf; sp.size=0.04f; sp.rest=p.y; sp.blood=0;
         sp.col=(Color){255,(unsigned char)(200+GetRandomValue(0,55)),60,255};
-        g_sparks[s]=sp;
-        break;
+        *slot=sp;
     }
 }
 
@@ -1573,8 +1949,8 @@ static void SpawnImpact(Vector3 p, Vector3 n) {
 // particles. Gravity + fade are handled by the shared spark integrator/draw.
 static void SpawnBlood(Vector3 p, Vector3 dir, float intensity, float floorY) {
     int n=(int)(200*intensity); if (n>900) n=900;          // headshots spray harder (capped)
-    for (int i=0;i<n;i++) for (int s=0;s<MAX_SPARKS;s++){
-        if (g_sparks[s].life>0) continue;
+    for (int i=0;i<n;i++){
+        Spark *slot=SparkAlloc(); if (!slot) break;
         float spread=3.6f;
         Vector3 v={ dir.x*4.5f + GetRandomValue(-100,100)/100.0f*spread,
                     dir.y*4.5f + GetRandomValue(-100,100)/100.0f*spread + 1.7f,
@@ -1588,23 +1964,13 @@ static void SpawnBlood(Vector3 p, Vector3 dir, float intensity, float floorY) {
         Spark sp={0}; sp.pos=p; sp.vel=v; sp.life=lf; sp.life0=lf; sp.size=sz; sp.rest=floorY; sp.blood=1; sp.lasting=gob;
         sp.seed=(unsigned int)GetRandomValue(1,1<<30);     // stable per-splat outline jitter
         sp.col=(Color){ (unsigned char)(150+GetRandomValue(0,105)), (unsigned char)GetRandomValue(0,28), (unsigned char)GetRandomValue(0,18), 255 };
-        g_sparks[s]=sp;
-        break;
+        *slot=sp;
     }
     // A flat continuous pool stain spreading from the body's feet -- this is what
     // reads as "liquid"; the flying gobs above just stipple fine spatter around it.
-    for (int s=0;s<MAX_SPARKS;s++){
-        if (g_sparks[s].life>0) continue;
-        Spark sp={0};
-        sp.pos=(Vector3){p.x, floorY+0.02f, p.z}; sp.vel=(Vector3){0,0,0};   // born settled on the floor
-        sp.life=1e9f; sp.life0=1e9f; sp.rest=floorY;
-        sp.blood=1; sp.lasting=1; sp.pool=1;
-        sp.size=0.20f+0.11f*intensity;                     // pool radius; headshots pool wider
-        sp.seed=(unsigned int)GetRandomValue(1,1<<30);
-        sp.col=(Color){ (unsigned char)(105+GetRandomValue(0,35)), (unsigned char)GetRandomValue(0,12), (unsigned char)GetRandomValue(0,8), 255 };
-        g_sparks[s]=sp;
-        break;
-    }
+    { Color pc={ (unsigned char)(105+GetRandomValue(0,35)), (unsigned char)GetRandomValue(0,12), (unsigned char)GetRandomValue(0,8), 255 };
+      unsigned int seed=(unsigned int)GetRandomValue(1,1<<30);
+      StainAddPool(p.x, floorY, p.z, 0.20f+0.11f*intensity, seed, pc); }   // pool radius; headshots pool wider
 }
 
 static int RaycastWorld(Vector3 ro, Vector3 rd, Vector3 *hit, Vector3 *nrm) {
@@ -1660,21 +2026,197 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
 // Shared by every weapon: bullets, the flame cone, and the knife. Handles the
 // flinch, the kill -> dying state + tally + death sound. blood>0 spurts blood at
 // hitPt along dir; head>0 also pops the "HEADSHOT!" flash + counts a headshot kill.
+// Which flinch a shot earns, from where it landed: a headshot snaps the head back, the
+// lower legs buckle a knee, a shot wide of centre spins that shoulder back (the enemy
+// faces its shooter, so the shooter's right is the enemy's left), anything else is centre mass.
+// ---- Wounds that stay: each bullet leaves a blood stain pinned to the bone it struck, at the point
+// where the shot's path meets that body part (the hit box is wider than the body, so the raw hit
+// point would float in front of it). Re-posed every frame from the bone, so it rides the animation
+// and lies on the corpse.
+static float WoundBoneRadius(const char *n){                       // rough body-part radius, metres
+    if (strstr(n,"Head")) return 0.095f;  if (strstr(n,"Neck")) return 0.055f;
+    if (strstr(n,"Spine")||strstr(n,"Hips")) return 0.14f;
+    if (strstr(n,"ForeArm")) return 0.045f;  if (strstr(n,"Shoulder")) return 0.07f;  if (strstr(n,"Arm")) return 0.055f;
+    if (strstr(n,"UpLeg")) return 0.075f;  if (strstr(n,"Leg")) return 0.055f;
+    return 0.04f;
+}
+static int WoundBoneOK(const char *n){
+    return !(strstr(n,"Finger")||strstr(n,"Thumb")||strstr(n,"Toe")||strstr(n,"Tent")||strstr(n,"End")||strstr(n,"Eye")||strstr(n,"jaw")||strstr(n,"Hand")||strstr(n,"Foot"));
+}
+static Vector3 WoundWorld(ModelAnimation *an, float frame, int b, Vector3 L, Vector3 base, float yaw, float esc){
+    Transform t=RigSample(an,frame,b);
+    Vector3 m=Vector3Add(t.translation, Vector3RotateByQuaternion(L,t.rotation));
+    return Vector3Add(base, Vector3RotateByAxisAngle(Vector3Scale(m,esc),(Vector3){0,1,0},yaw*DEG2RAD));
+}
+#define WSAMPLE(b) (ps ? ps[b] : RigSample(an,fr,b))          /* the pose he's drawn in, else the clip */
+static void EnemyAddWound(Enemy *e, Vector3 hitPt, Vector3 dir){
+    EnemyRig *rg=RigOf(e->type); if (rg->animN<=0) return;
+    const Transform *ps=e->poseOK ? e->pose : NULL;
+    ModelAnimation *an=e->drawAn ? e->drawAn : RigClip(e->type,e->clip);
+    float fr=e->drawAn ? e->drawFrame : e->animT;
+    float yaw=ps ? e->yaw : e->drawAn ? e->drawYaw : atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
+    float esc=ENEMY_SCALE*kEnemy[e->type].scale; if (esc<=0) return;
+    Vector3 base={e->pos.x, e->drawY, e->pos.z};
+    Vector3 o=Vector3Scale(Vector3RotateByAxisAngle(Vector3Subtract(hitPt,base),(Vector3){0,1,0},-yaw*DEG2RAD),1.0f/esc);   // model space
+    Vector3 u=Vector3Normalize(Vector3RotateByAxisAngle(dir,(Vector3){0,1,0},-yaw*DEG2RAD));
+    const BoneInfo *bi=rg->model.skeleton.bones; int nb=rg->model.skeleton.boneCount;
+    int best=-1; float bestScore=1e9f, bestS=0, bestT=0, bestR=0; Vector3 bJ={0}, bC={0};
+    for (int b=0;b<nb;b++){
+        if (!WoundBoneOK(bi[b].name)) continue;
+        Vector3 J=WSAMPLE(b).translation, C=J;
+        for (int c=0;c<nb;c++) if (bi[c].parent==b){ C=WSAMPLE(c).translation; break; }
+        Vector3 v=Vector3Subtract(C,J), w0=Vector3Subtract(o,J);   // closest approach: ray o+s*u vs segment J+t*v
+        float bb=Vector3DotProduct(u,v), cc=Vector3DotProduct(v,v), dd=Vector3DotProduct(u,w0), ee=Vector3DotProduct(v,w0);
+        float t = (cc>1e-8f) ? (ee - bb*(-dd))/cc : 0.0f;          // first guess with s = -dd (ray dir is unit)
+        float den=cc-bb*bb, sv;
+        if (den>1e-8f){ sv=(bb*ee-cc*dd)/den; t=(ee+bb*sv)/cc; } else sv=-dd;
+        if (t<0) t=0; if (t>1) t=1;
+        Vector3 Q=Vector3Add(J,Vector3Scale(v,t)); sv=Vector3DotProduct(Vector3Subtract(Q,o),u);
+        Vector3 P=Vector3Add(o,Vector3Scale(u,sv));
+        float dist=Vector3Distance(P,Q), r=WoundBoneRadius(bi[b].name)/esc;
+        float score=dist-r;
+        if (score<bestScore){ bestScore=score; best=b; bestS=sv; bestT=t; bestR=r; bJ=J; bC=C; }
+    }
+    if (best<0 || bestScore>0.06f/esc) return;                    // the shot clipped the box, not the body
+    Vector3 Q=Vector3Add(bJ,Vector3Scale(Vector3Subtract(bC,bJ),bestT)), P=Vector3Add(o,Vector3Scale(u,bestS));
+    float dist=Vector3Distance(P,Q); Vector3 S;
+    if (dist<bestR){ float back=sqrtf(bestR*bestR-dist*dist); S=Vector3Add(o,Vector3Scale(u,bestS-back)); }   // where the path enters
+    else S=Vector3Add(Q,Vector3Scale(Vector3Normalize(Vector3Subtract(P,Q)),bestR));                          // a graze
+    Transform tb=WSAMPLE(best);
+    int k=e->wNext; e->wNext=(e->wNext+1)%MAX_WOUNDS; if (e->wN<MAX_WOUNDS) e->wN++;
+    e->wBone[k]=best; e->wOff[k]=Vector3RotateByQuaternion(Vector3Subtract(S,tb.translation),QuaternionInvert(tb.rotation));
+    e->wSz[k]=0.055f+GetRandomValue(0,30)/1000.0f;
+}
+static const Transform *g_woundPose=NULL;                      // set around DrawWounds to place them on a stored pose
+static void DrawWounds(ModelAnimation *an, float frame, Vector3 base, float yaw, float esc,
+                       int n, const int *wb, const Vector3 *wo, const float *ws){
+    if (!g_hasSmokeTex || (!an && !g_woundPose)) return;
+    for (int k=0;k<n;k++){
+        Vector3 p;
+        if (g_woundPose){ Transform t=g_woundPose[wb[k]]; Vector3 m=Vector3Add(t.translation, Vector3RotateByQuaternion(wo[k],t.rotation));
+            p=Vector3Add(base, Vector3RotateByAxisAngle(Vector3Scale(m,esc),(Vector3){0,1,0},yaw*DEG2RAD)); }
+        else p=WoundWorld(an,frame,wb[k],wo[k],base,yaw,esc);
+        Vector3 tc=Vector3Subtract(g_cam.position,p); float L=Vector3Length(tc);
+        if (L>1e-3f) p=Vector3Add(p,Vector3Scale(tc,0.012f/L));   // just proud of the skin
+        DrawBillboard(g_cam, g_smokeTex, p, ws[k]*1.6f, (Color){110,6,6,215});    // the stain
+        DrawBillboard(g_cam, g_smokeTex, p, ws[k]*0.55f, (Color){28,0,0,255});    // the hole
+    }
+}
+
+// What the damage came from, for the death/knockdown pick: callers set it around HurtEnemy.
+enum { HC_BULLET=0, HC_BLAST, HC_FLAME, HC_MELEE };
+static int g_hurtCause=HC_BULLET; static Vector3 g_hurtFrom;   // g_hurtFrom: the blast centre
+#define LIMP_TIME     6.0f      // seconds of limping after a leg hit
+#define LIMP_SPEED    0.85f     // m/s while limping (the clip plays faster to keep the feet planted)
+#define LIMP_CLIP_MPS 0.52f     // the limp take's own walking speed
+#define KNOCK_SHOT_DMG 50.0f    // one shotgun blast doing this much (within KNOCK_SHOT_DIST) flattens him
+#define KNOCK_SHOT_DIST 7.0f
+#define KNOCK_BLAST_DMG 20.0f   // a grenade doing this much
+#define HIT_ACC_WINDOW 0.15f    // hits landing within this of each other add up (a shotgun's pellets, a burst)...
+#define STAGGER_DMG    35.0f    // ...and this much at once (or 30% of his max HP if more) staggers him
+#define STAGGER_TIME   0.55f    // seconds off balance, stepping back
+#define STAGGER_PUSH   3.2f     // m/s shove at mass 1 (a cook is 0.8, the head chef 4)
+#define HIT_SLOW       0.40f    // his pace while flinching from a light hit
+#define ENEMY_ACCEL    14.0f    // m/s^2 getting up to speed...
+#define ENEMY_BRAKE    22.0f    // ...and pulling up
+#define FLANK_DIST     11.0f    // inside this, in sight, chasers fan out to their own side of the player
+#define FLANK_GAIN     0.55f
+#define SEP_DIST       1.8f     // chasers steer apart inside this
+#define SEP_GAIN       0.9f
+#define LUNGE_MAX      1.0f     // a running enemy starts his swing up to this far outside his reach
+#define AIM_SETTLE     0.45f    // a shooter holds his aim on the player this long before he fires
+#define LOST_TIME      0.7f     // ...and gives the position up after this long without a sight of him
+#define BACKOFF_FRAC   0.30f    // shooters give ground inside this fraction of their range
+#define RELOCATE_PCT   65       // chance a shooter shifts position after a shot / burst
+#define TWIST_MAX      75.0f    // chest turned off the hips, degrees
+#define HEAD_MAX       35.0f    // head turned further still
+static float EnemyYawAway(const Enemy *e, Vector3 from){        // a yaw whose "forward" points away from `from`
+    float ax=e->pos.x-from.x, az=e->pos.z-from.z;
+    return atan2f(ax,az)*RAD2DEG + ENEMY_YAW_OFFSET;
+}
+// Flatten an alive enemy: the knockdown clip (fall, lie there, get up) gates his AI the way a
+// flinch does (hitT), and he's shoved along `push` (m/s, decays; walls stop it).
+static void EnemyKnock(int ei, Vector3 push){
+    Enemy *e=&g_enemies[ei]; if (e->state!=1 || e->knockT>0) return;
+    EnemyRig *rg=RigOf(e->type); if (rg->animN<=0) return;
+    float dur=ANIM_FRAMES(rg->anim[rg->clip[CL_KNOCK]])/60.0f;   // baked at 30 samples/s on a 60 fps timeline
+    e->knockT=dur; if (e->hitT<dur) e->hitT=dur;
+    e->pushV=(Vector3){push.x,0,push.z};
+    DebugLog("knock","\"i\":%d,\"dur\":%.2f,\"push\":%.2f", ei, dur, Vector3Length(push));
+}
+static int HitZoneRole(const Enemy *e, int head, Vector3 dir, Vector3 hitPt){
+    if (head) return CL_HIT_HEAD;
+    float sc=kEnemy[e->type].scale;
+    float h=(hitPt.y-e->pos.y)/(ENEMY_HEIGHT*sc);
+    if (h<0.42f) return CL_HIT_LEG;
+    Vector3 r=Vector3CrossProduct(dir,(Vector3){0,1,0});
+    float rl=Vector3Length(r); if (rl<1e-3f) return CL_HIT;              // straight down (a blast): centre
+    float s=((hitPt.x-e->pos.x)*r.x + (hitPt.z-e->pos.z)*r.z)/rl/(ENEMY_RADIUS*sc);
+    if (s> 0.35f) return CL_HIT_LEFT;
+    if (s<-0.35f) return CL_HIT_RIGHT;
+    return CL_HIT;
+}
 static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, int blood){
     if (ei<0 || g_enemies[ei].state!=1) return;
     if (blood) SpawnBlood(hitPt, dir, head?1.9f:1.0f, g_enemies[ei].pos.y);
+    if (blood && g_hurtCause==HC_BULLET) EnemyAddWound(&g_enemies[ei], hitPt, dir);
     if (g_quadT>0.0f) dmg*=4.0f;                          // QUAD DAMAGE power-up
     g_enemies[ei].hp -= dmg;
     if (head) g_hsFlash=1.1f;
     if (g_enemies[ei].hp<=0){
         g_enemies[ei].prevClip=g_enemies[ei].clip; g_enemies[ei].prevT=g_enemies[ei].animT; g_enemies[ei].blendT=ENEMY_BLEND;
+        EnemyPoseSnap(&g_enemies[ei],1);                      // the fall eases out of whatever he was doing
         g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0;
+        { Enemy *e=&g_enemies[ei]; const Weapon *cw=&g_weapons[g_curWeapon];   // how he dies: by cause, then where it hit
+          e->deathYaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;   // facing the shooter
+          e->pushV=(Vector3){0,0,0};
+          if (g_hurtCause==HC_BLAST){ e->deathRole=CL_DEATH_BLAST; e->deathYaw=EnemyYawAway(e,g_hurtFrom);
+              Vector3 a={e->pos.x-g_hurtFrom.x,0,e->pos.z-g_hurtFrom.z}; float al=Vector3Length(a);
+              if (al>1e-3f) e->pushV=Vector3Scale(a, fminf(6.0f, 2.0f+dmg*0.03f)/al); }        // thrown clear of it
+          else if (g_hurtCause==HC_BULLET && head) e->deathRole=CL_DEATH_HEAD;
+          else if (g_hurtCause==HC_BULLET && HitZoneRole(e,0,dir,hitPt)==CL_HIT_LEG) e->deathRole=CL_DEATH_LEG;
+          else if (g_hurtCause==HC_BULLET && (cw->spinUp || cw->soundGated)) e->deathRole=CL_DEATH_RIDDLED;
+          else e->deathRole=CL_DEATH;
+          DebugLog("edeath","\"i\":%d,\"role\":%d,\"cause\":%d", ei, e->deathRole, g_hurtCause); }
         g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
         g_kills++; if (head) g_headshots++;
         if (g_audio && g_nDeathSnd>0) PlaySound(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)]);
         { void PickupOnKillAt(int ei); PickupOnKillAt(ei); }
     } else {
-        g_enemies[ei].hitT=0.45f;                         // non-fatal hit -> flinch
+        // flame ticks every frame: re-flinching on each one froze a burning enemy in place.
+        // Fire flinches him at most once per FLAME_FLINCH_GAP; he keeps coming through it
+        if (g_hurtCause==HC_FLAME){
+            if (GetTime()-g_enemies[ei].flameFlinchAt < FLAME_FLINCH_GAP) return;
+            g_enemies[ei].flameFlinchAt=GetTime(); }
+        if (g_enemies[ei].hitT<0.45f) g_enemies[ei].hitT=0.45f;   // non-fatal hit -> flinch (never cuts a knockdown short)
+        g_enemies[ei].hitRole=HitZoneRole(&g_enemies[ei], head, dir, hitPt);   // ...for where it landed
+        { Enemy *e=&g_enemies[ei]; e->rehit=1;                 // a fresh hit re-jolts a flinch already playing
+          // The hit shoves him: a jolt along the shot for every bullet (he keeps coming, slowed), and a
+          // STAGGER -- knocked back a few steps, off balance -- when enough lands at once for his size.
+          float mass=kEnemy[e->type].hp/100.0f; if (mass<0.8f) mass=0.8f; if (mass>4.0f) mass=4.0f;
+          Vector3 pd={dir.x,0,dir.z}; float pl=Vector3Length(pd);
+          if (g_hurtCause==HC_BLAST){ pd=(Vector3){e->pos.x-g_hurtFrom.x,0,e->pos.z-g_hurtFrom.z}; pl=Vector3Length(pd); }
+          if (pl>1e-3f && g_hurtCause!=HC_FLAME){
+              pd=Vector3Scale(pd,1.0f/pl);
+              if (e->hitAccT<=0) e->hitAcc=0;
+              e->hitAcc+=dmg; e->hitAccT=HIT_ACC_WINDOW;
+              float need=fmaxf(STAGGER_DMG, e->maxHp*0.30f);
+              if (e->hitAcc>=need && e->stagT<=0 && e->knockT<=0){
+                  e->stagT=STAGGER_TIME; e->hitAcc=0; if (e->hitT<STAGGER_TIME) e->hitT=STAGGER_TIME;
+                  e->vel=Vector3Add(Vector3Scale(e->vel,0.3f), Vector3Scale(pd,STAGGER_PUSH/mass));
+                  DebugLog("stagger","\"i\":%d,\"push\":%.2f", ei, STAGGER_PUSH/mass);
+              } else if (e->stagT<=0){
+                  float j=fminf(2.4f, dmg*0.05f)/mass;
+                  e->vel=Vector3Add(e->vel, Vector3Scale(pd,j));
+              }
+          } }
+        DebugLog("flinch","\"i\":%d,\"role\":%d,\"at\":[%.2f,%.2f,%.2f]", ei, g_enemies[ei].hitRole, hitPt.x,hitPt.y,hitPt.z);
+        if (g_enemies[ei].hitRole==CL_HIT_LEG && g_hurtCause==HC_BULLET){            // a leg hit: he limps for a while
+            if (g_enemies[ei].limpT<=0) DebugLog("limp","\"i\":%d", ei);
+            g_enemies[ei].limpT=LIMP_TIME; }
+        if (g_hurtCause==HC_BLAST && dmg>=KNOCK_BLAST_DMG){                            // a blast that doesn't kill flattens him
+            Enemy *e=&g_enemies[ei]; Vector3 a={e->pos.x-g_hurtFrom.x,0,e->pos.z-g_hurtFrom.z}; float al=Vector3Length(a);
+            EnemyKnock(ei, al>1e-3f ? Vector3Scale(a, fminf(5.0f, 1.5f+dmg*0.03f)/al) : (Vector3){0,0,0}); }
     }
 }
 
@@ -1698,6 +2240,7 @@ static Grenade g_gren[MAX_GREN];
 // vm camera sits at the origin looking -Z. Class length * trim scale -> trim rotation
 // + recoil/sway/raise -> aim at the crosshair convergence point -> class position +
 // trim offset + bob/sway/recoil/raise. The draw prepends w->vmAlign.
+static float g_vmAimR=0.05f, g_vmAimD=0.04f;   // barrel tilt right/down (VMAIM="r d" dev override)
 static Matrix VmPlace(const Weapon *w){
     float bobX=sinf(g_bob)*0.010f, bobY=-fabsf(cosf(g_bob))*0.008f;
     // recoil: muzzle kicks UP (pitch) and the gun shoves back, then settles.
@@ -1707,8 +2250,10 @@ static Matrix VmPlace(const Weapon *w){
                 cp.y+g_vmOff.y+bobY + g_vmSway.y*0.0022f + r*0.010f - ease*0.30f,
                 cp.z+g_vmOff.z + r*0.045f };
     // aim the barrel at the crosshair convergence point
+    // (aimed a touch right of and below it: a low-right gun aimed dead parallel still reads as
+    // pointing up-left in perspective -- VM_AIM_R/VM_AIM_D are that tilt in view units per unit ahead)
     float conv=kVmClass[w->vmClass].conv;
-    Vector3 fwd=Vector3Normalize((Vector3){-P.x,-P.y,-conv-P.z});
+    Vector3 fwd=Vector3Normalize((Vector3){-P.x+conv*g_vmAimR,-P.y-conv*g_vmAimD,-conv-P.z});
     Vector3 rt=Vector3Normalize(Vector3CrossProduct(fwd,(Vector3){0,1,0}));
     Vector3 upv=Vector3CrossProduct(rt,fwd);
     Matrix aim={ rt.x, upv.x, -fwd.x, 0,
@@ -1749,7 +2294,8 @@ static void GrenadeExplode(Vector3 p){
         if (g_enemies[i].state!=1) continue;
         Vector3 c=(Vector3){g_enemies[i].pos.x, g_enemies[i].pos.y+ENEMY_HEIGHT*0.5f, g_enemies[i].pos.z};
         float d=Vector3Distance(p,c);
-        if (d<=GREN_RADIUS) HurtEnemy(i, GREN_DMG*(1.0f-d/GREN_RADIUS), 0, (Vector3){0,1,0}, c, 1);
+        if (d<=GREN_RADIUS){ g_hurtCause=HC_BLAST; g_hurtFrom=p;
+            HurtEnemy(i, GREN_DMG*(1.0f-d/GREN_RADIUS), 0, (Vector3){0,1,0}, c, 1); g_hurtCause=HC_BULLET; }
     }
     for (int q=0;q<26;q++) SpawnSmoke(p,1);                 // fireball: smoke...
     for (int q=0;q<34;q++) SpawnFlame(p,(Vector3){GetRandomValue(-100,100)/100.0f, GetRandomValue(-30,100)/100.0f, GetRandomValue(-100,100)/100.0f}); // ...radial flame
@@ -1809,6 +2355,7 @@ static void Fire(Camera3D cam) {
     int pellets=(cw->pellets>1)?cw->pellets:1, hits=0, headAny=0;
     Vector3 lastEnd=Vector3Add(cam.position,Vector3Scale(aim,80.0f));
     g_shotsFired+=pellets;
+    static float shotDmg[MAX_ENEMIES]; memset(shotDmg,0,sizeof shotDmg);   // this trigger pull's damage per enemy
     for (int p=0;p<pellets;p++){
         Vector3 dir=SpreadDir(aim, cw->spread);
         // World stop: on a map, the brushes; otherwise the legacy arena planes/
@@ -1827,6 +2374,7 @@ static void Fire(Camera3D cam) {
         int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep,&head);
         if (ei>=0){
             end=ep; hits++; g_shotsHit++; if (head) headAny=1;
+            shotDmg[ei]+=head ? dmg*HEADSHOT_MULT : dmg;
             HurtEnemy(ei, head ? dmg*HEADSHOT_MULT : dmg, head, dir, ep, 1);
         } else if (worldHit){
             SpawnImpact(hit,nrm);
@@ -1834,6 +2382,9 @@ static void Fire(Camera3D cam) {
         lastEnd=end;
         for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){muzzle,end,0.05f}; break; }
     }
+    if (pellets>1) for (int i=0;i<MAX_ENEMIES;i++)                     // a point-blank shotgun blast flattens him
+        if (shotDmg[i]>=KNOCK_SHOT_DMG && g_enemies[i].state==1 && Vector3Distance(g_enemies[i].pos,cam.position)<=KNOCK_SHOT_DIST)
+            EnemyKnock(i, Vector3Scale((Vector3){aim.x,0,aim.z}, 2.5f));
     // Code-driven recoil instead of the Shoot clip (that clip repositions the
     // gun out of the viewmodel frame -> "gun goes away"). Kick rises to 1, decays.
     g_recoil=1.0f;
@@ -1935,6 +2486,7 @@ static void EnemyHitscan(Enemy *e, float d){
     if (g_hasMap && g_mapCol.ready){ float w=MapRayNearest(m,dir,L); if (w>0.0f && w<L){ L=w; if (hit && w<Vector3Distance(tgt,m)-0.3f) hit=0; } }
     Vector3 end=Vector3Add(m,Vector3Scale(dir,L));
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){m,end,0.06f}; break; }
+    SpawnMuzzleFlash(m, dir);
     if (hit && !g_godMode) g_playerHp-=kEnemy[e->type].shotDmg;
     EnemySfx(g_eShotSnd,g_hasEShot,d);
     DebugLog("eshot","\"type\":\"%s\",\"d\":%.1f,\"hit\":%d", kEnemy[e->type].name, d, hit);
@@ -1965,7 +2517,10 @@ static Vector3 RigBoneWorld(int type, int clip, float frame, const char *bone, V
 // usual origin if a wall stands between his eyes and his hand.
 static Vector3 EnemyBoltOrigin(const Enemy *e){
     float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
-    Vector3 h=RigBoneWorld(e->type, e->clip, e->animT, "RightFingerBase", (Vector3){e->pos.x,e->drawY,e->pos.z}, yaw);
+    Vector3 h; const EnemyRig *brg=RigOf(e->type);
+    if (e->poseOK && brg->bHandR>=0)                         // the hand as posed (he may be turned / twisted)
+        h=Vector3Add((Vector3){e->pos.x,e->drawY,e->pos.z}, Vector3RotateByAxisAngle(Vector3Scale(e->pose[brg->bHandR].translation,ENEMY_SCALE*kEnemy[e->type].scale),(Vector3){0,1,0},e->yaw*DEG2RAD));
+    else h=RigBoneWorld(e->type, e->clip, e->animT, "RightFingerBase", (Vector3){e->pos.x,e->drawY,e->pos.z}, yaw);
     if (g_hasMap && g_mapCol.ready){ Vector3 eye=EnemyEye(e), d=Vector3Subtract(h,eye); float L=Vector3Length(d);
         if (L>1e-3f){ float w=MapRayNearest(eye,Vector3Scale(d,1.0f/L),L); if (w>0.0f && w<L) return EnemyShotOrigin(e); } }
     return h;
@@ -2059,6 +2614,16 @@ static void UpdateEnemies(float dt){
             float d=sqrtf(dx*dx+dz*dz);
             if (e->hitT>0) e->hitT-=dt;
             if (e->roarT>0) e->roarT-=dt;
+            if (e->knockT>0) e->knockT-=dt;
+            if (e->limpT>0) e->limpT-=dt;
+            if (e->atkRest>0) e->atkRest-=dt;
+            if (e->stagT>0) e->stagT-=dt;
+            if (e->hitAccT>0) e->hitAccT-=dt;
+            if (d<1e-3f) d=1e-3f;
+            if (e->pushV.x!=0 || e->pushV.z!=0){                       // shoved (knockdown): slide, walls stop it
+                EnemyNudge(i, e->pushV.x*dt, e->pushV.z*dt);
+                float k=expf(-4.0f*dt); e->pushV.x*=k; e->pushV.z*=k;
+                if (fabsf(e->pushV.x)+fabsf(e->pushV.z)<0.05f) e->pushV=(Vector3){0,0,0}; }
             // "Running in place" = it's trying to chase but the wall won't let it move at
             // all (an unreachable spot). stuckT accrues only while it tries-but-can't-move
             // (updated in the chase block below); a NAVIGATING enemy moves every frame even
@@ -2078,70 +2643,192 @@ static void UpdateEnemies(float dt){
                     SpawnEnemyT(i,ty,0); g_enemies[i].hp=keepHp; continue;
                 }
             } else e->embedT = 0.0f;
-            // ENGAGE: melee kinds in swing range; ranged kinds in range WITH line of sight
-            // (they stop and shoot); the priest engages while raising a corpse.
+            // ---- What he wants: a direction and pace (wish, wspd), whether his front stays on the player
+            // (focus) and whether the attack clip is up (wantAtk). Melee kinds close in, swing, then step
+            // off for a moment; shooters stop to aim, fire once they are steady, then shift position.
             int kind=kEnemy[e->type].kind;
             if (e->fireT>0) e->fireT-=dt;
-            // hysteresis: already swinging -> keep swinging until clearly out of reach (the
-            // strike itself lands out to reach*1.15), so the range edge doesn't flip clips
-            int engage = (d<=ENEMY_REACH(e->type)*(e->clip==g_eAttack ? 1.15f : 1.0f));
-            if ((kind==AK_HITSCAN || kind==AK_BOLT) && e->hitT<=0 && d<=kEnemy[e->type].range && d>ENEMY_ATTACK_RANGE)
-                engage = EnemySeesPlayer(e,dt);
-            int casting = (kind==AK_RAISE && e->hitT<=0 && PriestRaise(i,dt));
-            if (casting) engage=1;
-            if (engage && e->hitT<=0 && (kind==AK_HITSCAN || kind==AK_BOLT) && d>ENEMY_ATTACK_RANGE){
-                if (e->burstLeft>0){ if (e->fireT<=0){ EnemyHitscan(e,d); e->burstLeft--; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; } }
-                else if (e->fireT<=0){
-                    if (kind==AK_BOLT){ /* released by the throw clip at BOLT_RELEASE_FRAC (anim advance) */ }
-                    else { EnemyHitscan(e,d); e->burstLeft=kEnemy[e->type].burst-1; e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate; }
+            int ranged=(kind==AK_HITSCAN || kind==AK_BOLT);
+            float reach=ENEMY_REACH(e->type), rng=kEnemy[e->type].range;
+            Vector3 toP={dx/d,0,dz/d};
+            float pyaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
+            int sees=(ranged ? d<=rng*1.3f : d<=FLANK_DIST) ? EnemySeesPlayer(e,dt) : 0;
+            int casting=(kind==AK_RAISE && e->hitT<=0 && PriestRaise(i,dt));
+            int down=(e->knockT>0), hurt=(e->hitT>0), stag=(e->stagT>0);
+            if (hurt) e->swing=0;                              // a flinch cuts a swing / a throw short
+            float top=(e->limpT>0) ? fminf(e->spd,LIMP_SPEED) : e->spd;
+            Vector3 wish={0,0,0}, navDir={0,0,0}; float wspd=0; int focus=0, wantAtk=0, chase=0, nav=0;
+            if (down || stag || casting){ focus=casting; }
+            else if (ranged){
+                Vector3 tn={toP.z*e->side,0,-toP.x*e->side};   // across his line to the player
+                if (e->mode==EM_ADVANCE && d<=rng && sees && !hurt){ e->mode=EM_AIM; e->aimT=0; e->lostT=0; e->shots=1; }
+                if (e->mode==EM_AIM){
+                    focus=1;
+                    int busy=(e->swing || e->burstLeft>0);
+                    if (sees) e->lostT=0; else e->lostT+=dt;
+                    if (hurt) e->aimT=0;                           // a hit spoils his aim
+                    if (!busy && (e->lostT>LOST_TIME || d>rng*1.1f)) e->mode=EM_ADVANCE;
+                    else if (!busy && !hurt && e->shots>0 && d<rng*BACKOFF_FRAC){            // too close: give ground
+                        e->mode=EM_MOVE; e->modeT=0.9f+GetRandomValue(0,50)/100.0f; e->shots=0;
+                        DebugLog("emode","\"i\":%d,\"to\":\"backoff\",\"d\":%.1f",i,d); }
+                    else if (kind==AK_HITSCAN){
+                        wantAtk=1;
+                        if (!hurt && e->clip==g_eAttack && e->blendT<=0 && sees && fabsf(AngDiff(pyaw,e->yaw))<14.0f && Vector3Length(e->mv)<0.7f) e->aimT+=dt;
+                        if (!hurt && e->aimT>=AIM_SETTLE && e->fireT<=0){
+                            int first=(e->burstLeft<=0);
+                            EnemyHitscan(e,d);
+                            if (first) e->burstLeft=kEnemy[e->type].burst-1; else e->burstLeft--;
+                            e->fireT=(e->burstLeft>0)?0.11f:kEnemy[e->type].rate;
+                            if (e->burstLeft<=0){ e->shots++;
+                                if (GetRandomValue(0,99)<RELOCATE_PCT){                      // fired: shift before the next one
+                                    e->mode=EM_MOVE; e->modeT=0.8f+GetRandomValue(0,80)/100.0f; e->side=-e->side; e->shots=0;
+                                    DebugLog("emode","\"i\":%d,\"to\":\"shift\",\"d\":%.1f",i,d); } }
+                        }
+                    } else if (e->swing || (!hurt && sees && e->fireT<=BoltReleaseSec(e))) wantAtk=1;   // the throw: wound up only when one is ready
+                }
+                if (e->mode==EM_MOVE){
+                    focus=1; e->modeT-=dt;
+                    float rad=(d<rng*BACKOFF_FRAC*1.4f) ? -0.9f : (d>rng*0.6f ? 0.6f : -0.45f);
+                    wish=Vector3Normalize((Vector3){tn.x*0.8f+toP.x*rad,0,tn.z*0.8f+toP.z*rad}); wspd=top*0.8f;
+                    if (kind==AK_HITSCAN) wantAtk=1;               // the gun stays up while he shifts
+                    if (e->stuckT>0.25f){ e->side=-e->side; e->stuckT=0; e->modeT-=0.35f; }   // walled in that way: the other
+                    if (e->modeT<=0){ e->mode=sees?EM_AIM:EM_ADVANCE; e->aimT=0; e->lostT=0; }
+                }
+                if (e->mode==EM_ADVANCE) chase=1;
+            } else {
+                int nfA=ANIM_FRAMES(*RigClip(e->type,g_eAttack));
+                Vector3 tn={toP.z*e->side,0,-toP.x*e->side};
+                if (e->swing){                                     // mid-swing: still driving in until the blow lands, then planted
+                    wantAtk=1; focus=1;
+                    float strike=nfA*(EnemyDualWield(e->type)?DUAL_STRIKE_A:ATK_STRIKE_FRAC);
+                    if (e->animT<strike){ wish=toP; wspd=top*Clamp((d-reach*0.68f)/0.7f,0.0f,1.0f); }
+                } else if (e->atkRest>0 && d<reach+1.2f && !hurt){   // just swung: a step off to the side before the next
+                    focus=1;
+                    float rad=(d<reach*0.95f) ? -0.8f : (d>reach*1.3f ? 0.5f : -0.45f);
+                    wish=Vector3Normalize((Vector3){tn.x*0.6f+toP.x*rad,0,tn.z*0.6f+toP.z*rad}); wspd=fminf(top,1.5f);
+                } else {
+                    float lunge=fminf(LUNGE_MAX, Vector3Length(e->mv)*0.28f);   // a runner starts his swing from further out
+                    if (d<=reach+lunge && !hurt) wantAtk=1; else chase=1;
                 }
             }
-            // a melee swing, once started, plays out (the player backing off mid-swing used
-            // to snap it to the run clip and back every few frames); the strike still
-            // checks range, so stepping back is still a dodge. A flinch interrupts it.
-            if (e->hitT>0) e->swing=0;
-            if (e->swing && !casting) engage=1;
-            // clip priority: flinch > attack (engaged) > idle-when-stuck > run (chasing)
-            int want = (e->hitT>0) ? g_eHit : (casting ? CL_CAST : (engage ? g_eAttack : (stuck ? g_eIdle : g_eRun)));
-            // bolt throwers only wind up when the throw will be ready by the release frame;
-            // until then they stand (idle) rather than mime a throw with nothing in it
-            if (want==g_eAttack && kind==AK_BOLT && d>ENEMY_ATTACK_RANGE && e->clip!=g_eAttack && e->fireT>BoltReleaseSec(e)) want=g_eIdle;
-            if (want!=e->clip){
-                if (want==g_eAttack && e->roarT<=0 && g_audio && g_hasAttackSnd){   // lunging into an attack -> roar
-                    PlaySound(g_attackSnd); e->roarT=2.5f;                          // cooldown so it doesn't spam at the range edge
+            if (chase && !stuck){                              // close in along the nav flow field (else a beeline)...
+                Vector3 sd, fl=toP;
+                if (g_hasMap && MapNavSteer(e->pos,&sd)){ fl=(Vector3){sd.x,0,sd.z}; nav=1; navDir=fl; }
+                Vector3 w=fl;
+                if (sees && d<FLANK_DIST && d>reach+0.6f){     // ...coming at him from this one's own side, not in a file
+                    float k=e->flank*FLANK_GAIN*Clamp((d-(reach+0.6f))/4.0f,0.0f,1.0f);
+                    w.x+=toP.z*k; w.z-=toP.x*k; }
+                for (int j=0;j<MAX_ENEMIES;j++){               // ...and giving the others room
+                    if (j==i || g_enemies[j].state!=1 || fabsf(g_enemies[j].pos.y-e->pos.y)>1.5f) continue;
+                    float ox=e->pos.x-g_enemies[j].pos.x, oz=e->pos.z-g_enemies[j].pos.z, od=sqrtf(ox*ox+oz*oz);
+                    if (od<SEP_DIST && od>1e-3f){ float k=(1.0f-od/SEP_DIST)*SEP_GAIN/od; w.x+=ox*k; w.z+=oz*k; }
                 }
-                e->prevClip=e->clip; e->prevT=e->animT; e->blendT=ENEMY_BLEND;   // crossfade, never snap
-                DebugLog("clipsw","\"i\":%d,\"from\":%d,\"to\":%d,\"atT\":%.1f,\"d\":%.2f",i,e->clip,want,e->animT,d);
-                e->clip=want; e->animT=0;
-                e->swing = (want==g_eAttack && (kind==AK_MELEE || kind==AK_RAISE || kind==AK_BOLT || d<=ENEMY_ATTACK_RANGE));
+                float wl=sqrtf(w.x*w.x+w.z*w.z);
+                wish=(wl>0.2f) ? (Vector3){w.x/wl,0,w.z/wl} : fl;
+                wspd=top;
+                if (!ranged) wspd*=Clamp((d-reach*0.55f)/0.9f,0.0f,1.0f);
             }
-            if (e->blendT>0) e->blendT-=dt;
-            if (e->hitT<=0 && !engage && !stuck){            // chase: follow the nav flow field, else beeline
-                Vector3 sd; float mx=dx/d, mz=dz/d;
-                if (g_hasMap && MapNavSteer(e->pos,&sd)){ mx=sd.x; mz=sd.z; }
-                float step=e->spd*dt; Vector3 b4=e->pos;   // per-instance speed (type base + wave scaling)
+            if (hurt && !down && !stag) wspd*=HIT_SLOW;       // a light hit slows him; it doesn't root him
+            // ---- Momentum: his velocity chases the wish at a limited acceleration (hit shoves live in it too)
+            { Vector3 dd=Vector3Subtract(Vector3Scale(wish,wspd),e->vel); dd.y=0;
+              float vl0=Vector3Length(e->vel), acc=stag ? 5.0f : (wspd>vl0 ? ENEMY_ACCEL : ENEMY_BRAKE);
+              float dl=Vector3Length(dd), mxs=acc*dt; if (dl>mxs) dd=Vector3Scale(dd,mxs/dl);
+              e->vel=Vector3Add(e->vel,dd); e->vel.y=0;
+              if (down) e->vel=(Vector3){0,0,0}; }
+            { float vl=Vector3Length(e->vel);
+              if (vl>0.02f){
+                Vector3 b4=e->pos; float step=vl*dt, mx=e->vel.x/vl, mz=e->vel.z/vl;
                 EnemyNudge(i, mx*step, mz*step);
-                // wedged (the steer heads into a wall and per-axis collision blocks BOTH
-                // axes)? sweep the heading outward to either side -- nearest angle first --
-                // until one frees up, so the enemy slides out of corners instead of running
-                // in place. Goes out to ±150° to escape concave pockets.
-                if (g_hasMap && fabsf(e->pos.x-b4.x)<1e-5f && fabsf(e->pos.z-b4.z)<1e-5f){
-                    const float ANG[10]={0.524f,-0.524f, 1.047f,-1.047f, 1.571f,-1.571f, 2.094f,-2.094f, 2.618f,-2.618f}; // ±30,60,90,120,150
+                #define STILL() (fabsf(e->pos.x-b4.x)<1e-5f && fabsf(e->pos.z-b4.z)<1e-5f)
+                if (STILL() && nav) EnemyNudge(i, navDir.x*step, navDir.z*step);   // his own line is walled off: take the route's
+                // wedged (the heading runs into a wall and per-axis collision blocks BOTH axes)? sweep the
+                // heading outward to either side -- nearest angle first -- until one frees up, so he slides
+                // out of corners instead of running in place. Goes out to +-150 deg to escape concave pockets.
+                if (g_hasMap && wspd>0.1f && STILL()){
+                    const float ANG[10]={0.524f,-0.524f, 1.047f,-1.047f, 1.571f,-1.571f, 2.094f,-2.094f, 2.618f,-2.618f};
                     for (int k=0;k<10;k++){
-                        float c=cosf(ANG[k]), s=sinf(ANG[k]);
-                        EnemyNudge(i, (mx*c-mz*s)*step, (mx*s+mz*c)*step);
-                        if (fabsf(e->pos.x-b4.x)>1e-5f || fabsf(e->pos.z-b4.z)>1e-5f) break;
+                        float c=cosf(ANG[k]), sn=sinf(ANG[k]);
+                        EnemyNudge(i, (mx*c-mz*sn)*step, (mx*sn+mz*c)*step);
+                        if (!STILL()) break;
                     }
                 }
-                // tried to chase this frame: if it barely moved, it's grinding a wall; if it
-                // moved at all (even sliding/curving), it's making its way -> not stuck.
-                float mv=(e->pos.x-b4.x)*(e->pos.x-b4.x)+(e->pos.z-b4.z)*(e->pos.z-b4.z);
-                // threshold = a quarter of this frame's intended step: frame-rate and speed
-                // independent (a fixed 0.02/frame flagged slow enemies sliding along walls at
-                // high fps as "stuck" -- they then idled forever while the player stood still)
-                if (mv < 0.0625f*step*step) e->stuckT += dt; else e->stuckT = 0.0f;
+                if (STILL()) e->vel=Vector3Scale(e->vel,0.5f);             // flat against something: no speed stored up
+                #undef STILL
+                // tried to move this frame: if he barely did, he's grinding a wall; if he moved at all (even
+                // sliding/curving), he's making his way -> not stuck. Threshold = a quarter of the intended
+                // step: frame-rate and speed independent.
+                float m2=(e->pos.x-b4.x)*(e->pos.x-b4.x)+(e->pos.z-b4.z)*(e->pos.z-b4.z);
+                if (wspd>0.3f){ if (m2 < 0.0625f*step*step) e->stuckT += dt; else e->stuckT = 0.0f; }
+              } }
+            // what he actually covered (after walls, shoves and last frame's crowding) drives legs and facing
+            if (dt>1e-5f){ Vector3 m={(e->pos.x-e->lastPos.x)/dt,0,(e->pos.z-e->lastPos.z)/dt};
+                float ml=Vector3Length(m); if (ml>12.0f) m=Vector3Scale(m,12.0f/ml);
+                e->mv=Vector3Add(e->mv,Vector3Scale(Vector3Subtract(m,e->mv),1.0f-expf(-12.0f*dt))); e->lastPos=e->pos; }
+            float sp=Vector3Length(e->mv);
+            // ---- Facing: he turns at a rate, into the way he's going (backing up when he keeps his front to
+            // the player); standing, he turns to the player. Chest and head make up the difference.
+            { float tgt=e->yaw, rate=(e->type==EN_HEADCHEF)?220.0f:(e->type==EN_BUTCHER)?240.0f:(e->type==EN_FIEND)?300.0f:460.0f;
+              if (down || stag) rate=0;
+              else if (sp>0.45f && wspd>0.1f){
+                  float myaw=atan2f(e->mv.x,e->mv.z)*RAD2DEG + ENEMY_YAW_OFFSET;
+                  if (focus){ float rel=fabsf(AngDiff(myaw,pyaw)); if (e->back ? rel<70.0f : rel>110.0f) e->back=!e->back; }
+                  else e->back=0;
+                  tgt=e->back ? myaw+180.0f : myaw;
+              } else if (focus || sees || d<6.0f){ tgt=pyaw; rate*=1.25f; }
+              float dy=AngDiff(tgt,e->yaw), st=Clamp(dy*10.0f*dt,-rate*dt,rate*dt);
+              if (fabsf(st)>fabsf(dy)) st=dy;
+              e->yaw+=st; if (e->yaw>180.0f) e->yaw-=360.0f; if (e->yaw<-180.0f) e->yaw+=360.0f;
+              if (dt>1e-5f) e->yawRate+=(st/dt-e->yawRate)*(1.0f-expf(-10.0f*dt));
+              float off=AngDiff(pyaw,e->yaw), tt=0, ht=0;
+              if (!down && (focus || (sees && d<16.0f)) && fabsf(off)<150.0f){
+                  tt=Clamp(off,-TWIST_MAX,TWIST_MAX)*(focus?1.0f:0.5f);
+                  ht=Clamp(off-tt,-HEAD_MAX,HEAD_MAX); }
+              float k=1.0f-expf(-9.0f*dt); e->twist+=(tt-e->twist)*k; e->headTw+=(ht-e->headTw)*k;
+              Vector3 fw={sinf((e->yaw-ENEMY_YAW_OFFSET)*DEG2RAD),0,cosf((e->yaw-ENEMY_YAW_OFFSET)*DEG2RAD)};
+              float fwdSp=Vector3DotProduct(e->mv,fw);
+              float ln=Clamp(-0.0032f*e->yawRate*sp,-8.0f,8.0f);                      // into the turn
+              float pt=Clamp(Vector3DotProduct(Vector3Subtract(Vector3Scale(wish,wspd),e->mv),fw)*0.9f,-5.0f,6.0f) + (stag?-5.0f:0.0f);   // into a start, back on a stop / a stagger
+              float kl=1.0f-expf(-6.0f*dt); e->lean+=(ln-e->lean)*kl; e->pitch+=(pt-e->pitch)*kl;
+              // ---- Legs: the gait for the pace he's really making, stepping in time with the ground
+              EnemyRig *lr=RigOf(e->type); float sc=kEnemy[e->type].scale;
+              int rev=(fwdSp<-0.15f), lw;
+              if (sp<(e->loco==CL_IDLE?0.35f:0.2f)) lw=CL_IDLE;
+              else if (e->limpT>0) lw=CL_LIMP;
+              else {                                             // the gait that walks nearest this pace (sticky, so it doesn't flap)
+                  int top=(rev && lr->gaitN>2) ? 2 : lr->gaitN; float best=1e9f; lw=CL_WALK;   // backing up: a walk run backward, never a sprint
+                  for (int g=0; g<top; g++){ int r=lr->gait[g]; float m=lr->mps[r]*sc; if (m<0.1f) continue;
+                      float d=fabsf(logf(sp/m)); if (r==e->loco) d-=0.14f;
+                      if (d<best){ best=d; lw=r; } } }
+              if (lw!=e->loco && lr->animN>0){
+                  int nfO=ANIM_FRAMES(*RigClip(e->type,e->loco)), nfN=ANIM_FRAMES(*RigClip(e->type,lw));
+                  e->locoPrev=e->loco; e->locoPrevT=e->locoT; e->locoBlend=LOCO_BLEND;
+                  e->locoT=(e->loco!=CL_IDLE && lw!=CL_IDLE && nfO>0) ? e->locoT/nfO*nfN : 0.0f;   // keep the stride's phase
+                  e->loco=lw; }
+              if (e->locoBlend>0) e->locoBlend-=dt;
+              float lrate=30.0f;
+              if (e->loco!=CL_IDLE){ float m=lr->mps[e->loco]*sc; if (m<0.1f) m=(e->loco==CL_LIMP)?LIMP_CLIP_MPS:1.3f;
+                  lrate=30.0f*Clamp(sp/m,0.5f,(e->loco==CL_LIMP)?2.2f:1.7f); if (rev) lrate=-lrate; }
+              if (lr->animN>0){ int nfL=ANIM_FRAMES(*RigClip(e->type,e->loco)); e->locoT+=lrate*dt;
+                  if (nfL>0){ while (e->locoT>=nfL) e->locoT-=nfL; while (e->locoT<0) e->locoT+=nfL; } }
+              float lt=Clamp((sp-0.3f)/0.8f,0.0f,1.0f);                                // moving: legs walk; standing: the action clip's own stance
+              if (down) e->legW=0; else e->legW+=(lt-e->legW)*(1.0f-expf(-9.0f*dt));
             }
-            if (g_hasMap && stuck && e->hitT<=0 && !engage){
+            // ---- The action clip. Priority: knockdown > flinch > cast > attack > none (g_eRun = just locomotion)
+            int want = down ? CL_KNOCK : hurt ? (e->hitRole>=CL_HIT_HEAD ? e->hitRole : g_eHit) : casting ? CL_CAST : wantAtk ? g_eAttack : g_eRun;
+            if (want!=e->clip || (e->rehit && hurt && !down && e->clip!=CL_KNOCK && e->animT>5.0f)){
+                if (want==g_eAttack && e->clip!=g_eAttack && e->roarT<=0 && g_audio && g_hasAttackSnd){   // lunging into an attack -> roar
+                    PlaySound(g_attackSnd); e->roarT=2.5f;                          // cooldown so it doesn't spam at the range edge
+                }
+                EnemyPoseSnap(e, want==CL_KNOCK || e->clip==CL_KNOCK);            // ease in from the pose he's in, never snap
+                e->prevClip=e->clip; e->prevT=e->animT;
+                DebugLog("clipsw","\"i\":%d,\"from\":%d,\"to\":%d,\"atT\":%.1f,\"d\":%.2f",i,e->clip,want,e->animT,d);
+                e->clip=want; e->animT=0;
+                e->swing = (want==g_eAttack && kind!=AK_HITSCAN);
+                if (want==g_eAttack) e->atkRate=0.88f+GetRandomValue(0,24)/100.0f;   // no two swings quite the same pace
+            }
+            e->rehit=0;
+            if (e->blendT>0) e->blendT-=dt;
+            if (g_hasMap && stuck && e->hitT<=0 && !wantAtk){
                 // stuck against a wall and idling -> ease back so the animated HANDS stop
                 // poking through it. Drift toward whichever directions clear a hands-radius
                 // sphere; settles once the body+arms no longer overlap the wall.
@@ -2178,49 +2865,64 @@ static void UpdateEnemies(float dt){
             if (g_meleeDrain){                                 // legacy A/B: untimed contact drain
                 if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
             } else if (e->atkCd>0) e->atkCd-=dt;
-            if (RigOf(e->type)->animN>0){                      // advance current clip (looping)
+            if (RigOf(e->type)->animN>0){                      // advance the action clip
                 int nf=ANIM_FRAMES(*RigClip(e->type,e->clip));
-                int k2=kEnemy[e->type].kind;
-                float spd=(e->clip==g_eAttack && (k2==AK_MELEE || k2==AK_RAISE))?90.0f:((e->clip==g_eAttack && k2==AK_BOLT)?BOLT_THROW_FPS:30.0f);    // melee swings play fast; throws in real time; aims/casts at pace
+                float spd=(e->clip==g_eAttack && !ranged) ? 90.0f*e->atkRate : ((e->clip==g_eAttack && kind==AK_BOLT) ? BOLT_THROW_FPS : 30.0f);    // melee swings and throws are baked for these rates; aims/casts/flinches at 30
+                if (e->clip==CL_KNOCK) spd=60.0f;                                  // baked on the 60 fps timeline: real time
                 float prevT=e->animT;
                 e->animT+=dt*spd;
                 // Timed melee (default): the swing damages ONCE, when the attack clip
                 // crosses its strike frame -- so the windup is dodgeable (step out of
                 // range before it lands) and a real cooldown separates hits, instead
                 // of the old unreadable touch-drain.
-                if (!g_meleeDrain && e->clip==g_eAttack && nf>0 && e->atkCd<=0 && e->hitT<=0){
+                if (!g_meleeDrain && !ranged && e->clip==g_eAttack && nf>0 && e->atkCd<=0 && e->hitT<=0){
                     // dual wielders (cook, butcher, head chef) land each blade separately
                     int dual=EnemyDualWield(e->type), ns=dual?2:1;
                     const float fr[2]={ dual?DUAL_STRIKE_A:ATK_STRIKE_FRAC, DUAL_STRIKE_B };
                     for (int k=0;k<ns && e->atkCd<=0;k++){ float strike=nf*fr[k];
-                        if (prevT<strike && e->animT>=strike && d<=ENEMY_REACH(e->type)*1.15f && !g_godMode && (kEnemy[e->type].kind==AK_MELEE || d<=ENEMY_ATTACK_RANGE)){
+                        if (prevT<strike && e->animT>=strike && d<=reach*1.15f && !g_godMode){
                             g_playerHp-=kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f);   // per-type swing damage
                             DebugLog("melee","\"type\":\"%s\",\"blade\":%d,\"dmg\":%.1f,\"hp\":%.0f",kEnemy[e->type].name,k,kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f),g_playerHp);
                             e->atkCd = dual ? 0.25f : ATK_COOLDOWN;
                         }
                     }
                 }
-                if (k2==AK_BOLT && e->clip==g_eAttack && e->hitT<=0 && d>ENEMY_ATTACK_RANGE){   // the bolt leaves the hand at release
+                if (kind==AK_BOLT && e->clip==g_eAttack && e->hitT<=0){   // the bolt leaves the hand at release
                     float rel=nf*BOLT_RELEASE_FRAC;
                     if (prevT<rel && e->animT>=rel && e->fireT<=0){ EnemyBolt(e,d); e->fireT=kEnemy[e->type].rate; }
                 }
-                if (nf>0 && e->animT>=nf){ e->animT-=nf; e->swing=0; }   // swing finished -> free to chase again
+                if (nf>0 && e->animT>=nf){
+                    if (e->clip==CL_KNOCK || e->clip==g_eHit || (e->clip>=CL_HIT_HEAD && e->clip<=CL_HIT_LEG)) e->animT=(float)nf-1.0f;   // held on the last frame until he recovers
+                    else { e->animT-=nf;
+                        if (e->swing){ e->swing=0;                             // the swing / throw is done
+                            if (ranged){ e->mode=EM_MOVE; e->modeT=0.7f+GetRandomValue(0,70)/100.0f; e->shots=0; if (GetRandomValue(0,1)) e->side=-e->side; }   // thrown: shift
+                            else { e->atkRest=0.25f+GetRandomValue(0,35)/100.0f; if (!GetRandomValue(0,2)) e->side=-e->side; } } }
+                }
             }
+            EnemyPoseBuild(e);
         } else if (e->state==2){                              // dying: play the death anim to its settle frame, then leave a corpse
             if (e->blendT>0) e->blendT-=dt;
-            int nf = (RigOf(e->type)->animN>0) ? RigOf(e->type)->deathFrame : 0;   // stop at the "on the floor" frame, not the spring-back last frame
+            { float dy=AngDiff(e->deathYaw,e->yaw), st=Clamp(dy*8.0f*dt,-540.0f*dt,540.0f*dt);   // turned by the shot as he goes down
+              if (fabsf(st)>fabsf(dy)) st=dy; e->yaw+=st; e->vel=(Vector3){0,0,0}; }
+            int nf = (RigOf(e->type)->animN>0) ? RigOf(e->type)->settle[e->deathRole?e->deathRole:CL_DEATH] : 0;   // stop at the "on the floor" frame, not the spring-back last frame
+            if (e->pushV.x!=0 || e->pushV.z!=0){                       // thrown by a blast: the body slides on
+                EnemyNudge(i, e->pushV.x*dt, e->pushV.z*dt);
+                float k=expf(-2.5f*dt); e->pushV.x*=k; e->pushV.z*=k; }
             if (nf>0){ e->animT+=dt*60.0f; if (e->animT>(float)nf) e->animT=(float)nf; }
             e->deathT+=dt;
             // wait until the death anim has actually settled (body on the floor),
             // not a fixed timer -- otherwise the corpse is recorded mid-fall.
             if ((nf<=0 || e->animT>=(float)nf) && e->deathT>0.2f){
-                float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
+                float yaw=e->poseOK ? e->yaw : e->deathYaw;                      // the way he fell
                 Corpse *cp=&g_corpses[g_corpseNext]; *cp=(Corpse){0};            // lasting body, posed at the final death frame
+                cp->role=e->deathRole?e->deathRole:CL_DEATH;
+                cp->wN=e->wN; for (int k=0;k<e->wN;k++){ cp->wBone[k]=e->wBone[k]; cp->wOff[k]=e->wOff[k]; cp->wSz[k]=e->wSz[k]; }
                 cp->pos=e->pos; cp->yaw=yaw; cp->active=1; cp->type=e->type; cp->burnN=e->burnN;   // keep the soot marks it earned while alive
                 for (int k=0;k<e->burnN;k++){ cp->burnY[k]=e->burnY[k]; cp->burnR[k]=e->burnR[k]; }
                 g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
                 e->state=0;                                // slot freed -- the wave director owns ALL spawning (no 1:1 respawn)
             }
+            if (e->state==2) EnemyPoseBuild(e);
         }
     }
     for (int a=0;a<MAX_ENEMIES;a++){            // keep enemies from overlapping each other
@@ -2292,6 +2994,24 @@ static void FinishReload(void){
     int need=w->magSize-w->mag, take=(need<w->reserve)?need:w->reserve;
     w->mag+=take; w->reserve-=take;
     DebugLog("reload","\"slot\":%d,\"mag\":%d,\"reserve\":%d", g_curWeapon, w->mag, w->reserve);
+}
+// Shell-by-shell feed (remington): its one reload clip pushes a shell into the tube at
+// shellFirst + k*shellCycle. Each insert crossed this frame loads one round; once the tube is
+// full (or the reserve dry) the clip skips to the last insert's follow-through (the pose
+// after every insert matches), and a 5th+ shell replays one insert cycle. The trigger can
+// cut the reload short at any time (WeaponTrigger) -- what's in the tube is what you have.
+static void ShellFeed(Weapon *w, float pvT){
+    if (!g_reloading || w->shellCycle<=0 || w->magSize<=0 || g_curAnim!=g_aReload) return;
+    float last=w->shellFirst+(w->shellCount-1)*w->shellCycle;
+    for (int k=0;k<w->shellCount;k++){
+        float fk=w->shellFirst+k*w->shellCycle;
+        if (!(pvT<fk && g_animT>=fk)) continue;
+        if (w->mag<w->magSize && w->reserve>0){ w->mag++; w->reserve--; }
+        DebugLog("reload","\"slot\":%d,\"mag\":%d,\"reserve\":%d,\"shell\":1", g_curWeapon, w->mag, w->reserve);
+        if (w->mag>=w->magSize || w->reserve<=0){ if (fk<last) g_animT=last+(g_animT-fk); }   // full: on to the pump
+        else if (k==w->shellCount-1) g_animT=fk-w->shellCycle+(g_animT-fk);                   // more to load: one more cycle
+        break;
+    }
 }
 // R key / empty-mag entry point. The grenade launcher scrubs its reload slice of
 // 'allanims'; weapons without any reload clip (minigun belt, flamethrower tank)
@@ -2373,13 +3093,19 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     int firingNow=0;                                       // looped fire sound active this frame?
 
     { static int uf=0; if (g_reloadAt>0 && ++uf==g_reloadAt) StartReload(); }
+    // shell-fed reload + a round in the tube: the trigger stops loading and fires
+    if (g_reloading && cw->shellCycle>0 && cw->mag>0 && lmbP){
+        g_reloading=0; g_reloadStep=-1; g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f;
+        DebugLog("reloadcut","\"slot\":%d,\"mag\":%d", g_curWeapon, cw->mag); }
     if (IsKeyPressed(KEY_R)){
         TryReload();
     }
     else if (!g_reloading){
         if (cw->burst>0){                                  // rifle: one 3-round burst per trigger pull
             if (lmbP && g_burstLeft==0) g_burstLeft=cw->burst;
-            if (g_burstLeft>0){ firingNow=1; if (g_fireCd<=0.0f){ Fire(g_cam); g_burstLeft--; } }
+            // (a dry Fire starts the reload, which zeroes the burst: counting that pull down
+            // too left it at -1, and the gun never fired again until it was swapped out)
+            if (g_burstLeft>0){ firingNow=1; if (g_fireCd<=0.0f){ Fire(g_cam); if (g_burstLeft>0) g_burstLeft--; } }
         } else if (cw->grenade){                            // grenade launcher: lob one grenade per click
             if (lmbP && g_fireCd<=0.0f){
                 if (cw->magSize>0 && cw->mag<=0){ TryReload(); }
@@ -2441,7 +3167,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
                     int m=-1; for (int k=0;k<be->burnN;k++) if (fabsf(be->burnY[k]-ch)<0.30f){ m=k; break; }
                     if (m<0 && be->burnN<MAX_BURN){ m=be->burnN++; be->burnY[m]=ch; be->burnR[m]=0.08f; }
                     if (m>=0) be->burnR[m]=fminf(0.34f, be->burnR[m]+dt*0.7f);      // darkens/spreads with sustained flame
-                    HurtEnemy(i, FLAME_DPS*dt, 0, tn, cen, 0);                      // burning: no blood spurt
+                    g_hurtCause=HC_FLAME; HurtEnemy(i, FLAME_DPS*dt, 0, tn, cen, 0); g_hurtCause=HC_BULLET;   // burning: no blood spurt
                 }
                 // Scorch whatever the stream lands on (floor/wall/prop), throttled so marks
                 // build up steadily rather than every frame. The map ray reports the real
@@ -2480,7 +3206,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
         }
         if (bestE>=0){
             Vector3 cen=(Vector3){g_enemies[bestE].pos.x, g_enemies[bestE].pos.y+ENEMY_HEIGHT*0.6f, g_enemies[bestE].pos.z};
-            HurtEnemy(bestE, KNIFE_DMG, 0, fwd, cen, 1);
+            g_hurtCause=HC_MELEE; HurtEnemy(bestE, KNIFE_DMG, 0, fwd, cen, 1); g_hurtCause=HC_BULLET;
         }
     }
 
@@ -2585,7 +3311,9 @@ static void WeaponAnimate(float dt, int moving){
                 else g_animT = idf>0 ? (float)(idf-1) : 0.0f;                     // legacy rigs: freeze on the ready frame
             }
         } else {
+            float pvT=g_animT;
             g_animT += dt*30.0f;
+            ShellFeed(cw, pvT);
             // nf<=0 (empty/malformed clip) counts as instantly finished, so a
             // zero-frame reload phase can't wedge g_reloading=1 forever.
             if (nf<=0 || g_animT>=nf){
@@ -2607,7 +3335,7 @@ static void WeaponAnimate(float dt, int moving){
                                     g_curAnim=(g_reloadSeqN>0)?g_reloadSeq[0]:g_aReload;
                                     g_animT=0.0f; feeding=1;
                                 }
-                            } else FinishReload();       // a completed RELOAD refills (a finished Shot clip doesn't)
+                            } else if (rw->shellCycle<=0) FinishReload();   // a completed RELOAD refills (shell feeders already did)
                         }
                         if (!feeding){ g_reloadStep=-1; g_reloading=0; g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; }
                     }
@@ -2625,7 +3353,7 @@ static void EffectsUpdate(float dt){
         Spark *sp=&g_sparks[i];
         int resting=(sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0 && sp->pos.y<=sp->rest+0.03f);
         if (resting){
-            if (!sp->lasting) sp->life-=dt;        // glints + fine spray fade; lasting blood puddles stay put
+            sp->life-=dt;                          // glints + fine spray fade where they landed
         } else {
             sp->life-=dt;
             sp->vel.y-=12.0f*dt;
@@ -2634,7 +3362,7 @@ static void EffectsUpdate(float dt){
                 float hl=sqrtf(sp->vel.x*sp->vel.x+sp->vel.z*sp->vel.z);  // keep the horizontal heading for a directional splat
                 if (hl>0.001f){ sp->ix=sp->vel.x/hl; sp->iz=sp->vel.z/hl; }
                 sp->pos.y=sp->rest+0.015f; sp->vel=(Vector3){0,0,0};
-                if (sp->lasting){ sp->life=1e9f; sp->life0=1e9f; }   // lasting blood puddle (full opacity)
+                if (sp->lasting){ StainAddGob(sp); sp->life=0.0f; } // lasting spatter: baked into the stain mesh, particle freed
                 else if (sp->life<0.5f) sp->life=0.5f;             // brief impact glow
             }
         }
@@ -2959,58 +3687,48 @@ static void Update(void) {
 }
 
 // Tracers, sparks, blood (flying, spatter, pools), scorch and in-flight grenades. Inside BeginMode3D.
+// Particles are a few centimetres across, so each is a flat shape turned to the viewer: a
+// tapered streak for blood in flight, a hexagon for a droplet or a glint. (They were spheres and
+// cylinders of 70 to 290 vertices each, which swamped the draw batch in a firefight.)
 static void DrawEffects(void){
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life>0)
         DrawLine3D(g_tracers[i].a,g_tracers[i].b,(Color){255,240,150,255});
+    StainDraw();                                           // settled blood: one mesh, one call
+    Matrix view=rlGetMatrixModelview(), inv=MatrixInvert(view);     // the active 3D camera (game or gallery)
+    Vector3 eye={inv.m12,inv.m13,inv.m14}, right={view.m0,view.m4,view.m8}, up={view.m1,view.m5,view.m9};
+    DiscTable();
+    rlBegin(RL_TRIANGLES);
     for (int i=0;i<MAX_SPARKS;i++) if (g_sparks[i].life>0){
         Spark *sp=&g_sparks[i];
-        int settled=(sp->vel.x==0 && sp->vel.y==0 && sp->vel.z==0);
-        if (sp->pool){                                     // flat continuous pool stain: many small overlapping flat discs
-            float R=sp->size, y0=sp->rest+0.006f, y1=sp->rest+0.012f;  // filling a disc -> reads as one wet liquid pool
-            unsigned int s=sp->seed?sp->seed:1u;
-            for (int b=0;b<26;b++){
-                unsigned int h=s*2654435761u + (unsigned int)b*2654435789u; h^=h>>13; h*=0x9E3779B1u;
-                float t1=(float)((h>>3)&1023)/1023.0f, t2=(float)((h>>13)&1023)/1023.0f, t3=(float)((h>>23)&255)/255.0f;
-                float a=t1*6.2831853f, rr=sqrtf(t2)*R;      // sqrt -> evenly fill the disc area
-                float ox=cosf(a)*rr, oz=sinf(a)*rr;
-                float dr=R*(0.34f+0.16f*t3)*(1.0f-0.45f*(rr/R));   // solid centre, smaller discs toward the ragged edge
-                DrawCylinderEx((Vector3){sp->pos.x+ox,y0,sp->pos.z+oz},
-                               (Vector3){sp->pos.x+ox,y1,sp->pos.z+oz}, dr, dr, 10, sp->col);
+        float k=(sp->life0>0)?sp->life/sp->life0:1.0f; if (k>1.0f) k=1.0f;
+        Color c=sp->col; c.a=(unsigned char)(k*255.0f);
+        float r, spd=0.0f;
+        if (sp->blood){ spd=Vector3Length(sp->vel);
+            r=(sp->size>0.03f?0.03f:sp->size)*0.55f; }     // capped so even gobs stay droplet-sized, never grapefruits
+        else r=sp->size*(0.45f+0.55f*k)*0.6f;              // impact glint: tiny bright spark, shrinking as it fades
+        rlColor4ub(c.r,c.g,c.b,c.a);
+        if (sp->blood && spd>0.5f){                        // moving blood: a tapered teardrop pointing the way it flies
+            Vector3 d=Vector3Scale(sp->vel,1.0f/spd);
+            float len=sp->size*1.5f+spd*0.025f, rt=r*0.25f;
+            Vector3 tail=Vector3Subtract(sp->pos,Vector3Scale(d,len));
+            Vector3 sd=Vector3CrossProduct(d,Vector3Subtract(eye,sp->pos));
+            float sl=Vector3Length(sd); if (sl<1e-6f) continue;       // flying straight at the eye: nothing to see
+            sd=Vector3Scale(sd,1.0f/sl);
+            Vector3 A=Vector3Add(sp->pos,Vector3Scale(sd,r)), B=Vector3Subtract(sp->pos,Vector3Scale(sd,r));
+            Vector3 C=Vector3Subtract(tail,Vector3Scale(sd,rt)), D=Vector3Add(tail,Vector3Scale(sd,rt));
+            rlVertex3f(A.x,A.y,A.z); rlVertex3f(B.x,B.y,B.z); rlVertex3f(C.x,C.y,C.z);
+            rlVertex3f(A.x,A.y,A.z); rlVertex3f(C.x,C.y,C.z); rlVertex3f(D.x,D.y,D.z);
+        } else {                                           // droplet or glint: a hexagon facing the viewer
+            Vector3 p=sp->pos;
+            for (int q=0;q<6;q++){
+                float c0=g_discCos[6][q]*r, s0=g_discSin[6][q]*r, c1=g_discCos[6][q+1]*r, s1=g_discSin[6][q+1]*r;
+                rlVertex3f(p.x,p.y,p.z);
+                rlVertex3f(p.x+right.x*c0+up.x*s0, p.y+right.y*c0+up.y*s0, p.z+right.z*c0+up.z*s0);
+                rlVertex3f(p.x+right.x*c1+up.x*s1, p.y+right.y*c1+up.y*s1, p.z+right.z*c1+up.z*s1);
             }
-        } else if (sp->lasting && settled){                // settled gob -> a small lumpy spatter dot (a couple offset discs)
-            float ax=sp->ix, az=sp->iz; if (ax==0.0f && az==0.0f){ ax=1.0f; az=0.0f; }
-            float y0=sp->rest+0.011f, y1=sp->rest+0.018f;   // a thin slab lying on the floor, not a ball
-            unsigned int s=sp->seed?sp->seed:1u;
-            for (int b=0;b<2;b++){                          // offset discs break the circular outline
-                unsigned int h=s*2654435761u + (unsigned int)b*2246822519u;
-                float t1=(float)((h>>3)&255)/255.0f, t2=(float)((h>>11)&255)/255.0f, t3=(float)((h>>19)&255)/255.0f;
-                float along=(t1*1.4f-0.2f)*sp->size;        // mostly forward of impact (the spatter trails ahead)
-                float side =(t2-0.5f)*1.2f*sp->size;        // lateral scatter
-                float ox=ax*along - az*side, oz=az*along + ax*side;
-                float r=sp->size*(0.30f+0.30f*t3);          // small, varied
-                DrawCylinderEx((Vector3){sp->pos.x+ox,y0,sp->pos.z+oz},
-                               (Vector3){sp->pos.x+ox,y1,sp->pos.z+oz}, r, r, 8, sp->col);
-            }
-        } else if (sp->blood){                             // in-flight blood -> thin streak stretched along travel
-            float k=(sp->life0>0)?sp->life/sp->life0:1.0f;
-            Color c=sp->col; c.a=(unsigned char)(k*255.0f);
-            float spd=Vector3Length(sp->vel);
-            float r=(sp->size>0.03f?0.03f:sp->size)*0.55f; // capped so even gobs stay droplet-sized, never grapefruits
-            if (spd>0.5f){                                 // moving: a tapered teardrop pointing the way it flies
-                Vector3 dirn=Vector3Scale(sp->vel,1.0f/spd);
-                float len=sp->size*1.5f+spd*0.025f;
-                Vector3 tail=Vector3Subtract(sp->pos,Vector3Scale(dirn,len));
-                DrawCylinderEx(sp->pos, tail, r, r*0.25f, 6, c);
-            } else {                                       // nearly stopped: a small droplet
-                DrawSphereEx(sp->pos, r, 5, 5, c);
-            }
-        } else {                                           // impact glints: tiny bright spark
-            float k=(sp->life0>0)?sp->life/sp->life0:1.0f;
-            float sz=sp->size*(0.45f+0.55f*k);
-            Color c=sp->col; c.a=(unsigned char)(k*255.0f);
-            DrawSphereEx(sp->pos, sz*0.6f, 6, 6, c);
         }
     }
+    rlEnd();
     DrawScorch();                                          // flamethrower soot, laid on the surfaces it touched
     for (int i=0;i<MAX_GREN;i++) if (g_gren[i].active)     // in-flight grenades: a small dark sphere
         DrawSphereEx(g_gren[i].pos, 0.13f, 8, 8, (Color){45,50,42,255});
@@ -3103,18 +3821,31 @@ static void DrawEnemies(void){
         }
         float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;       // face the player (yaw about +Y)
         float yaw=atan2f(dx,dz)*RAD2DEG + ENEMY_YAW_OFFSET;
+        if (e->state==2) yaw=e->deathYaw;                     // the dying body keeps the way it was falling
         EnemyRig *rg=RigOf(e->type);
-        if (rg->animN>0){
-            ModelAnimation *cur=RigClip(e->type, e->state==2?CL_DEATH:e->clip);
+        int stored=(e->poseOK && rg->gpu && rg->layer);       // posed by EnemyPoseBuild: his own facing, layered clips
+        if (stored){ yaw=e->yaw; RigPoseStored(rg,e->pose); }
+        else if (rg->animN>0){
+            ModelAnimation *cur=RigClip(e->type, e->state==2?(e->deathRole?e->deathRole:CL_DEATH):e->clip);
             if (e->blendT>0) RigPoseBlend(rg, RigClip(e->type,e->prevClip), e->prevT, cur, e->animT, 1.0f-e->blendT/ENEMY_BLEND);
             else RigPose(rg, cur, e->animT);
         }
-        if (rg->gpu) EnemyLightUpload(e->pos);
+        if (rg->gpu){ EnemyLightUpload(e->pos); EnemyGlowDim(e->state==2?0.55f:0.0f); }   // the glow gutters as he falls
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
         float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type size: the head chef looms
         DrawModelEx(*EnemyLodModel(rg,dpos), dpos, (Vector3){0,1,0}, yaw,   // no sink: dying body falls onto the floor, not through
                     (Vector3){esc,esc,esc}, kEnemy[e->type].tint);
+        {   // a tight dark core at the feet inside a wide soft penumbra; it spreads as the body goes down
+            float sk=kEnemy[e->type].scale*(e->state==2?1.45f:1.0f);
+            GroundBlob(dpos, 0.95f*sk, 0.42f); GroundBlob(dpos, 0.50f*sk, e->state==2?0.30f:0.50f);
+        }
         if (e->burnN>0) DrawBurnMarks(dpos, 1.0f, e->burnY, e->burnR, e->burnN);   // localised char where the flame touched
+        if (rg->animN>0){                                     // remember the pose shown (new wounds go on it), draw the old ones
+            e->drawAn=RigClip(e->type, e->state==2?(e->deathRole?e->deathRole:CL_DEATH):e->clip); e->drawFrame=e->animT; e->drawYaw=yaw;
+            g_woundPose=stored?e->pose:NULL;
+            if (e->wN>0) DrawWounds(e->drawAn, e->animT, dpos, yaw, esc, e->wN, e->wBone, e->wOff, e->wSz);
+            g_woundPose=NULL;
+        }
         if (e->state==1 && e->hp<e->maxHp && !e->boss){       // HP bar above damaged enemies (bosses get the HUD bar)
             Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT*kEnemy[e->type].scale+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/e->maxHp), 0.08f, 0.02f, (Color){230,60,60,255});
@@ -3123,18 +3854,26 @@ static void DrawEnemies(void){
     // lasting corpses: each rig's model posed at its death clip's settle frame, lying where each enemy fell
     for (int ri=0; ri<EN_NTYPES; ri++){
         EnemyRig *rg=&g_rig[ri]; if (!rg->ok || rg->animN<=0) continue;
-        RigPose(rg, &rg->anim[rg->clip[CL_DEATH]], (float)rg->deathFrame);
-        for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active && RigOf(g_corpses[c].type)==rg){
+        static const int corpseRoles[5]={CL_DEATH,CL_DEATH_HEAD,CL_DEATH_LEG,CL_DEATH_BLAST,CL_DEATH_RIDDLED};
+        for (int cr=0; cr<5; cr++){ int role=corpseRoles[cr];
+        int any=0; for (int c=0;c<MAX_CORPSES && !any;c++) any=(g_corpses[c].active && RigOf(g_corpses[c].type)==rg && (g_corpses[c].role?g_corpses[c].role:CL_DEATH)==role);
+        if (!any) continue;
+        RigPose(rg, &rg->anim[rg->clip[role]], (float)rg->settle[role]);
+        for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active && RigOf(g_corpses[c].type)==rg && (g_corpses[c].role?g_corpses[c].role:CL_DEATH)==role){
             float csc=ENEMY_SCALE*kEnemy[g_corpses[c].type].scale;
-            if (rg->gpu) EnemyLightUpload(g_corpses[c].pos);
+            if (rg->gpu){ EnemyLightUpload(g_corpses[c].pos); EnemyGlowDim(0.85f); }
             DrawModelEx(*EnemyLodModel(rg,g_corpses[c].pos), g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
                         (Vector3){csc,csc,csc}, kEnemy[g_corpses[c].type].tint);
+            if (g_corpses[c].wN>0) DrawWounds(&rg->anim[rg->clip[role]], (float)rg->settle[role], g_corpses[c].pos, g_corpses[c].yaw, csc,
+                                              g_corpses[c].wN, g_corpses[c].wBone, g_corpses[c].wOff, g_corpses[c].wSz);
             if (g_corpses[c].burnN>0){   // prone body: compress the mark heights so soot sits on it, not floating above
                 Vector3 b={g_corpses[c].pos.x, g_corpses[c].pos.y+0.05f, g_corpses[c].pos.z};
                 DrawBurnMarks(b, 0.30f, g_corpses[c].burnY, g_corpses[c].burnR, g_corpses[c].burnN);
             }
         }
+        }
     }
+    DrawGroundBlobs();
 }
 
 static void PoseGun(void){
@@ -3575,6 +4314,17 @@ static void DrawHUD(void) {
         int fs=30, aw=MeasureText(at,fs);
         DrawText(at, W-28-aw, H-50, fs, (hw->mag==0)?(Color){255,90,60,255}:RAYWHITE);
         DrawText(hw->label, W-28-MeasureText(hw->label,16), H-72, 16, (Color){205,205,215,210});
+        if (hw->shellCycle>0){                               // shotgun: one shell per round in the tube, empties dim
+            int sw=10, sh=26, gap=6, x0=W-28-hw->magSize*(sw+gap)+gap, y0=H-104;
+            for (int k=0;k<hw->magSize;k++){
+                int x=x0+k*(sw+gap), full=(k<hw->mag);
+                Color hull=full?(Color){200,40,35,255}:(Color){60,30,30,140}, brass=full?(Color){214,170,70,255}:(Color){70,60,40,140};
+                DrawRectangle(x+1, y0+2, sw, sh, (Color){0,0,0,120});                  // drop shadow
+                DrawRectangle(x, y0, sw, sh-8, hull);
+                DrawRectangle(x, y0+sh-8, sw, 8, brass);
+                DrawRectangleLines(x, y0, sw, sh, full?(Color){20,10,10,200}:(Color){120,120,120,120});
+            }
+        }
         if (g_reloading){ const char *rt="RELOADING"; DrawText(rt, W-28-MeasureText(rt,16), H-18, 16, (Color){255,210,90,255}); }
         else if (hw->mag<=0 && hw->reserve<=0){ const char *rt="OUT OF AMMO"; DrawText(rt, W-28-MeasureText(rt,16), H-18, 16, (Color){255,90,60,255}); }
       }
@@ -3997,6 +4747,7 @@ static void StartSelectedMap(void){
     g_wave=0; g_waveBudget=0; g_waveBreather=0.0f; g_spawnTick=0.0f; g_runT=0.0f;    // wave director restarts with the run
     g_cam=(Camera3D){ g_pos, Vector3Add(g_pos,(Vector3){0,0,-1}), (Vector3){0,1,0}, 70.0f, CAMERA_PERSPECTIVE };
     for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;          // clear any survivors from the previous map
+    StainReset();                                                  // and the blood on its floors
     // (no boot spawns -- the wave director trickles wave 1 in after a short grace)
 }
 
@@ -4237,6 +4988,7 @@ int main(int argc, char **argv) {
     g_weapons[2].fireCd=0.06f;   // minigun: ~17 rounds/s once spun up
     g_weapons[4].burst=3;        // AK-74M: one 3-round burst per trigger pull
     g_weapons[1].autoReload=1;   // remington: cock between shots
+    g_weapons[1].shellFirst=40.0f; g_weapons[1].shellCycle=40.0f; g_weapons[1].shellCount=4;   // its Reload clip: shells go in at 40/80/120/160, pump at 180
     LoadWeaponAux(1, "assets/shotgun_cock.mp3", "../assets/shotgun_cock.mp3");
     // Auto viewmodel frames: measured after the per-slot flags (pinGun/grenade/spinUp
     // pick the rest pose + the pinned-gun path), so every gun is framed as drawn.
@@ -4248,6 +5000,7 @@ int main(int argc, char **argv) {
           int saved=FileExists(w->trimPath);
           w->off0=D[i].off; w->scale0=D[i].scale;
           if (!saved){ w->off=w->off0; w->scale=w->scale0; } } }
+    if (getenv("VMAIM")) sscanf(getenv("VMAIM"),"%f %f",&g_vmAimR,&g_vmAimD);
     for (int c=0;c<VM_NCLASS;c++){ char ev[16]; snprintf(ev,sizeof ev,"VMCLASS%d",c); const char *e=getenv(ev);
         if (e) sscanf(e,"%f %f %f %f %f",&kVmClass[c].len,&kVmClass[c].pos.x,&kVmClass[c].pos.y,&kVmClass[c].pos.z,&kVmClass[c].conv); }
     for (int i=0;i<g_numWeapons;i++) ComputeVmFrame(&g_weapons[i], i);

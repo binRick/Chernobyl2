@@ -48,8 +48,25 @@ from bl_ext.blender_org.mpfb.services.humanservice import HumanService  # noqa: 
 # 30 fps samples (BVH frame f0+4i) -- picked from stick-figure strips of each take.
 BASE_CLIPS = {"idle": ("120_22", 4, 52, True, 8), "walk": ("120_22", 167, 211, True, 6),
               "run": ("09_01", 5, 27, True, 4), "attack": ("79_01", 21, 47, False, 0),
-              "death": ("90_18", 2, 60, False, 0)}
+              "death": ("90_18", 2, 60, False, 0),
+              # how he died / got hurt (the game picks by cause; tools/chef/fetch_mocap.sh fetches the takes)
+              "death_blast": ("90_16", 82, 125, False, 0),    # explosion: thrown up, lands on his face
+              "knock_fall": ("90_18", 18, 36, False, 0),      # knockdown = this fall...
+              "knock_getup": ("139_18", 85, 142, False, 0),   # ...then up off his back (joined in join_knockdown)
+              "limp": ("91_24", 252, 302, True, 6)}           # after a leg hit: one upright hurt-leg stride cycle
 ZOMBIE_WALK = ("104_41", 269, 314, True, 6)          # heavier, dragging lurch
+# The gait ladder. "walk" above is each type's slow creep (0.5-0.6 m/s); the game picks whichever
+# of walk / stride / jog / run walks nearest the pace he is really making, so the feet keep up
+# with the ground instead of a shuffle played at double speed. One stride cycle each, cut where
+# the pose repeats; the speeds are the takes' own (the build writes them to <enemy>.gait).
+WALK_NAT = ("35_01", 7, 41, True, 5)        # 1.2 m/s: an ordinary walk
+STRIDE   = ("08_05", 37, 71, True, 5)       # 1.8 m/s: long purposeful strides
+JOG      = ("02_03", 15, 39, True, 4)       # 2.65 m/s
+RUN_EASY = ("09_01", 13, 35, True, 4)       # 3.45 m/s
+RUN      = ("16_45", 7, 28, True, 4)        # 3.8 m/s
+RUN_HARD = ("127_07", 11, 31, True, 4)      # 4.8 m/s
+SPRINT   = ("127_08", 14, 33, True, 4)      # 5.3 m/s: flat out
+RUN_ARMY = ("104_37", 7, 28, True, 4)       # 4.1 m/s
 SPECS = {
     "cook": dict(   # canteen cook: the wave-1 staple
         phenotype=dict(gender=1.0, age=0.74, muscle=0.62, weight=0.92, proportions=0.3, height=0.55),
@@ -59,14 +76,14 @@ SPECS = {
         clothes=["male_worksuit01", "shoes02"],
         recolor={"worksuit": ((0.93, 0.91, 0.86), 9, 7, 8)},
         props="cook", attack_synth="dual", spread_arms=(20, 20, 10),   # walk/run: blades apart, off the belly
-        clips=dict(BASE_CLIPS)),   # cleaver + meat hook: one hand at a time
+        hunch=7, clips=dict(BASE_CLIPS, stride=WALK_NAT, jog=JOG, run=RUN_HARD)),   # cleaver + meat hook: one hand at a time
     "linecook": dict(   # line cook: young, wiry, fast -- knife
         phenotype=dict(gender=1.0, age=0.42, muscle=0.55, weight=0.25, proportions=0.6, height=0.62),
         targets={"stomach-pregnant-decr": 0.4, "neck-scale-horiz-decr": 0.3},
         skin="young_caucasian_male", eyebrows="eyebrow001",
         clothes=["male_casualsuit06", "shoes06"],
         recolor={"casualsuit06": ((0.88, 0.87, 0.84), 6, 9, 4), "shoes06": ((0.22, 0.22, 0.24), 0, 2, 0)},
-        props="linecook", clips=dict(BASE_CLIPS, walk=("09_01", 5, 27, True, 4))),
+        props="linecook", hunch=9, clips=dict(BASE_CLIPS, walk=STRIDE, jog=RUN_EASY, run=SPRINT)),
     "butcher": dict(   # butcher: huge, slow, hits like a truck
         phenotype=dict(gender=1.0, age=0.66, muscle=0.95, weight=1.0, proportions=0.2, height=0.85),
         targets={"stomach-pregnant-incr": 0.55, "measure-neck-circ-incr": 1.0, "neck-double-incr": 1.0,
@@ -74,14 +91,16 @@ SPECS = {
         skin="middleage_caucasian_male", eyebrows="eyebrow010",
         clothes=["male_casualsuit06", "shoes03"],
         recolor={"casualsuit06": ((0.62, 0.60, 0.56), 8, 10, 8)},
-        props="butcher", attack_synth="dual", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
+        props="butcher", attack_synth="dual", hunch=8,
+        clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, stride=WALK_NAT, jog=STRIDE, run=JOG)),
     "liquidator": dict(   # liquidator: off-white cotton coverall, GP-5 mask, shovel
         phenotype=dict(gender=1.0, age=0.55, muscle=0.7, weight=0.6, proportions=0.5, height=0.6),
         targets={},
         skin="middleage_caucasian_male", eyebrows="eyebrow003",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.80, 0.80, 0.74), 5, 4, 14)},
-        props="liquidator", two_hand="shaft", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK)),
+        props="liquidator", two_hand="shaft", hunch=6,
+        clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, stride=WALK_NAT, jog=JOG, run=RUN)),
     "headchef": dict(   # head chef: the giant -- tall toque, twin cleavers (drawn x1.4 in game)
         phenotype=dict(gender=1.0, age=0.85, muscle=0.75, weight=1.0, proportions=0.25, height=0.75),
         targets={"stomach-pregnant-incr": 1.0, "measure-waist-circ-incr": 0.8, "neck-double-incr": 1.0,
@@ -90,7 +109,7 @@ SPECS = {
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.96, 0.95, 0.92), 18, 14, 6)},
         props="headchef", attack_synth="dual", spread_arms=(36, 8, 14),   # walk/run: keep the twin cleavers apart (left, right, wrists)
-        clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
+        hunch=6, clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, stride=WALK_NAT, jog=STRIDE, run=JOG)),
 }
 AIM_RIFLE = ("79_96", 58, 100, True, 6)            # two-handed steady aim, held (looped while engaged)
 AIM_HEAVY = ("80_03", 40, 96, True, 6)
@@ -103,7 +122,7 @@ SPECS.update({
         skin="young_caucasian_male2", eyebrows="eyebrow003",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.40, 0.43, 0.29), 4, 3, 10)},
-        props="rifleman", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE),
+        props="rifleman", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE, stride=WALK_NAT, jog=JOG, run=RUN_ARMY),
         aim_hand_out=0.04),   # the receiver clears the gas-mask filter
     "gunner": dict(   # machine-gunner: heavy, bursts
         phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.8, proportions=0.3, height=0.62),
@@ -111,7 +130,7 @@ SPECS.update({
         skin="middleage_caucasian_male", eyebrows="eyebrow010",
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.30, 0.32, 0.26), 6, 4, 14)},
-        props="gunner", aim_gun="line", clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, attack=AIM_RIFLE),
+        props="gunner", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE, stride=WALK_NAT, jog=JOG, run=RUN_ARMY),
         aim_hand_drop=0.14, aim_hand_out=0.10, aim_hand_fwd=0.08),   # the big receiver clears the helmet, the stock the belt and his forearm   # shouldered, like the rifleman (the heavy-aim mocap held the gun at his sternum)
     "mutant": dict(   # glowing mutant: irradiated skin, throws radiation bolts
         phenotype=dict(gender=1.0, age=0.5, muscle=0.75, weight=0.3, proportions=0.4, height=0.58),
@@ -119,15 +138,17 @@ SPECS.update({
         skin="young_caucasian_male", eyebrows="eyebrow001",
         clothes=["male_casualsuit06", "shoes02"],
         recolor={"casualsuit06": ((0.42, 0.40, 0.33), 12, 8, 22)},
-        skin_tint=((0.70, 0.95, 0.62), 26),        # sickly green + glowing lesions
-        props="mutant", attack_in_place=True, clips=dict(BASE_CLIPS, attack=THROW)),
+        skin_tint=((0.76, 0.90, 0.68), 26), skin_glow=0.55,   # sickly green + glowing lesions
+        props="mutant", attack_in_place=True, hunch=8,
+        clips=dict(BASE_CLIPS, attack=THROW, stride=WALK_NAT, jog=JOG, run=RUN_HARD)),
     "priest": dict(   # irradiated priest: hooded robe, lantern; raises the dead
         phenotype=dict(gender=1.0, age=0.92, muscle=0.35, weight=0.35, proportions=0.4, height=0.6),
         targets={},
         skin="old_caucasian_male", eyebrows="eyebrow005",
         clothes=["male_worksuit01", "shoes02"],
         recolor={"worksuit": ((0.10, 0.10, 0.11), 0, 0, 6)},
-        props="priest", one_hand_attack=True, clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK, cast=CAST)),   # melee = the base swing; cast = raising the dead
+        props="priest", one_hand_attack=True, hunch=5,
+        clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, stride=WALK_NAT, jog=STRIDE, run=JOG, cast=CAST)),   # melee = the base swing; cast = raising the dead
     "revenant": dict(   # burned firefighter: charred skin, brass-crested helmet, fire axe -- fast
         phenotype=dict(gender=1.0, age=0.45, muscle=0.8, weight=0.35, proportions=0.6, height=0.66),
         targets={"stomach-pregnant-decr": 0.6, "torso-muscle-dorsi-incr": 0.4},
@@ -135,7 +156,9 @@ SPECS.update({
         clothes=["male_worksuit01", "shoes03"],
         recolor={"worksuit": ((0.26, 0.20, 0.15), 3, 2, 40)},
         skin_tint=((0.24, 0.16, 0.12), 150, (1.0, 0.42, 0.08), (0.03, 0.025, 0.02)),   # char + glowing ember cracks
-        props="revenant", two_hand="shaft", two_hand_clips=("attack",), clips=dict(BASE_CLIPS)),   # both hands on the axe for the swing
+        skin_glow=0.8, eye_glow=(1.0, 0.45, 0.10),
+        props="revenant", two_hand="shaft", two_hand_clips=("attack",), hunch=9,
+        clips=dict(BASE_CLIPS, stride=STRIDE, jog=RUN_EASY, run=SPRINT)),   # both hands on the axe for the swing
     "fiend": dict(   # mutated liquidator: bloated, cracked mask, four tentacles burst from the back
         phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.75, proportions=0.3, height=0.72),
         targets={"torso-scale-horiz-incr": 0.5, "measure-shoulder-dist-incr": 0.5, "neck-double-incr": 0.6},
@@ -144,8 +167,41 @@ SPECS.update({
         recolor={"worksuit": ((0.74, 0.73, 0.66), 22, 16, 26)},
         skin_tint=((0.82, 0.66, 0.70), 30, (0.55, 0.06, 0.10), (0.30, 0.18, 0.28)),
         props="fiend", tentacles=True, attack_synth="rake",   # no hand weapon: a two-handed overhead claw rake
-        clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, run=ZOMBIE_WALK)),
+        hunch=7, clips=dict(BASE_CLIPS, walk=ZOMBIE_WALK, stride=WALK_NAT, jog=JOG, run=RUN_EASY)),
 })
+# How each one looks up close. hair = (style, rgb): buzz / ring (bald on top) / thin / patchy /
+# shaved / none. stubble 0..1. hands: dirt / blood / soot. gore = blood down the front of his
+# clothes. face = MakeHuman face sliders, so they are eleven men and not one man eleven times
+# ("cheek-" and "eye-" sliders are applied to both sides).
+LOOKS = {
+    "cook": dict(hair=("ring", (0.22, 0.19, 0.17)), stubble=0.6, hands="blood", gore=0.5,
+                 face={"head-fat-incr": 0.5, "eye-bag-incr": 0.8, "eyebrows-trans-down": 0.5}),
+    "linecook": dict(hair=("buzz", (0.06, 0.05, 0.04)), stubble=0.35, hands="blood", gore=0.35,
+                     face={"cheek-volume-decr": 0.6, "cheek-bones-incr": 0.5, "eyebrows-trans-down": 0.4}),
+    "butcher": dict(hair=("shaved", (0.08, 0.06, 0.05)), stubble=0.8, hands="blood", gore=0.5,
+                    face={"head-square": 0.7, "chin-width-incr": 0.6, "chin-prominent-incr": 0.4, "nose-volume-incr": 0.6,
+                          "nose-scale-horiz-incr": 0.4, "eyebrows-trans-down": 0.8, "cheek-volume-incr": 0.4,
+                          "eye-bag-incr": 0.6, "mouth-angles-down": 0.8}),
+    "liquidator": dict(hair=("buzz", (0.10, 0.08, 0.06)), hands="dirt"),
+    "headchef": dict(hair=("thin", (0.42, 0.40, 0.38)), stubble=0.55, hands="blood", gore=0.85,
+                     face={"head-fat-incr": 0.7, "eye-bag-incr": 1.0, "eyebrows-trans-down": 0.6, "head-age-incr": 0.5}),
+    "rifleman": dict(hair=("buzz", (0.14, 0.10, 0.07)), stubble=0.3, hands="dirt",
+                     face={"cheek-bones-incr": 0.5, "eyebrows-trans-down": 0.4}),
+    "gunner": dict(hair=("buzz", (0.07, 0.06, 0.05)), stubble=0.8, hands="dirt",
+                   face={"head-rectangular": 0.6, "chin-bones-incr": 0.6, "nose-hump-incr": 0.7, "eyebrows-trans-down": 0.6,
+                         "mouth-angles-down": 0.6, "cheek-bones-incr": 0.4}),
+    "mutant": dict(hair=("patchy", (0.07, 0.07, 0.05)), stubble=0.25, brows=0.5, hands="dirt", gore=0.2, skin_fx="sores",
+                   face={"cheek-volume-decr": 0.9, "cheek-bones-incr": 0.7, "head-triangular": 0.4, "eye-bag-incr": 1.0,
+                         "mouth-angles-down": 0.7}),
+    "priest": dict(hair=("thin", (0.50, 0.48, 0.46)), stubble=0.7, hands="dirt",
+                   face={"cheek-volume-decr": 1.0, "cheek-bones-incr": 0.8, "eye-bag-incr": 1.0, "nose-hump-incr": 0.8,
+                         "nose-point-down": 0.6, "mouth-angles-down": 1.0, "head-age-incr": 0.6}),
+    "revenant": dict(hair=("none", (0.03, 0.03, 0.03)), brows=0.0, hands="soot", skin_fx="cracks",
+                     face={"cheek-volume-decr": 1.0, "cheek-bones-incr": 0.9, "eye-bag-incr": 0.5, "mouth-angles-down": 0.5}),
+    "fiend": dict(hair=("none", (0.05, 0.05, 0.05)), hands="blood", gore=0.6, skin_fx="raw"),
+}
+for _k, _v in LOOKS.items():
+    SPECS[_k].update(_v)
 SPEC = SPECS[ENEMY]
 if os.environ.get("CHEF_SPEC"):      # dev: try spec values without editing, e.g. CHEF_SPEC='{"aim_hand_drop": 0.2}'
     import json as _json
@@ -155,6 +211,11 @@ bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
 
 # =============================================================== 1. body
+for _t, _v in SPEC.get("face", {}).items():
+    if _t.startswith(("cheek-", "eye-")):
+        SPEC["targets"]["l-" + _t] = _v; SPEC["targets"]["r-" + _t] = _v
+    else:
+        SPEC["targets"][_t] = _v
 human = {
     "name": ENEMY,
     "phenotype": dict(SPEC["phenotype"], cupsize=0.5, firmness=0.5,
@@ -216,7 +277,7 @@ def attach_detail(m, normal_img, orm_img):
 
 
 def simple_material(name, image=None, rgb=(0.8, 0.8, 0.8), rough=0.8, metal=0.0, emit=None, alpha_clip=False,
-                    normal_img=None, orm_img=None):
+                    normal_img=None, orm_img=None, emit_img=None):
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     nt = m.node_tree
@@ -233,9 +294,13 @@ def simple_material(name, image=None, rgb=(0.8, 0.8, 0.8), rough=0.8, metal=0.0,
             m.blend_method = "CLIP" if hasattr(m, "blend_method") else None
     else:
         b.inputs["Base Color"].default_value = (*rgb, 1)
-    if emit:
-        b.inputs["Emission Color"].default_value = (*emit, 1)
-        b.inputs["Emission Strength"].default_value = 4.0
+    if emit and emit_img is None:   # raylib reads glow only from an emissive TEXTURE: a flat colour gets a tiny one
+        e = np.ones((8, 8, 4), np.float32); e[..., :3] = emit
+        emit_img = from_np(f"{ENEMY}_{name}_emit", e)
+    if emit_img is not None:
+        te = nt.nodes.new("ShaderNodeTexImage"); te.image = emit_img; te.name = "EMIT"
+        nt.links.new(te.outputs["Color"], b.inputs["Emission Color"])
+        b.inputs["Emission Strength"].default_value = 1.0
     return m
 
 
@@ -354,7 +419,7 @@ def vein_mask(shape, seed):
     return v * np.clip((smooth_noise(*shape, 5, seed) - 0.35) * 3, 0, 1)
 
 
-def skin_maps(tag, a, lesion_mask, img=None):
+def skin_maps(tag, a, lesion_mask, img=None, hair=None):
     """Skin: pores + wrinkles + creases from the diffuse's own detail, raised lesions, veins."""
     veins = vein_mask(a.shape[:2], 404)
     if img is not None:                               # veins show faintly blue-grey through the skin
@@ -364,12 +429,16 @@ def skin_maps(tag, a, lesion_mask, img=None):
     fine = blur(lum, 1) - blur(lum, 10)            # wrinkles, creases, blemishes
     rng = np.random.default_rng(77)
     pores = blur(rng.standard_normal(lum.shape).astype(np.float32), 1) * 0.05
-    h = fine * 1.35 + pores + blur(lesion_mask, 3) * 0.14 + blur(veins, 1) * 0.05
-    nrm = height_to_normal(h, 9.5)
+    h = fine * 1.35 + pores + blur(lesion_mask, 2) * 0.14 + blur(veins, 1) * 0.05      # negative = split open
+    lesion_mask = np.clip(lesion_mask, 0, 1)
+    if hair is None:
+        hair = np.zeros_like(lum)
+    h = h + hair * blur(rng.standard_normal(lum.shape).astype(np.float32), 1) * 0.10   # bristle
+    nrm = height_to_normal(h, 7.0)
     sweat = smooth_noise(*lum.shape, 14, 5)
     orm = np.stack([np.ones_like(lum),                               # occlusion (geometry bake multiplies in)
-                    np.clip(0.62 - 0.22 * sweat - 0.35 * lesion_mask, 0.12, 1),   # roughness: sweaty / weeping = glossier
-                    np.clip(0.30 + 0.15 * sweat + 0.45 * lesion_mask, 0, 1)], -1)  # specular strength
+                    np.clip(0.62 - 0.22 * sweat - 0.35 * lesion_mask + 0.25 * hair, 0.12, 1),   # roughness: sweaty / weeping = glossier
+                    np.clip((0.30 + 0.15 * sweat + 0.45 * lesion_mask) * (1 - 0.6 * hair), 0, 1)], -1)  # specular strength
     return save_maps(tag, nrm, orm, sss=1.0)
 
 
@@ -397,29 +466,430 @@ def cloth_maps(tag, a, asset_n, asset_ao, blood_mask, fresh_mask):
     return save_maps(tag, nrm, orm)
 
 
+# ---- painting by where a texel sits ON THE BODY (not where it happens to land in UV space) ----
+def pos_map(o, size, res=2048):
+    """World-space rest position of every texel of o's UV layout: (size x size x 3, coverage).
+    Rasterised at `res` and stretched; islands are grown a few texels so seams get painted."""
+    res = min(res, size)
+    if size % res:
+        res = size
+    me = o.data; me.calc_loop_triangles()
+    n = len(me.loop_triangles)
+    lt = np.empty(n * 3, np.int32); me.loop_triangles.foreach_get("loops", lt)
+    vt = np.empty(n * 3, np.int32); me.loop_triangles.foreach_get("vertices", vt)
+    uvd = me.uv_layers.active.data
+    uv = np.empty(len(uvd) * 2, np.float32); uvd.foreach_get("uv", uv); uv = uv.reshape(-1, 2)
+    mw = o.matrix_world
+    co = np.array([tuple(mw @ v.co) for v in me.vertices], np.float32)
+    T = uv[lt].reshape(n, 3, 2) * res - 0.5
+    V = co[vt].reshape(n, 3, 3)
+    P = np.zeros((res, res, 3), np.float32); cov = np.zeros((res, res), bool)
+    lo = np.floor(T.min(axis=1)).astype(int) - 1; hi = np.ceil(T.max(axis=1)).astype(int) + 1
+    for k in range(n):
+        xa, ya = max(0, lo[k, 0]), max(0, lo[k, 1]); xb, yb = min(res - 1, hi[k, 0]), min(res - 1, hi[k, 1])
+        if xb < xa or yb < ya:
+            continue
+        (x0, y0), (x1, y1), (x2, y2) = T[k]
+        den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+        if abs(den) < 1e-9:
+            continue
+        X, Y = np.meshgrid(np.arange(xa, xb + 1, dtype=np.float32), np.arange(ya, yb + 1, dtype=np.float32))
+        w0 = ((y1 - y2) * (X - x2) + (x2 - x1) * (Y - y2)) / den
+        w1 = ((y2 - y0) * (X - x2) + (x0 - x2) * (Y - y2)) / den
+        w2 = 1 - w0 - w1
+        m = (w0 >= -0.03) & (w1 >= -0.03) & (w2 >= -0.03)
+        if not m.any():
+            continue
+        v = w0[..., None] * V[k, 0] + w1[..., None] * V[k, 1] + w2[..., None] * V[k, 2]
+        P[ya:yb + 1, xa:xb + 1][m] = v[m]; cov[ya:yb + 1, xa:xb + 1][m] = True
+    for _ in range(6):                                 # grow the islands into the gutters
+        acc = np.zeros_like(P); cnt = np.zeros((res, res), np.float32)
+        for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            acc += np.roll(P * cov[..., None], (dy, dx), (0, 1)); cnt += np.roll(cov, (dy, dx), (0, 1))
+        new = (~cov) & (cnt > 0)
+        P[new] = acc[new] / cnt[new][:, None]; cov = cov | new
+    k = max(1, size // res)
+    return P.repeat(k, 0).repeat(k, 1)[:size, :size], cov.repeat(k, 0).repeat(k, 1)[:size, :size]
+
+
+_LAT = {}
+
+
+def noise3(P, freq, seed=0, stretch=(1.0, 1.0, 1.0)):
+    """Gradient (Perlin) noise in 0..1 sampled at world points P (HxWx3): seamless across UV
+    islands and the same grain size everywhere on the body. `freq` = features per metre. The
+    lattice is turned a different way for every seed, so thresholds don't come out as boxes."""
+    if seed not in _LAT:
+        rng = np.random.default_rng(5000 + seed)
+        g = rng.standard_normal((32, 32, 32, 3)).astype(np.float32); g /= np.linalg.norm(g, axis=-1, keepdims=True)
+        R, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+        _LAT[seed] = (g, R.astype(np.float32), rng.random(3).astype(np.float32) * 7)
+    G, R, off = _LAT[seed]
+    if tuple(stretch) != (1.0, 1.0, 1.0):               # streaks must stay world-aligned (drips run DOWN)
+        q = P * (np.array(stretch, np.float32) * freq) + off + 40.0
+    else:
+        q = (P @ R.T) * freq + off + 40.0
+    i = np.floor(q).astype(np.int32); f = q - i
+    u = f * f * f * (f * (f * 6 - 15) + 10)
+    i0 = i & 31; i1 = (i + 1) & 31
+    out = 0.0
+    for dx in (0, 1):
+        ix = i1[..., 0] if dx else i0[..., 0]; wx = u[..., 0] if dx else 1 - u[..., 0]
+        for dy in (0, 1):
+            iy = i1[..., 1] if dy else i0[..., 1]; wy = u[..., 1] if dy else 1 - u[..., 1]
+            for dz in (0, 1):
+                iz = i1[..., 2] if dz else i0[..., 2]; wz = u[..., 2] if dz else 1 - u[..., 2]
+                g = G[ix, iy, iz]
+                d = g[..., 0] * (f[..., 0] - dx) + g[..., 1] * (f[..., 1] - dy) + g[..., 2] * (f[..., 2] - dz)
+                out = out + d * (wx * wy * wz)
+    return np.clip(0.5 + 0.80 * out, 0, 1).astype(np.float32)
+
+
+def worley3(P, freq, seed=0, jitter=0.92):
+    """Cell noise at world points P: (distance to the nearest feature point, gap to the second
+    nearest), in cell units. The gap falls to 0 along the walls between cells -> cracks, plates."""
+    tab = np.random.default_rng(7000 + seed).random((16, 16, 16, 3)).astype(np.float32)
+    q = P * freq + 40.0
+    i = np.floor(q).astype(np.int32); f = q - i
+    f1 = np.full(P.shape[:2], 9.0, np.float32); f2 = f1.copy()
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                c = tab[(i[..., 0] + dx) & 15, (i[..., 1] + dy) & 15, (i[..., 2] + dz) & 15]
+                d = np.array((dx, dy, dz), np.float32) + 0.5 + (c - 0.5) * jitter - f
+                d = np.sqrt((d * d).sum(-1))
+                f2 = np.where(d < f1, f1, np.minimum(f2, d)); f1 = np.minimum(f1, d)
+    return f1, f2 - f1
+
+
+def fbm3(P, freq, seed=0, octaves=3):
+    out = 0.0; amp = 1.0; tot = 0.0
+    for k in range(octaves):
+        out = out + amp * noise3(P, freq * 2 ** k, seed + k); tot += amp; amp *= 0.5
+    return out / tot
+
+
+def sstep(x, a, b):
+    t = np.clip((x - a) / (b - a), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def mix_to(a, col, m):
+    """Blend a's rgb toward colour `col` by mask m (HxW)."""
+    for ch in range(3):
+        a[..., ch] = a[..., ch] * (1 - m) + col[ch] * m
+
+
+def groom(a, o, P, cov):
+    """Hair he still has, brows, stubble and working hands -- painted through the position map,
+    so they sit where they belong on the head whatever the UV layout. Returns (hair, wet) masks."""
+    h, w = a.shape[:2]
+    style, hair_rgb = SPEC.get("hair", ("none", (0.08, 0.06, 0.05)))
+    hair_rgb = np.array(hair_rgb, np.float32)
+    gi = o.vertex_groups["Head"].index; mw = o.matrix_world
+    hv = np.array([tuple(mw @ v.co) for v in o.data.vertices if any(g.group == gi and g.weight > 0.5 for g in v.groups)], np.float32)
+    eo = next((x for x in meshes if "low-poly" in x.name), None)
+    if eo is None or not len(hv):
+        return np.zeros((h, w), np.float32), np.zeros((h, w), np.float32)
+    ev = np.array([tuple(eo.matrix_world @ v.co) for v in eo.data.vertices], np.float32)
+    eyes = [ev[ev[:, 0] > 0].mean(axis=0), ev[ev[:, 0] < 0].mean(axis=0)]
+    E = (eyes[0] + eyes[1]) / 2
+    s = float(hv[:, 2].max() - E[2])                    # eye line -> crown: the unit every landmark is measured in
+    fh = hv[(hv[:, 2] > E[2] + 0.15 * s) & (hv[:, 2] < E[2] + 0.45 * s)]
+    yF, yB = float(fh[:, 1].min()), float(hv[:, 1].max())
+    X = P[..., 0] - E[0]; Z = (P[..., 2] - E[2]) / s
+    t = np.clip((P[..., 1] - yF) / (yB - yF), 0, 1)     # 0 = forehead, 1 = back of the skull
+    head = cov & (np.abs(X) < 0.14) & (Z > -1.5)
+    grain = np.random.default_rng(88).random((h, w)).astype(np.float32)
+    grain = np.clip(blur(grain, 1) * 2.4 - 0.7, 0, 1)   # single hairs: a texel-scale speckle
+    ear = max(abs(float(hv[:, 0].max() - E[0])), abs(float(hv[:, 0].min() - E[0])))
+    print(f"enemy: head s={s:.3f} depth={yB - yF:.3f} ear half-width={ear:.3f}")
+    # --- scalp
+    hair = np.zeros((h, w), np.float32)
+    if style != "none":
+        hl = np.interp(t, [0.0, 0.10, 0.26, 0.40, 0.60, 0.74, 0.88, 1.0], [0.56, 0.60, 0.40, 0.20, 0.16, -0.10, -0.42, -0.50])
+        hl = hl + 0.07 * (noise3(P, 70, 41) - 0.5)
+        hair = sstep(Z - hl, -0.03, 0.09) * head
+        hair *= 1 - sstep(np.abs(X), ear - 0.016, ear - 0.004)          # not on the ears
+        if style in ("ring", "thin"):                                     # bald on top, hair round the sides and back
+            hair *= (1 - sstep(Z, 0.58, 0.76)) * sstep(t, 0.16, 0.30)
+        dens = {"buzz": 0.86, "ring": 0.80, "thin": 0.50, "patchy": 0.72, "shaved": 0.30}[style]
+        if style == "patchy":                                             # falling out in clumps
+            wp = P + (np.stack([noise3(P, 55, 52 + k) for k in range(3)], -1) - 0.5) * 0.02
+            hair *= sstep(fbm3(wp, 19, 43), 0.40, 0.72)
+            hair = sstep(hair + (grain - 0.5) * 0.35, 0.10, 0.95)                       # thinning out softly at every edge
+            hair *= 0.45 + 0.55 * sstep(noise3(P, 150, 44, (1, 1, 0.25)), 0.30, 0.70)     # lank strands, scalp showing through
+        else:
+            hair = sstep(hair + (grain - 0.5) * 0.9, 0.25, 0.80) * sstep(hair, 0.0, 0.10)   # every edge frays out into single hairs
+        if style == "thin":
+            hair *= 0.55 + 0.45 * sstep(noise3(P, 160, 44, (1, 1, 0.25)), 0.35, 0.65)
+        d = hair * dens * (0.72 + 0.28 * grain)
+        for ch in range(3):
+            a[..., ch] = a[..., ch] * (1 - d) + hair_rgb[ch] * (0.7 + 0.6 * grain) * d
+    # --- brows: low and heavy, drawn down toward the nose
+    brow = np.zeros((h, w), np.float32)
+    for c in eyes:
+        sg = 1.0 if c[0] > E[0] else -1.0
+        u = (P[..., 0] - c[0]) * sg / 0.030                               # -1 inner end .. +1 outer end
+        zb = c[2] + s * (0.122 + 0.026 * (1 - u * u) - 0.026 * np.clip(-u, 0, 1))
+        th = s * 0.046 * (1 - 0.45 * np.clip(u, 0, 1.2))
+        m = sstep(1 - np.abs(P[..., 2] - zb) / th, 0.0, 0.8) * sstep(u, -0.78, -0.50) * sstep(1.25 - u, 0.0, 0.35)
+        brow = np.maximum(brow, m * (P[..., 1] < c[1] + 0.012) * head)
+    if SPEC.get("brows", 1.0) > 0:
+        d = np.clip(brow, 0, 1) * 0.78 * SPEC.get("brows", 1.0) * (0.45 + 0.55 * grain)
+        for ch in range(3):
+            a[..., ch] = a[..., ch] * (1 - d) + hair_rgb[ch] * 0.8 * d
+    # --- stubble: jaw, chin, upper lip, under the chin
+    sb = SPEC.get("stubble", 0.0)
+    if sb > 0:
+        st = head * (1 - sstep(t, 0.44, 0.64)) * sstep((-0.40 + 0.50 * t) - Z + 0.10 * (noise3(P, 28, 45) - 0.5), 0.0, 0.34) * sstep(Z, -1.34, -1.02)
+        st *= 1 - sstep(1.0 - ((X / 0.030) ** 2 + ((Z + 0.615) / 0.085) ** 2), 0.0, 0.35) * (t < 0.25)   # the lips stay bare
+        st *= 0.75 + 0.25 * noise3(P, 45, 46)
+        d = st * sb * 0.62 * (0.55 + 0.45 * grain)
+        shade = hair_rgb * 0.8 + np.array((0.05, 0.055, 0.065), np.float32)
+        for ch in range(3):
+            a[..., ch] = a[..., ch] * (1 - d) + shade[ch] * d
+        hair = np.maximum(hair, st * sb * 0.6)
+    # --- lips: bloodless
+    lips = sstep(1.0 - ((X / 0.030) ** 2 + ((Z + 0.615) / 0.070) ** 2), 0.0, 0.5) * (t < 0.25) * head
+    for ch, k in enumerate((0.80, 0.72, 0.80)):
+        a[..., ch] *= 1 - lips * (1 - k)
+    # --- hands: ingrained dirt; kitchen hands are bloody to the forearm
+    wet = np.zeros((h, w), np.float32)
+    mode = SPEC.get("hands", "dirt")
+    for side in ("Left", "Right"):
+        wr = np.array(tuple(rig.matrix_world @ rig.data.bones[side + "Hand"].head_local), np.float32)
+        el = np.array(tuple(rig.matrix_world @ rig.data.bones[side + "ForeArm"].head_local), np.float32)
+        ax = (wr - el) / np.linalg.norm(wr - el)
+        rel = P - wr
+        q = rel @ ax                                                      # metres past the wrist, toward the fingers
+        rad = np.linalg.norm(rel - q[..., None] * ax, axis=-1)
+        arm = cov * (rad < 0.14) * (q > -0.30) * (q < 0.26)
+        nz = fbm3(P, 30, 47)
+        dirt = arm * sstep(q + 0.10 * (nz - 0.5), -0.06, 0.03) * (0.35 + 0.35 * noise3(P, 90, 48))
+        for ch, k in enumerate((0.52, 0.44, 0.36)):
+            a[..., ch] *= 1 - dirt * (1 - k)
+        if mode == "blood":
+            bl = arm * sstep(q + 0.22 * (nz - 0.5), -0.20, -0.07)         # ragged tide line up the forearm
+            bl = np.maximum(bl, arm * (q > -0.28) * sstep(fbm3(P, 85, 49), 0.66, 0.72) * 0.9)   # spatter above it
+            fresh = sstep(noise3(P, 26, 50), 0.40, 0.70)
+            col = np.array((0.17, 0.022, 0.018), np.float32)[None, None, :] * (1 - fresh[..., None]) \
+                + np.array((0.36, 0.030, 0.022), np.float32)[None, None, :] * fresh[..., None]
+            d = bl * (0.72 + 0.2 * nz)
+            for ch in range(3):
+                a[..., ch] = a[..., ch] * (1 - d) + col[..., ch] * d
+            wet = np.maximum(wet, bl * fresh)
+        elif mode == "soot":
+            d = arm * sstep(q, -0.25, 0.0) * 0.55
+            for ch in range(3):
+                a[..., ch] *= 1 - d * 0.8
+    return hair, wet
+
+
+def skin_fx(a, P, cov, kind, les_c, bruise_c):
+    """What the radiation / the fire did to his skin, grown in 3-D noise so patches wander
+    across the body instead of being stamped on as dots. Returns (raised+wet mask, glow mask)."""
+    les_c = np.array(les_c, np.float32); bruise_c = np.array(bruise_c, np.float32)
+    cv = cov.astype(np.float32)
+    if kind == "cracks":                               # charred hide split into plates, embers in the splits
+        warp = np.stack([noise3(P, 34, 67 + k) for k in range(3)], -1) - 0.5
+        Pw = P + warp * 0.014                                                # no ruler-straight plate edges
+        f1, gap = worley3(Pw, 34, 64)                                        # ~3 cm plates
+        _, gap2 = worley3(Pw, 105, 65)                                       # crazing inside each plate
+        heat = sstep(noise3(P, 3.6, 63), 0.36, 0.58)                         # where he is still burning inside
+        ash = sstep(fbm3(P, 85, 61), 0.50, 0.62) * 0.34
+        mix_to(a, (0.30, 0.28, 0.26), ash * cv)                             # flaking grey ash
+        for ch in range(3):                                                  # every plate charred a little differently
+            a[..., ch] *= 1 - 0.30 * sstep(f1, 0.15, 0.55) * cv
+        raw = sstep(fbm3(P, 12, 62), 0.56, 0.63) * (1 - heat) * cv
+        mix_to(a, (0.24, 0.045, 0.035), raw * 0.75)                          # where the hide burned through to meat
+        wide = 0.035 + 0.085 * heat + 0.03 * (noise3(P, 20, 68) - 0.5)
+        split = (1 - sstep(gap, wide * 0.35, wide)) * cv                     # the gaps between plates
+        craze = (1 - sstep(gap2, 0.02, 0.07)) * 0.55 * cv
+        mix_to(a, (0.02, 0.014, 0.012), np.maximum(split, craze) * 0.92)     # cold splits are just black
+        core = (1 - sstep(gap, 0.0, wide * 0.55)) * sstep(heat, 0.25, 0.75) * cv
+        core *= 0.55 + 0.45 * sstep(noise3(P, 26, 66), 0.30, 0.65)           # embers pulse along a split, never a neon tube
+        halo = np.clip(blur(core, 4) * 1.5, 0, 1) * cv
+        white = core * core
+        col = les_c[None, None, :] * (1 - white[..., None]) + np.array((1.0, 0.72, 0.30), np.float32) * white[..., None]
+        for ch in range(3):
+            a[..., ch] = a[..., ch] * (1 - core) + np.clip(col[..., ch], 0, 1) * core
+        glow = np.clip(col, 0, 1) * core[..., None] + np.array((0.60, 0.08, 0.015), np.float32) * (halo * (1 - core) * 0.30)[..., None]
+        return np.clip(raw * 0.6 - np.maximum(split, craze * 0.6) * 1.6, -2, 1), glow
+    cl = sstep(noise3(P, 5.0, 31), 0.36, 0.62)         # where on the body it has taken hold
+    if kind == "sores":                                # radiation sickness: swollen, pustular, weeping
+        warp = np.stack([noise3(P, 40, 36 + k) for k in range(3)], -1) - 0.5
+        Pw = P + warp * 0.008
+        infl = sstep(fbm3(P, 15, 32), 0.48, 0.64) * cl * cv                  # angry swollen patches, no hard edge
+        mott = sstep(noise3(P, 9, 33), 0.52, 0.80) * 0.40 * cv
+        mix_to(a, bruise_c, np.maximum(mott, infl * 0.45))
+        mix_to(a, (0.46, 0.20, 0.16), infl * 0.30)
+        f1, _ = worley3(Pw, 150, 37)                                         # pustules, a few mm each, in crops
+        grp = sstep(fbm3(P, 24, 38), 0.50, 0.60) * cl * cv
+        size = 0.22 + 0.22 * noise3(P, 70, 39)
+        base = (1 - sstep(f1, size, size * 1.9)) * grp
+        pust = (1 - sstep(f1, size * 0.35, size)) * grp
+        f1b, _ = worley3(Pw, 52, 40)                                         # a few open ulcers
+        big = sstep(noise3(P, 13, 41), 0.60, 0.68) * cl * cv
+        rim = (1 - sstep(f1b, 0.30, 0.50)) * big
+        ulc = (1 - sstep(f1b, 0.12, 0.34)) * big
+        mix_to(a, (0.40, 0.11, 0.09), np.maximum(base * 0.55, rim * 0.80))   # inflamed base / raw rim
+        var = 0.60 + 0.40 * noise3(P, 110, 34)
+        mix_to(a, (0.17, 0.05, 0.04), ulc * 0.85)                            # the crater: dark, wet
+        slough = ulc * sstep(noise3(P, 95, 42), 0.45, 0.62)
+        head = np.clip(pust + slough * 0.8, 0, 1)
+        for ch in range(3):
+            a[..., ch] = a[..., ch] * (1 - head * 0.9) + les_c[ch] * var * head * 0.9
+        v = vein_mask(a.shape[:2], 35) * cl * cv                             # poisoned veins feeding them
+        mix_to(a, les_c * 0.45, np.clip(v, 0, 1) * 0.40)
+        g = np.clip(head * head * (0.45 + 0.55 * var) + v * 0.18, 0, 1)
+        return np.clip(pust + rim * 0.5 - ulc * 0.9, -1, 1), les_c[None, None, :] * g[..., None]
+    f = fbm3(P, 17, 32)
+    thr = 0.60 - 0.07 * cl
+    sore = sstep(f, thr, thr + 0.05) * cl * cv
+    rim = sstep(f, thr - 0.045, thr) * cl * cv
+    mott = sstep(noise3(P, 9, 33), 0.52, 0.80) * 0.40 * cv
+    mix_to(a, bruise_c, np.maximum(mott, rim * 0.70))
+    var = 0.55 + 0.45 * noise3(P, 110, 34)
+    for ch in range(3):
+        a[..., ch] = a[..., ch] * (1 - sore * 0.92) + les_c[ch] * var * sore * 0.92
+    return sore, np.zeros(a.shape[:2] + (3,), np.float32)
+
+
+def wear(out, o):
+    """Clothes get dirty where clothes get dirty: mud climbing from the hems, and for the
+    kitchen staff blood down the front. Returns (dried, fresh) blood masks."""
+    h, w = out.shape[:2]
+    P, cov = pos_map(o, h)
+    cv = cov.astype(np.float32)
+    z = P[..., 2]
+    nz = fbm3(P, 16, 71)
+    mud = np.clip(1 - z / 0.46, 0, 1) ** 1.4 * (0.30 + 0.70 * sstep(nz, 0.30, 0.70)) * cv
+    mud = np.maximum(mud, sstep(noise3(P, 60, 72), 0.70, 0.78) * np.clip(1 - z / 0.75, 0, 1) * 0.8 * cv)   # kicked-up flecks
+    mix_to(out, (0.16, 0.13, 0.09), mud * 0.78)
+    scuff = sstep(fbm3(P, 22, 73), 0.60, 0.72) * 0.30 * cv                   # worn-in grey patches everywhere
+    for ch, k in enumerate((0.70, 0.66, 0.60)):
+        out[..., ch] *= 1 - scuff * (1 - k)
+    gore = SPEC.get("gore", 0.0)
+    dried = np.zeros((h, w), np.float32); fresh = np.zeros((h, w), np.float32)
+    if gore > 0:
+        hy = (rig.matrix_world @ rig.data.bones["Hips"].head_local).y
+        hz = (rig.matrix_world @ rig.data.bones["Hips"].head_local).z
+        front = sstep(hy - P[..., 1], -0.02, 0.07) * sstep(z, hz - 0.45, hz - 0.10) * (1 - sstep(z, hz + 0.50, hz + 0.62)) * cv
+        big = sstep(fbm3(P, 8.5, 74), 0.60 - 0.10 * gore, 0.68 - 0.10 * gore)
+        spat = sstep(fbm3(P, 70, 75, 2), 0.66, 0.71) * sstep(noise3(P, 6, 76), 0.35, 0.6)
+        Pup = P + np.array((0, 0, 0.05), np.float32)                         # it ran before it dried: streaks hang under a stain
+        run = sstep(noise3(P, 80, 77, (1, 1, 0.06)), 0.70, 0.84) * 0.8 * sstep(fbm3(Pup, 8.5, 74), 0.58 - 0.10 * gore, 0.66 - 0.10 * gore)
+        dried = np.clip(np.maximum(big, np.maximum(spat, run * 0.85)) * front, 0, 1)
+        fresh = dried * sstep(noise3(P, 20, 78), 0.55, 0.75)
+        col = np.array((0.20, 0.028, 0.02), np.float32)[None, None, :] * (1 - fresh[..., None]) \
+            + np.array((0.38, 0.03, 0.022), np.float32)[None, None, :] * fresh[..., None]
+        d = dried * 0.86
+        for ch in range(3):
+            out[..., ch] = out[..., ch] * (1 - d) + col[..., ch] * d * (0.8 + 0.2 * out[..., ch])
+    return dried, fresh
+
+
+def eye_material(src):
+    """A real eyeball instead of a flat green bead: the asset's eye texture regraded --
+    jaundiced, bloodshot sclera; an irradiated iris (its own fibres kept) with a dark limbal
+    ring and a pinprick pupil. Only the iris glows."""
+    glow = np.array(SPEC.get("eye_glow", (0.45, 1.0, 0.25)), np.float32)
+    if src is None:
+        return simple_material("cook_eyes", None, tuple(glow), 0.3, emit=tuple(glow * 0.6))
+    a = to_np(src); h, w = a.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    u = (xx + 0.5) / w; v = (yy + 0.5) / h
+    lum = 0.3 * a[..., 0] + 0.59 * a[..., 1] + 0.11 * a[..., 2]
+    veins = np.clip(vein_mask((h, w), 911) * 0.9 + 0.30 * smooth_noise(h, w, 7, 5), 0, 1)[..., None] * 0.7
+    out = a.copy()
+    scl = np.stack([lum * 1.00, lum * 0.90, lum * 0.66], -1)           # jaundice
+    out[..., :3] = scl * (1 - veins) + np.array((0.50, 0.05, 0.04), np.float32) * veins
+    emi = np.zeros_like(a); emi[..., 3] = 1
+    for cu, cv in ((0.292, 0.291), (0.705, 0.703)):                    # the two irises in the asset's UV layout
+        r = np.sqrt((u - cu) ** 2 + (v - cv) ** 2) / 0.115
+        iris = np.clip((1.0 - r) * 14, 0, 1)[..., None]
+        fib = np.where(r < 0.36, 0.30, np.clip(lum * 2.8, 0, 1))[..., None]
+        base = glow * 0.62 + np.array((0.42, 0.40, 0.22), np.float32) * 0.30      # a sick eye, not a neon bead
+        col = base[None, None, :] * (0.28 + 0.72 * fib)
+        col = col * (1 - 0.8 * np.clip((r - 0.70) / 0.30, 0, 1)[..., None] ** 2)    # limbal ring
+        col = col * (1 - np.clip((0.23 - r) * 30, 0, 1)[..., None])                # pupil
+        sore = np.clip(1.0 - np.abs(r - 1.25) / 0.45, 0, 1)[..., None] * 0.35       # raw red rim round the iris
+        out[..., :3] = out[..., :3] * (1 - sore) + np.array((0.55, 0.10, 0.08), np.float32) * sore
+        out[..., :3] = out[..., :3] * (1 - iris) + col * iris
+        emi[..., :3] += col * iris * 0.6
+    img = from_np(f"{ENEMY}_eyes", np.clip(out, 0, 1))
+    return simple_material("cook_eyes", img, rough=0.3, emit_img=from_np(f"{ENEMY}_eyes_emit", np.clip(emi, 0, 1)))
+
+
+def sick_skin(a, o):
+    """The asset skins are a healthy studio pink. Drain them: pallor, livid mottling, ingrained
+    dirt, and bruise-dark sunken sockets (found on the mesh, painted through its UVs)."""
+    h, w = a.shape[:2]
+    rgb = a[..., :3]
+    lum = (0.3 * rgb[..., 0] + 0.59 * rgb[..., 1] + 0.11 * rgb[..., 2])[..., None]
+    rgb = rgb * 0.60 + lum * 0.40
+    rgb = rgb * np.array((0.90, 0.93, 0.87), np.float32)
+    m = np.clip((smooth_noise(h, w, 22, 61) - 0.55) * 3, 0, 1)[..., None] * 0.25
+    rgb = rgb * (1 - m * (1 - np.array((0.95, 0.62, 0.74), np.float32)))       # livid blotches
+    d = np.clip((smooth_noise(h, w, 7, 62) - 0.42) * 2.2, 0, 1)[..., None] * 0.24
+    rgb = rgb * (1 - d * (1 - np.array((0.60, 0.50, 0.38), np.float32)))       # dirt
+    eo = next((x for x in meshes if "low-poly" in x.name), None)
+    uvl = o.data.uv_layers.active
+    if eo is not None and uvl is not None:
+        ev = [eo.matrix_world @ v.co for v in eo.data.vertices]
+        cs = [sum((p for p in ev if s_ * p.x > 0), Vector()) / max(1, len([p for p in ev if s_ * p.x > 0])) for s_ in (1, -1)]
+        mw = o.matrix_world; near = {}
+        for vx in o.data.vertices:
+            p = mw @ vx.co
+            dm = min((p - c).length for c in cs)
+            if dm < 0.036:
+                near[vx.index] = 1.0 - dm / 0.036
+        mask = np.zeros((h, w), np.float32); rad = max(3, w // 64)
+        for l in o.data.loops:
+            k = near.get(l.vertex_index)
+            if k is None:
+                continue
+            uv = uvl.data[l.index].uv; x = int(uv.x * w); y = int(uv.y * h)
+            y0, y1, x0, x1 = max(0, y - rad), min(h, y + rad + 1), max(0, x - rad), min(w, x + rad + 1)
+            if y1 <= y0 or x1 <= x0:
+                continue
+            gy, gx = np.ogrid[y0:y1, x0:x1]
+            dd = np.sqrt((gy - y) ** 2 + (gx - x) ** 2) / rad
+            mask[y0:y1, x0:x1] = np.maximum(mask[y0:y1, x0:x1], k * np.clip(1.2 - dd, 0, 1))
+        mask = np.clip(blur(mask, max(2, rad // 3)), 0, 1)[..., None] * 0.62
+        rgb = rgb * (1 - mask * (1 - np.array((0.50, 0.36, 0.42), np.float32)))
+        print("enemy: sockets painted from", len(near), "verts")
+    a[..., :3] = np.clip(rgb, 0, 1)
+
+
+for o in meshes:                                   # MakeHuman clothes can arrive flat-shaded: facets on sleeves
+    o.data.polygons.foreach_set("use_smooth", [True] * len(o.data.polygons))
 SIZE = 2048
 for o in meshes:
     src = first_image(o.data.materials[0] if o.data.materials else None)
     if src is not None and max(src.size) > SIZE:
         src.scale(SIZE, SIZE)
-    if SPEC.get("skin_tint") and ("male_generic" in o.name or "male1591" in o.name) and src is not None:
-        tint, n_les = SPEC["skin_tint"][:2]
-        les_c, bruise_c = (SPEC["skin_tint"][2:] or ((0.55, 1.0, 0.30), (0.25, 0.32, 0.12)))
+    if ("male_generic" in o.name or "male1591" in o.name) and src is not None and (DETAIL or SPEC.get("skin_tint")):
         a = to_np(src)
-        for ch in range(3):
-            a[..., ch] = np.clip(a[..., ch] * tint[ch], 0, 1)
-        a0 = a.copy()
-        splatter(a, n_les // 2, 0.015, 0.04, bruise_c, seed=32, alpha=0.6)   # char / necrotic bruising
-        splatter(a, n_les, 0.006, 0.02, les_c, seed=31, alpha=0.9)          # weeping lesions / ember cracks
+        P, cov = pos_map(o, a.shape[0])
+        sick_skin(a, o)
+        les = np.zeros(a.shape[:2], np.float32); eimg = None
+        if SPEC.get("skin_tint"):
+            tint = SPEC["skin_tint"][0]
+            les_c, bruise_c = (SPEC["skin_tint"][2:] or ((0.70, 0.80, 0.30), (0.26, 0.17, 0.15)))
+            for ch in range(3):
+                a[..., ch] = np.clip(a[..., ch] * tint[ch], 0, 1)
+            les, glow = skin_fx(a, P, cov, SPEC.get("skin_fx", "sores"), les_c, bruise_c)
+            if SPEC.get("skin_glow"):                                       # the lesions / embers give off light
+                e = np.zeros_like(a); e[..., 3] = 1
+                e[..., :3] = glow * SPEC["skin_glow"]
+                eimg = from_np(f"{ENEMY}_skin_emit", np.clip(e, 0, 1))
+        hair, wet = groom(a, o, P, cov)
+        a[..., :3] = np.clip(a[..., :3], 0, 1)
         img = from_np(f"{ENEMY}_skin", a)
-        nimg, oimg = skin_maps(f"{ENEMY}_skin", a, splat_mask(a0, a), img) if DETAIL else (None, None)
-        o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6, normal_img=nimg, orm_img=oimg))
-        continue
-    if DETAIL and ("male_generic" in o.name or "male1591" in o.name) and src is not None:
-        a = to_np(src)                                 # untinted skin still gets pores, creases and sheen
-        img = from_np(f"{ENEMY}_skin", a)
-        nimg, oimg = skin_maps(f"{ENEMY}_skin", a, np.zeros(a.shape[:2], np.float32), img)
-        o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6, normal_img=nimg, orm_img=oimg))
+        nimg, oimg = skin_maps(f"{ENEMY}_skin", a, np.clip(les + wet, -2, 1), img, hair) if DETAIL else (None, None)
+        o.data.materials.clear(); o.data.materials.append(simple_material(f"{ENEMY}_skin", img, rough=0.6, normal_img=nimg, orm_img=oimg, emit_img=eimg))
         continue
     rule = next((v for k, v in SPEC["recolor"].items() if k in o.name), None)
     if rule is not None and src is not None:
@@ -435,17 +905,23 @@ for o in meshes:
         lo = lum[:h2, :w2].reshape(h2 // k, k, w2 // k, k).mean(axis=(1, 3))
         lo = np.kron(lo, np.ones((k, k), np.float32))
         lum_lp = np.pad(lo, ((0, a.shape[0] - h2), (0, a.shape[1] - w2)), mode="edge")
-        shade = (0.72 + 0.28 * lum_lp) * (0.80 + 0.12 * lum) * (0.86 + 0.14 * grime)
+        shade = (0.72 + 0.28 * lum_lp) * (0.80 + 0.12 * lum) * (0.79 + 0.21 * grime)
         out = np.empty_like(a)
         for ch in range(3):
             out[..., ch] = np.clip(base[ch] * shade * 1.12 - 0.10 * (1 - grime) * (ch == 2), 0, 1)
         out[..., 3] = a[..., 3]
+        st = np.clip((smooth_noise(a.shape[0], a.shape[1], 5, 17) - 0.50) * 3.0, 0, 1) * 0.34   # old sweat / grease tide marks
+        st2 = np.clip((smooth_noise(a.shape[0], a.shape[1], 31, 18) - 0.60) * 4.0, 0, 1) * 0.22  # spots
+        for ch, sc in enumerate((0.80, 0.70, 0.50)):
+            out[..., ch] *= (1 - st * (1 - sc)) * (1 - st2 * (1 - sc * 0.8))
         s0 = out.copy()
         if n_blood: splatter(out, n_blood, 0.006, 0.016, (0.30, 0.03, 0.02), seed=11, alpha=0.75)   # dried blood
         s1 = out.copy()
         if n_drop:  splatter(out, n_drop, 0.003, 0.008, (0.42, 0.03, 0.02), seed=12, alpha=0.85)    # fresh droplets
         s2 = out.copy()
         if n_grease: splatter(out, n_grease, 0.02, 0.05, (0.45, 0.40, 0.28), seed=13, alpha=0.22)  # grease / soot
+        wd, wf = wear(out, o)
+        out[..., :3] = np.clip(out[..., :3], 0, 1)
         tag = f"{ENEMY}_{o.name.split('.')[-1]}"
         img = from_np(tag, out)
         nimg = oimg = None
@@ -453,10 +929,10 @@ for o in meshes:
             m0 = o.data.materials[0] if o.data.materials else None
             shp = out.shape[:2]
             nimg, oimg = cloth_maps(tag, out, img_np(named_image(m0, "normal"), shp), img_np(named_image(m0, "_ao"), shp),
-                                    splat_mask(s0, s1), splat_mask(s1, s2))
+                                    np.maximum(splat_mask(s0, s1), wd), np.maximum(splat_mask(s1, s2), wf))
         o.data.materials.clear(); o.data.materials.append(simple_material(tag, img, rough=0.9, normal_img=nimg, orm_img=oimg))
     elif "low-poly" in o.name:   # eyes: irradiated glow
-        o.data.materials.clear(); o.data.materials.append(simple_material("cook_eyes", None, (0.45, 1.0, 0.25), 0.3, emit=(0.45, 1.0, 0.25)))
+        o.data.materials.clear(); o.data.materials.append(eye_material(src))
     elif src is not None:
         alpha = any(k in o.name for k in ("eyebrow", "eyelash"))
         m0 = o.data.materials[0] if o.data.materials else None
@@ -464,6 +940,9 @@ for o in meshes:
         nimg = oimg = None
         if DETAIL and not alpha:
             sa = to_np(src); shp = sa.shape[:2]
+            if o.data.uv_layers.active is not None:      # boots and the like: the same mud as the trousers
+                wear(sa, o); sa[..., :3] = np.clip(sa[..., :3], 0, 1)
+                src = from_np(f"{ENEMY}_{nm}_worn", sa)
             an, aa = img_np(named_image(m0, "normal"), shp), img_np(named_image(m0, "_ao"), shp)
             if an is not None or aa is not None:
                 nimg, oimg = cloth_maps(f"{ENEMY}_{nm}", sa, an, aa, np.zeros(shp, np.float32), np.zeros(shp, np.float32))
@@ -567,8 +1046,9 @@ M_filter = paint("filter", (0.32, 0.35, 0.22), grime=0.4, seed=4)
 M_steel = simple_material("steel", None, (0.72, 0.73, 0.74), 0.28, metal=0.9)
 M_wood = paint("wood", (0.30, 0.17, 0.08), grime=0.45, seed=5)
 M_blood = simple_material("blood", None, (0.34, 0.02, 0.02), 0.3)
-M_lens = simple_material("lens", None, (0.45, 1.0, 0.25), 0.15, emit=(0.45, 1.0, 0.25))
+M_lens = simple_material("lens", None, (0.30, 0.62, 0.18), 0.15, emit=(0.30, 0.68, 0.17))
 M_dark = paint("darkcloth", (0.13, 0.13, 0.15), grime=0.3, seed=6)
+M_strap = paint("strap_leather", (0.20, 0.14, 0.09), grime=0.4, seed=14)
 M_rust = paint("spade", (0.36, 0.24, 0.15), grime=0.6, seed=7)
 M_brass = simple_material("brass", None, (0.70, 0.52, 0.22), 0.35, metal=0.9)
 M_red = paint("neckerchief", (0.55, 0.07, 0.06), grime=0.25, seed=8, stripes=(16, (0.9, 0.85, 0.8)))
@@ -635,11 +1115,16 @@ def box_basis(name, centre, X, Y, Z, size, mat, bone, bevel=0.002):
     o.data.materials.append(mat); props.append((o, bone)); return o
 
 
-def ellipse_band(name, z0, z1, mat, pad=0.010, flare=0.022, verts=32):
+def ellipse_band(name, z0, z1, mat, pad=0.010, flare=0.022, verts=32, rings=1):
     c, rx, ry = skull_slice(z0)
     bpy.ops.mesh.primitive_cone_add(vertices=verts, radius1=1, radius2=1 + flare / max(rx, ry), depth=z1 - z0,
                                     location=(c.x, c.y, (z0 + z1) / 2), end_fill_type="NOTHING")
     o = bpy.context.active_object; o.name = name; o.scale = (rx + pad, ry + pad, 1)
+    if rings > 1:                       # horizontal loops, so a shape can vary up the band
+        bm = bmesh.new(); bm.from_mesh(o.data)
+        bmesh.ops.subdivide_edges(bm, edges=[e for e in bm.edges if abs(e.verts[0].co.z - e.verts[1].co.z) > 1e-5],
+                                  cuts=rings - 1, use_grid_fill=True)
+        bm.to_mesh(o.data); bm.free()
     m = o.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.006
     bpy.context.view_layer.objects.active = o; bpy.ops.object.modifier_apply(modifier="solid")
     bpy.ops.object.shade_smooth()
@@ -647,10 +1132,12 @@ def ellipse_band(name, z0, z1, mat, pad=0.010, flare=0.022, verts=32):
 
 
 def toque(height=0.10, puff=1.0):
-    band, c, rx, ry = ellipse_band("hat_band", brow_z, brow_z + height, M_hat, verts=96)
-    for v in band.data.vertices:        # starched pleats: 24 vertical folds round the band
+    band, c, rx, ry = ellipse_band("hat_band", brow_z, brow_z + height, M_hat, verts=120, rings=8)
+    for v in band.data.vertices:        # starched pleats: 20 soft folds that die out into a flat doubled hem
         a = math.atan2(v.co.y, v.co.x)
-        k = 1.0 + 0.035 * abs(math.sin(12 * a))
+        t = v.co.z / height + 0.5
+        env = min(1.0, max(0.0, (t - 0.14) / 0.2)); env = env * env * (3 - 2 * env)
+        k = 1.0 + 0.024 * (0.5 - 0.5 * math.cos(20 * a)) * env + (0.016 if t < 0.14 else 0.0)
         v.co.x *= k; v.co.y *= k
     top = brow_z + height
     p = blob("hat_puff", (c.x + 0.01, c.y + 0.012, top + 0.035 * puff), 1.0, M_hat, "Head",
@@ -1013,10 +1500,22 @@ def steel_helmet():
             v.co.x *= k; v.co.y *= k
     m = h.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.008
     bpy.context.view_layer.objects.active = h; bpy.ops.object.modifier_apply(modifier="solid")
-    bpy.ops.mesh.primitive_torus_add(major_radius=1, minor_radius=0.004 / max(rx, ry), major_segments=48, minor_segments=6, location=(c.x, c.y, mouth_z + 0.005))
-    st = bpy.context.active_object; st.name = "chinstrap"; st.scale = (rx + 0.004, ry * 0.6, max(rx, ry))
-    st.rotation_euler = (0, math.pi / 2 * 0, 0)
-    st.data.materials.append(M_dark); props.append((st, "Head"))
+    # chin strap: down each cheek in front of the ear and under the jaw, laid on the face by ray-casts
+    dg = bpy.context.evaluated_depsgraph_get(); tree = BVHTree.FromObject(body, dg); mwb = body.matrix_world; inv = mwb.inverted()
+    top = Vector((c.x, c.y - 0.035, brow_z - 0.012)); low = Vector((c.x, nose.y + 0.060, mouth_z - 0.075))
+    D = (low - top).normalized(); mid = top + D * ((low - top).length * 0.55)
+    pts = [Vector((c.x + rx + 0.022, top.y, top.z))]
+    for k in range(15):
+        th = math.radians(8 + 164 * k / 14)
+        d = Vector((1, 0, 0)) * math.cos(th) + D * math.sin(th)
+        hit = tree.ray_cast(inv @ (mid + d * 0.5), (inv.to_3x3() @ -d).normalized())
+        if hit[0] is not None:
+            pts.append(mwb @ hit[0] + d * 0.0045)
+    pts.append(Vector((c.x - rx - 0.022, top.y, top.z)))
+    for k in range(len(pts) - 1):
+        st = cyl(f"chinstrap_{k}", pts[k] - (pts[k + 1] - pts[k]) * 0.08, pts[k + 1] + (pts[k + 1] - pts[k]) * 0.08, 0.0042, M_strap, "Head", verts=6)
+    bz_ = pts[len(pts) // 2 - 3]                         # the buckle, on his left cheek
+    box_basis("strap_buckle", bz_ + Vector((0.003, 0, 0)), Vector((0, 1, 0)), Vector((0, 0, 1)), Vector((1, 0, 0)), (0.016, 0.014, 0.004), M_steel, "Head", bevel=0.001)
 
 
 def bandolier():
@@ -1066,9 +1565,9 @@ def robe():
                 best = max(best, r)
         return best
     bz = lambda n: (rig.matrix_world @ rig.data.bones[n].head_local)
-    hips = bz("Hips"); top = bz("Spine1").z + 0.22; bot = 0.06
+    hips = bz("Hips"); top = min(bz("LeftArm").z, bz("RightArm").z) - 0.02; bot = 0.06   # the tube stops under the shoulders
     cx, cy = hips.x, hips.y
-    NA, NZ = 40, 30
+    NA, NZ = 56, 30
     R = [[0.0] * NA for _ in range(NZ + 1)]
     for j in range(NZ + 1):
         z = top + (bot - top) * j / NZ
@@ -1086,37 +1585,126 @@ def robe():
     rings = []
     for j in range(NZ + 1):
         z = top + (bot - top) * j / NZ
-        rings.append([bm.verts.new((cx + math.cos(2 * math.pi * i / NA) * R[j][i] * (1 + 0.02 * math.sin(7 * i) * j / NZ),
-                                    cy + math.sin(2 * math.pi * i / NA) * R[j][i], z)) for i in range(NA)])
+        fall = (j / NZ) ** 1.3                       # folds deepen toward the hem; they only ever push OUT (legs swing inside)
+        fold = [1 + fall * (0.034 * (0.5 + 0.5 * math.sin(7 * 2 * math.pi * i / NA + 0.6))
+                            + 0.020 * (0.5 + 0.5 * math.sin(12 * 2 * math.pi * i / NA + 2.1))) for i in range(NA)]
+        rings.append([bm.verts.new((cx + math.cos(2 * math.pi * i / NA) * R[j][i] * fold[i],
+                                    cy + math.sin(2 * math.pi * i / NA) * R[j][i] * fold[i], z)) for i in range(NA)])
     for j in range(NZ):
         for i in range(NA):
             i2 = (i + 1) % NA
             f = bm.faces.new((rings[j][i], rings[j][i2], rings[j + 1][i2], rings[j + 1][i]))
             for lp, (u, w) in zip(f.loops, ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))):
-                lp[uvl].uv = (u / NA, 1 - w / NZ)
+                lp[uvl].uv = (u / NA, (1 - w / NZ) * 0.88)
+    # yoke: the cloth lies over the shoulders and climbs to a loose collar at the neck (the
+    # tube used to end in a flat barrel top at chin height)
+    def height_at(x, y, z0):
+        best = None
+        for t, mw in trees:
+            inv = mw.inverted()
+            h = t.ray_cast(inv @ Vector((x, y, z0)), (inv.to_3x3() @ Vector((0, 0, -1))).normalized())
+            if h[0] is not None:
+                wz = (mw @ h[0]).z; best = wz if best is None else max(best, wz)
+        return best
+    nk = bz("Neck"); zc = (nk.z + bz("Head").z) / 2; zcol = max(nk.z - 0.01, top + 0.05); MY = 7
+    rn = [min(radius_at(nk.x, nk.y, nk.z + 0.02, 2 * math.pi * i / NA), 0.092) + 0.024 for i in range(NA)]   # clear of the jaw
+    YR = [[0.0] * NA for _ in range(MY + 1)]; YZ = [[top] * NA for _ in range(MY + 1)]; YC = []
+    for m in range(MY + 1):
+        f = m / MY; YC.append((cx + (nk.x - cx) * f, cy + (nk.y - cy) * f))
+        for i in range(NA):
+            ang = 2 * math.pi * i / NA
+            YR[m][i] = R[0][i] + (rn[i] - R[0][i]) * f
+            hz = height_at(YC[m][0] + math.cos(ang) * YR[m][i], YC[m][1] + math.sin(ang) * YR[m][i], zc + 0.02)
+            fr = max(0.0, -math.sin(ang)); zn = zcol - 0.035 * fr                         # the neckline dips under the chin
+            z = top + (zn - top) * f ** 1.4
+            fq = min(1.0, max(0.0, (fr - 0.3) / 0.5)) * f                                 # (under the chin the ray finds the jaw, not the chest)
+            if m and hz is not None: z = max(z, min(hz + 0.030, (zcol + 0.035) * (1 - fq) + (zn + 0.004) * fq))
+            YZ[m][i] = max(z, YZ[m - 1][i]) if m else top
+    for _ in range(3):                    # cloth, not a cast of the shoulders
+        YZ = [YZ[0]] + [[(YZ[m][i] * 2 + YZ[m][(i + 1) % NA] + YZ[m][i - 1]) / 4 for i in range(NA)] for m in range(1, MY + 1)]
+    yoke = [[bm.verts.new((YC[m][0] + math.cos(2 * math.pi * i / NA) * YR[m][i], YC[m][1] + math.sin(2 * math.pi * i / NA) * YR[m][i], YZ[m][i]))
+             for i in range(NA)] for m in range(1, MY + 1)]
+    yoke.append([bm.verts.new((YC[MY][0] + math.cos(2 * math.pi * i / NA) * (rn[i] + 0.004), YC[MY][1] + math.sin(2 * math.pi * i / NA) * (rn[i] + 0.004),
+                               YZ[MY][i] + 0.014)) for i in range(NA)])                  # a rolled neck hem
+    seq = yoke[::-1] + [rings[0]]
+    for k in range(len(seq) - 1):
+        for i in range(NA):
+            i2 = (i + 1) % NA
+            f = bm.faces.new((seq[k][i], seq[k][i2], seq[k + 1][i2], seq[k + 1][i]))
+            for lp, (u, w) in zip(f.loops, ((i, k), (i + 1, k), (i + 1, k + 1), (i, k + 1))):
+                lp[uvl].uv = (u / NA, 1 - 0.12 * w / (len(seq) - 1))
+    print(f"enemy: robe tube top {top:.3f}, collar {zcol:.3f}..{max(YZ[MY]) + 0.014:.3f}, neck r {min(rn):.3f}..{max(rn):.3f}")
     me = bpy.data.meshes.new("robe"); bm.to_mesh(me); bm.free()
     o = bpy.data.objects.new("robe", me); bpy.context.collection.objects.link(o)
     bpy.context.view_layer.objects.active = o
     m = o.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.01
-    bpy.ops.object.modifier_apply(modifier="solid"); bpy.ops.object.shade_smooth()
+    bpy.ops.object.modifier_apply(modifier="solid")
+    o.data.polygons.foreach_set("use_smooth", [True] * len(o.data.polygons))   # (the operator only smooths SELECTED objects)
     o.data.materials.append(paint("robe", (0.07, 0.07, 0.08), grime=0.45, blood=4, seed=26))
     sp = bz("Spine").z; sp1 = bz("Spine1").z
-    g = {n: o.vertex_groups.new(name=n) for n in ("Spine1", "Spine", "Hips")}
-    for v in o.data.vertices:
-        z = v.co.z
-        if z >= sp1: g["Spine1"].add([v.index], 1.0, "REPLACE")
-        elif z >= sp:
-            t = (z - sp) / (sp1 - sp); g["Spine1"].add([v.index], t, "REPLACE"); g["Spine"].add([v.index], 1 - t, "REPLACE")
-        else:
-            t = max(0.0, min(1.0, (z - hips.z) / (sp - hips.z))); g["Spine"].add([v.index], t, "REPLACE"); g["Hips"].add([v.index], 1 - t, "REPLACE")
-    props.append((o, None))
+    def drape(ob):                        # skin by height, so everything on the robe moves as the robe does
+        g = {n: ob.vertex_groups.new(name=n) for n in ("Spine1", "Spine", "Hips")}
+        for v in ob.data.vertices:
+            z = v.co.z
+            if z >= sp1: g["Spine1"].add([v.index], 1.0, "REPLACE")
+            elif z >= sp:
+                t = (z - sp) / (sp1 - sp); g["Spine1"].add([v.index], t, "REPLACE"); g["Spine"].add([v.index], 1 - t, "REPLACE")
+            else:
+                t = max(0.0, min(1.0, (z - hips.z) / (sp - hips.z))); g["Spine"].add([v.index], t, "REPLACE"); g["Hips"].add([v.index], 1 - t, "REPLACE")
+        props.append((ob, None))
+    drape(o)
+    # cincture: a knotted rope round the waist, its two ends hanging down the front
+    def surf(z, ang, out):                # a point `out` metres off the robe at height z, bearing ang
+        fj = max(0.0, min(NZ - 1e-6, (top - z) / (top - bot) * NZ)); j = int(fj); fi = (ang % (2 * math.pi)) / (2 * math.pi) * NA
+        i = int(fi) % NA; i2 = (i + 1) % NA; u = fi - int(fi); w = fj - j
+        fall = (fj / NZ) ** 1.3
+        fold = 1 + fall * (0.034 * (0.5 + 0.5 * math.sin(7 * ang + 0.6)) + 0.020 * (0.5 + 0.5 * math.sin(12 * ang + 2.1)))
+        r = ((R[j][i] * (1 - u) + R[j][i2] * u) * (1 - w) + (R[j + 1][i] * (1 - u) + R[j + 1][i2] * u) * w) * fold + out
+        return Vector((cx + math.cos(ang) * r, cy + math.sin(ang) * r, z))
+    def tube(name, path, rad, closed, sides=8):
+        vs, fs = [], []
+        n = len(path)
+        for k, c in enumerate(path):
+            a, b = path[(k - 1) % n if closed else max(0, k - 1)], path[(k + 1) % n if closed else min(n - 1, k + 1)]
+            tan = (b - a).normalized(); nx = tan.cross(Vector((0, 0, 1)))
+            nx = nx.normalized() if nx.length > 1e-4 else Vector((1, 0, 0)); ny = tan.cross(nx)
+            tw = k * 0.9                                                    # the lay of the rope
+            for q in range(sides):
+                an = 2 * math.pi * q / sides + tw
+                vs.append(tuple(c + (nx * math.cos(an) + ny * math.sin(an)) * rad * (1.0 + 0.16 * math.cos(2 * (an - tw) + tw * 2))))
+        for k in range(n if closed else n - 1):
+            k2 = (k + 1) % n
+            for q in range(sides):
+                fs.append((k * sides + q, k * sides + (q + 1) % sides, k2 * sides + (q + 1) % sides, k2 * sides + q))
+        me2 = bpy.data.meshes.new(name); me2.from_pydata(vs, [], fs)
+        me2.polygons.foreach_set("use_smooth", [True] * len(me2.polygons))
+        ob = bpy.data.objects.new(name, me2); bpy.context.collection.objects.link(ob)
+        me2.materials.append(M_rope); return ob
+    M_rope = paint("cincture_cloth", (0.46, 0.39, 0.27), grime=0.5, seed=27)
+    zw = sp + 0.02; A0 = -math.pi / 2 + 0.22      # the knot sits just off-centre at the front
+    sag = lambda ang: 0.022 * (0.5 - 0.5 * math.cos(ang - A0))               # rides higher at the back
+    drape(tube("cincture", [surf(zw + sag(2 * math.pi * k / 72), 2 * math.pi * k / 72, 0.011) for k in range(72)], 0.011, True))
+    for e, (da, ln) in enumerate(((-0.05, 0.34), (0.07, 0.27))):
+        path = [surf(zw - ln * k / 9, A0 + da * (0.3 + k / 9), 0.012 + 0.008 * math.sin(math.pi * min(1, k / 3) / 2)) for k in range(10)]
+        drape(tube(f"cincture_end{e}", path, 0.009, False))
+        kb = blob(f"cincture_tassel{e}", path[-1], 0.016, M_rope, None, scale=(1, 1, 1.5), sub=2)
+        props.pop(); bpy.context.view_layer.update()
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True); drape(kb)
+    kn = blob("cincture_knot", surf(zw, A0, 0.016), 0.024, M_rope, None, scale=(1.2, 0.8, 1.0), sub=2, noise=0.12, seed=28)
+    props.pop(); bpy.ops.object.transform_apply(location=True, rotation=True, scale=True); drape(kn)
     # cowl: a smooth hood shaped round the head -- open face, deep at the back, falling to
     # the shoulders (copying the scalp surface came out as a ragged frame)
     c, rx, ry = skull_slice(eye_c.z)
     hood = blob("cowl", (c.x, c.y + 0.03, (crown + mouth_z) / 2 - 0.01), 1.0, o.data.materials[0], "Head",
                 scale=(rx + 0.05, ry + 0.07, (crown - mouth_z) / 2 + 0.09), sub=4)
     bmh = bmesh.new(); bmh.from_mesh(hood.data)
-    bmesh.ops.delete(bmh, geom=[v for v in bmh.verts if (v.co.y < -0.25 and v.co.z < 0.55) or v.co.z < -0.80], context="VERTS")
+    fco, fno = Vector((0, -0.46, 0.45)), Vector((0, 1, 0.34)).normalized()      # the face opening: one slanted cut, so
+    for co, no in ((fco, fno), (Vector((0, 0, -0.80)), Vector((0, 0, 1)))):       # the rim is an oval peaking over the brow
+        bmesh.ops.bisect_plane(bmh, geom=bmh.verts[:] + bmh.edges[:] + bmh.faces[:], dist=1e-5,
+                               plane_co=co, plane_no=no)
+    gone = [f for f in bmh.faces if (f.calc_center_median() - fco).dot(fno) < 0
+            or f.calc_center_median().z < -0.80]
+    bmesh.ops.delete(bmh, geom=gone, context="FACES")
     bmh.to_mesh(hood.data); bmh.free()
     rnd = random.Random(5)
     for v in hood.data.vertices:          # soft cloth folds + the drape pooling at the back of the neck
@@ -1124,7 +1712,7 @@ def robe():
         if v.co.z < -0.3 and v.co.y > 0: v.co.y += 0.12 * (-v.co.z - 0.3)
     mm = hood.modifiers.new("solid", "SOLIDIFY"); mm.thickness = 0.012
     bpy.context.view_layer.objects.active = hood; bpy.ops.object.modifier_apply(modifier="solid")
-    bpy.ops.object.shade_smooth()
+    hood.data.polygons.foreach_set("use_smooth", [True] * len(hood.data.polygons))
 
 
 def iron_cross():
@@ -1226,7 +1814,7 @@ def fire_helmet():
     cur = bpy.data.objects.new("curtain", me); bpy.context.collection.objects.link(cur)
     bpy.context.view_layer.objects.active = cur
     m = cur.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.006; bpy.ops.object.modifier_apply(modifier="solid")
-    bpy.ops.object.shade_smooth()
+    cur.data.polygons.foreach_set("use_smooth", [True] * len(cur.data.polygons))
     me.materials.append(M_leather); props.append((cur, "Head"))
 
 
@@ -1347,7 +1935,7 @@ def tentacles():
             for (k, w) in ws:
                 if w > 0:
                     groups[k].add([vi], w, "ADD")
-        bpy.context.view_layer.objects.active = ob; bpy.ops.object.shade_smooth()
+        me.polygons.foreach_set("use_smooth", [True] * len(me.polygons))
         me.materials.append(M_flesh); props.append((ob, None))
         # torn-open wound where it bursts out of the back
         blob(f"wound_{ti}", pts[0] + (pts[1] - pts[0]) * 0.2, 0.07 if ti < 2 else 0.06, M_flesh, roots[ti][2],
@@ -1385,6 +1973,32 @@ for o, bone in props:
         vg.add(list(range(len(o.data.vertices))), 1.0, "REPLACE")
     o.parent = rig
     md = o.modifiers.new("rig", "ARMATURE"); md.object = rig
+
+if os.environ.get("ENEMY_LOOK"):     # dev: look-dev stills of the rest pose (skin, clothes, props), then stop -- no mocap
+    LK = os.environ["ENEMY_LOOK"]; os.makedirs(LK, exist_ok=True)
+    scene.render.engine = "BLENDER_EEVEE"
+    w = bpy.data.worlds.new("w"); scene.world = w; w.use_nodes = True
+    w.node_tree.nodes["Background"].inputs[0].default_value = (0.16, 0.16, 0.18, 1)
+    w.node_tree.nodes["Background"].inputs[1].default_value = 0.7
+    sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", "SUN")); sun.data.energy = 3.5
+    sun.rotation_euler = (math.radians(50), 0, math.radians(30)); scene.collection.objects.link(sun)
+    cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam")); scene.collection.objects.link(cam); scene.camera = cam
+    ez = eye_c.z
+    for nm, loc, rot, lens, res in (("face", (0.0, -0.95, ez - 0.01), (90, 0, 0), 70, (640, 720)),
+                                    ("face34", (0.62, -0.72, ez), (90, 0, 40.7), 70, (640, 720)),
+                                    ("headside", (0.95, 0.02, ez + 0.01), (90, 0, 90), 70, (640, 720)),
+                                    ("headback", (-0.45, 0.85, ez + 0.02), (90, 0, 208), 70, (640, 720)),
+                                    ("front", (0.0, -4.6, 0.95), (90, 0, 0), 60, (760, 900)),
+                                    ("back", (0.0, 4.6, 0.95), (90, 0, 180), 60, (760, 900)),
+                                    ("arm", (0.75, -1.1, ez - 0.45), (90, 0, 10), 60, (640, 720))):
+        if os.environ.get("ENEMY_LOOK_VIEWS") and nm not in os.environ["ENEMY_LOOK_VIEWS"].split(","):
+            continue
+        cam.location = loc; cam.rotation_euler = tuple(math.radians(a) for a in rot); cam.data.lens = lens
+        scene.render.resolution_x, scene.render.resolution_y = res
+        scene.render.filepath = os.path.join(LK, f"{ENEMY}_{nm}.png")
+        bpy.ops.render.render(write_still=True)
+    print("enemy: look stills in", LK)
+    sys.exit(0)
 
 # =============================================================== 4. mocap retarget
 CHILD = {"LeftShoulder": "LeftArm", "LeftArm": "LeftForeArm", "LeftForeArm": "LeftHand",
@@ -1483,6 +2097,8 @@ def sample(src, frames, loop, yaw_fix=True, face=None):
     # root motion: loops stay in place (drift removed), one-shots start at the origin
     n = len(out)
     first, last = out[0]["Hips"][1].copy(), out[-1]["Hips"][1].copy()
+    global LAST_TRAVEL      # how far the take really went: a loop's own ground speed (take() records it)
+    LAST_TRAVEL = math.hypot(last.x - first.x, last.y - first.y)
     for i, p in enumerate(out):
         h = p["Hips"][1]
         if loop:
@@ -1540,10 +2156,14 @@ def bvh_frames(src, dump_a, dump_b):
 
 clips = []
 _cache = {}
+LAST_TRAVEL = 0.0
+GAIT_MPS = {}       # role -> m/s the loop walks (the game plays loops at 30 keys/s, wrapping after the last)
 def take(role):
     bvh, d0, d1, loop, xf, *face = SPEC["clips"][role]
     src = import_bvh(bvh)
     poses = fist(sample(src, bvh_frames(src, d0, d1), loop=loop, yaw_fix=loop, face=(face or [None])[0]))
+    if loop and role != "idle":
+        GAIT_MPS[role] = LAST_TRAVEL * 30.0 / len(poses)
     bpy.data.objects.remove(src, do_unlink=True)
     return crossfade(poses, xf) if xf else poses
 idle, walk, run, attack, death = (take(r) for r in ("idle", "walk", "run", "attack", "death"))
@@ -1722,6 +2342,211 @@ def synth_hit(base, n=14):
 
 hit = synth_hit(idle)
 
+
+# body-part flinches (the game picks one from where the shot landed; "hit" above = centre mass).
+# All layered on the idle's first pose about WORLD axes; model faces -Y, its left is +X.
+#   +X rotation bends the upper body FORWARD; +Z turns its left shoulder BACK.
+def _flinch_env(t, attack=1.6):
+    return math.sin(math.pi * min(1.0, t * attack)) * (1.0 - t * 0.35)
+
+
+def synth_hit_zone(base, zone, n=14):
+    # both fists on one shaft in the flinches (liquidator's shovel): the arms ride the body --
+    # flinging one out would tear the other hand off the handle
+    two_hand = SPEC.get("two_hand") == "shaft" and any(c.startswith("hit") for c in SPEC.get("two_hand_clips", ("hit",)))
+    af = 0.0 if two_hand else 1.0
+    out = []
+    for i in range(n):
+        t = i / (n - 1)
+        p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in base[0].items()}
+        if zone == "head":                  # the head snaps back, the body follows a little
+            e = _flinch_env(t, 2.4)         # sharper
+            for bn, deg in (("Spine1", -9), ("Neck", -16), ("Head", -34)):
+                turn_world(p, bn, (1, 0, 0), deg * e)
+            turn_world(p, "Head", (0, 1, 0), 9 * e)                 # and twists off the impact
+            for side, sx in (("Left", -1), ("Right", 1)):
+                turn_world(p, f"{side}Arm", (0, 1, 0), af * (sx * 14 * e))
+                turn_world(p, f"{side}ForeArm", (1, 0, 0), af * (-16 * e))
+            p["Hips"][1] = p["Hips"][1] + Vector((0, -0.025 * e, 0))
+        elif zone in ("left", "right"):     # spun by a shot to one side: that shoulder goes back,
+            e = _flinch_env(t)              # the body leans away, that arm flings out
+            k = 1 if zone == "left" else -1                         # +1: his left (+X) side was hit
+            for bn, deg in (("Spine", 9), ("Spine1", 18), ("Neck", 6)):
+                turn_world(p, bn, (0, 0, 1), k * deg * e)           # hit shoulder back
+            for bn, deg in (("Spine", 5), ("Spine1", 7)):
+                turn_world(p, bn, (0, 1, 0), k * deg * e)           # lean away from the hit
+            turn_world(p, "Head", (0, 1, 0), -k * 10 * e)
+            side = "Left" if k > 0 else "Right"; sx = -1 if k > 0 else 1
+            turn_world(p, f"{side}Arm", (0, 1, 0), af * (sx * 34 * e))     # the hit arm flies out...
+            turn_world(p, f"{side}Arm", (0, 0, 1), af * (k * 18 * e))      # ...and back
+            turn_world(p, f"{side}ForeArm", (1, 0, 0), af * (-20 * e))
+            other = "Right" if k > 0 else "Left"
+            turn_world(p, f"{other}Arm", (1, 0, 0), af * (-12 * e))        # the other arm comes up a little
+            p["Hips"][1] = p["Hips"][1] + Vector((0, -0.02 * e, 0))
+        elif zone == "leg":                 # the left leg is knocked out: knee buckles, he pitches
+            e = _flinch_env(t, 1.4)         # forward and drops, arms out for balance, then rights himself
+            turn_world(p, "LeftUpLeg", (1, 0, 0), -22 * e)          # thigh forward
+            turn_world(p, "LeftLeg", (1, 0, 0), 48 * e)             # knee buckles
+            turn_world(p, "RightUpLeg", (1, 0, 0), -10 * e)         # the standing leg gives a little too
+            turn_world(p, "RightLeg", (1, 0, 0), 20 * e)
+            for bn, deg in (("Spine", 10), ("Spine1", 14)):
+                turn_world(p, bn, (1, 0, 0), deg * e)               # pitch forward
+            turn_world(p, "Spine1", (0, 1, 0), 6 * e)               # dip toward the hurt leg
+            for side, sx in (("Left", -1), ("Right", 1)):
+                turn_world(p, f"{side}Arm", (0, 1, 0), af * (sx * 30 * e)) # arms out for balance
+                turn_world(p, f"{side}ForeArm", (1, 0, 0), af * (-14 * e))
+            p["Hips"][1] = p["Hips"][1] + Vector((0, 0, -0.07 * e))  # drops
+        out.append(p)
+    return out
+
+
+HITX = {f"hit_{z}": synth_hit_zone(idle, z) for z in ("head", "left", "right", "leg")}
+
+
+def _rot_root(poses, Rz, shift):
+    """Turn whole poses about world Z by Rz (3x3) and shift the hips (world offset), per frame lists."""
+    RH = Rt0["Hips"]
+    for i, p in enumerate(poses):
+        R = Rz[i] if isinstance(Rz, list) else Rz
+        q = p["Hips"][0].to_matrix()
+        p["Hips"][0] = (RH.inverted() @ R @ RH @ q).to_quaternion()
+        w = RH @ p["Hips"][1]
+        sh = shift[i] if isinstance(shift, list) else shift
+        p["Hips"][1] = RH.inverted() @ (R @ w + sh)
+    return poses
+
+
+def _hips_fwd(p):
+    """World facing of the pelvis (its forward axis flattened onto the floor)."""
+    W = Rt0["Hips"] @ p["Hips"][0].to_matrix()
+    f = W @ (Rt0["Hips"].inverted() @ Vector((0, -1, 0)))
+    f.z = 0
+    return f.normalized() if f.length > 1e-6 else Vector((0, -1, 0))
+
+
+def join_knockdown(fall, getup, hold=6, xf=6):
+    """Knocked flat, then back up: the get-up is turned + shifted so it starts exactly where the
+    fall left the body, easing back to facing -Y at the origin by the time he's standing (so the
+    run that follows doesn't pop). A short hold on the floor, then a crossfade into the get-up."""
+    end = fall[-1]
+    n = len(getup)
+    a0 = math.atan2(_hips_fwd(end).x, -_hips_fwd(end).y) - math.atan2(_hips_fwd(getup[0]).x, -_hips_fwd(getup[0]).y)
+    RH = Rt0["Hips"]
+    e_w, g0 = RH @ end["Hips"][1], None
+    Rs, shifts = [], []
+    for i in range(n):
+        t = i / max(1, n - 1)
+        k = t * t * (3 - 2 * t)
+        R = Matrix.Rotation(a0 * (1 - k), 3, Vector((0, 0, 1)))
+        Rs.append(R)
+    # start offset: where the turned get-up's hips are vs. where the fall ended (horizontal only)
+    gw0 = Rs[0] @ (RH @ getup[0]["Hips"][1])
+    d0 = Vector((e_w.x - gw0.x, e_w.y - gw0.y, 0))
+    for i in range(n):
+        t = i / max(1, n - 1); k = t * t * (3 - 2 * t)
+        gwi = Rs[i] @ (RH @ getup[i]["Hips"][1])
+        tgt = Vector((-gwi.x, -gwi.y, 0))                     # standing at the origin by the end
+        shifts.append(d0.lerp(tgt, k))
+    getup = _rot_root(getup, Rs, shifts)
+    # height: sample() measures hips against the take's FIRST frame, taken to be standing -- but
+    # this take opens with him flat on his back, so the whole get-up came out ~0.8 m up in the
+    # air (he stood up on nothing). Ground it on its end: standing, the planted ankle at rest height.
+    def ankle(p, side):
+        bn, v = side + "Foot", Vector((0, 0, 0))
+        while tbones[bn].parent is not None:
+            par = tbones[bn].parent.name
+            v = v + fk_world(p, par) @ (Rt0[par].inverted() @ (Ht0[bn] - Ht0[par])); bn = par
+        return (Ht0[bn] + v + RH @ p["Hips"][1]).z
+    low = min(min(ankle(p, "Left"), ankle(p, "Right")) for p in getup[-8:])
+    dz = min(Ht0["LeftFoot"].z, Ht0["RightFoot"].z) - low
+    getup = _rot_root(getup, Matrix.Identity(3), Vector((0, 0, dz)))
+    print(f"enemy: knockdown get-up moved {dz:+.3f} m to stand on the floor; hips lying {(Ht0['Hips'] + RH @ end['Hips'][1]).z:.2f} -> "
+          f"{(Ht0['Hips'] + RH @ getup[0]['Hips'][1]).z:.2f}, standing {(Ht0['Hips'] + RH @ getup[-1]['Hips'][1]).z:.2f} (rest {Ht0['Hips'].z:.2f})")
+    out = fall + [{b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in end.items()} for _ in range(hold)]
+    for i in range(xf):                                       # floor pose -> get-up start
+        w = (i + 1) / (xf + 1)
+        g = getup[0]
+        out.append({b: [q.slerp(g[b][0] if q.dot(g[b][0]) >= 0 else -g[b][0], w),
+                        (l.lerp(g[b][1], w) if l is not None and g[b][1] is not None else l)]
+                    for b, (q, l) in end.items()})
+    return out + getup
+
+
+def synth_crumple(base, end, mode, n=40):
+    """Procedural deaths that end on a mocap floor pose. Phase A (to 35%): the legs give --
+    mode "head": both knees at once, straight down, head lolling (a dead drop); mode "leg": the
+    hit (left) knee first, the body twisting down onto it. Phase B: topple from that slump into
+    `end` (a lying pose from a fall take), every bone slerped, the hips carried across."""
+    slump = None
+    out = []
+    nA = int(n * 0.35)
+    for i in range(nA):
+        k = (i + 1) / nA
+        k = k * k * (3 - 2 * k) if mode == "leg" else 1 - (1 - k) ** 3      # a headshot drops fast
+        p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in base.items()}
+        if mode == "head":
+            for side in ("Left", "Right"):
+                turn_world(p, f"{side}UpLeg", (1, 0, 0), -78 * k)
+                turn_world(p, f"{side}Leg", (1, 0, 0), 112 * k)
+            for bn, deg in (("Spine", 12), ("Spine1", 16), ("Neck", 20), ("Head", 26)):
+                turn_world(p, bn, (1, 0, 0), deg * k)                    # folds and lolls forward
+            turn_world(p, "Head", (0, 1, 0), 18 * k)
+            for side, sx in (("Left", -1), ("Right", 1)):
+                turn_world(p, f"{side}Arm", (0, 1, 0), sx * 16 * k)      # arms fall limp, a little out (blades clear the thighs)
+            p["Hips"][1] = p["Hips"][1] + Vector((0, 0, -0.48 * k))
+        else:
+            turn_world(p, "LeftUpLeg", (1, 0, 0), -80 * k)
+            turn_world(p, "LeftLeg", (1, 0, 0), 115 * k)                 # down onto the hurt knee
+            turn_world(p, "RightUpLeg", (1, 0, 0), -30 * k)
+            turn_world(p, "RightLeg", (1, 0, 0), 45 * k)
+            for bn, deg in (("Spine", 14), ("Spine1", 18)):
+                turn_world(p, bn, (1, 0, 0), deg * k)
+            turn_world(p, "Spine1", (0, 1, 0), 10 * k)                   # twists down toward it
+            for side, sx in (("Left", -1), ("Right", 1)):
+                turn_world(p, f"{side}Arm", (0, 1, 0), sx * 22 * k)      # arms out to catch himself
+            p["Hips"][1] = p["Hips"][1] + Vector((0.05 * k, 0, -0.38 * k))
+        out.append(p)
+        slump = p
+    for i in range(n - nA):
+        k = (i + 1) / (n - nA)
+        k = k * k * (3 - 2 * k)
+        p = {}
+        for b, (q, l) in slump.items():
+            qe, le = end[b]
+            p[b] = [q.slerp(qe if q.dot(qe) >= 0 else -qe, k), (l.lerp(le, k) if l is not None and le is not None else l)]
+        out.append(p)
+    return out
+
+
+def synth_riddled(death, n=18, seed=7):
+    """Minigun / LMG kill: stood there shuddering under the stream for ~0.6 s, then the fall."""
+    rnd = random.Random(seed)
+    base = death[0]
+    out = []
+    for i in range(n):
+        p = {b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in base.items()}
+        a = 1.0 - 0.3 * i / n
+        for bn, amp in (("Spine", 5), ("Spine1", 8), ("Neck", 7), ("Head", 9)):
+            turn_world(p, bn, (1, 0, 0), rnd.uniform(-amp, amp) * a)
+            turn_world(p, bn, (0, 0, 1), rnd.uniform(-amp, amp) * a)
+        for side in ("Left", "Right"):
+            turn_world(p, f"{side}Arm", (rnd.uniform(-1, 1), rnd.uniform(-1, 1), rnd.uniform(-1, 1)), rnd.uniform(-14, 14) * a)
+        p["Hips"][1] = p["Hips"][1] + Vector((rnd.uniform(-0.015, 0.015), rnd.uniform(-0.01, 0.03), 0))
+        out.append(p)
+    return out + [{b: [q.copy(), (l.copy() if l is not None else None)] for b, (q, l) in f.items()} for f in death]
+
+
+# EXTRA clips: name -> (poses, kind, bake step). kind picks how later passes treat it
+# ("death": de-clipped + gripped like the death; "walk": a loop, like the walk; "hit": like the flinch)
+EXTRA = {
+    "death_blast": (take("death_blast"), "death", 2),
+    "death_riddled": (synth_riddled(death), "death", 2),
+    "knockdown": (join_knockdown(take("knock_fall"), take("knock_getup")), "hit", 2),
+    "limp": (take("limp"), "walk", 1),
+}
+EXTRA["death_head"] = (synth_crumple(idle[0], death[-1], "head"), "death", 2)            # ends on his back
+EXTRA["death_leg"] = (synth_crumple(idle[0], EXTRA["death_blast"][0][-1], "leg"), "death", 2)   # ends on his face
+
 # spread_arms=(left arm, right arm, wrists) degrees: the zombie lurch reaches both hands forward and IN, which
 # crossed the head chef's twin cleavers through each other. Swing each arm (and wrist) out
 # about the world vertical on the walk/run loops -- the same offset every frame, so the
@@ -1736,6 +2561,29 @@ def spread_arms(poses, left_deg, right_deg, hand_deg):
 
 if SPEC.get("spread_arms"):
     walk, run = (spread_arms(ps, *SPEC["spread_arms"]) for ps in (walk, run))
+
+# the rest of the gait ladder (stride / jog between the creep and the run), loops like the walk
+for _g in ("stride", "jog"):
+    if _g in SPEC["clips"]:
+        _ps = take(_g)
+        EXTRA[_g] = (spread_arms(_ps, *SPEC["spread_arms"]) if SPEC.get("spread_arms") else _ps, "walk", 1)
+
+
+# hunch: the mocap runners are upright athletes; these are not. Tip the chest and neck forward
+# and hang the head on the quicker gaits (the same offset every frame, so the loops still close).
+def hunch(poses, deg):
+    for p in poses:
+        turn_world(p, "Spine", (1, 0, 0), deg * 0.5)
+        turn_world(p, "Spine1", (1, 0, 0), deg * 0.5)
+        turn_world(p, "Neck", (1, 0, 0), deg * 0.35)
+        turn_world(p, "Head", (1, 0, 0), -deg * 0.9)      # eyes stay on the prey
+    return poses
+
+
+if SPEC.get("hunch"):
+    run = hunch(run, SPEC["hunch"])
+    EXTRA = {k: ((hunch(v, SPEC["hunch"]) if k in ("stride", "jog") else v), kind, st) for k, (v, kind, st) in EXTRA.items()}
+print("enemy: gait m/s " + " ".join(f"{k}={v:.2f}" for k, v in GAIT_MPS.items()))
 
 # one_hand_attack (priest): the base melee swing is two-handed -- his lantern arm keeps its idle
 # pose (local rotations, frame by frame), so only the right hand strikes
@@ -1927,7 +2775,7 @@ if SPEC.get("aim_gun") and GUN.get("parts"):
                 "LeftForeArm", "RightForeArm", "LeftHand", "RightHand", "LeftFinger", "RightFinger", "LThumb", "RThumb"))]
         ref = attack[len(attack) // 2]
         ref = {bn: ref[bn][0].copy() for bn in ARMS if bn in ref}
-        for clip in (idle, walk, run, hit, attack):
+        for clip in (idle, walk, run, hit, attack, *HITX.values(), EXTRA["limp"][0]):
             for p in clip:
                 for bn, q in ref.items():
                     if bn in p:
@@ -1937,7 +2785,7 @@ if SPEC.get("aim_gun") and GUN.get("parts"):
         d_r, up_r = Q @ GUN["d"], Q @ GUN["up"]
         carry = Vector((0.25, -0.75, -0.6)).normalized()      # ahead, down, a little across the body
         worst = 0.0
-        for clip in (idle, walk, run, hit):
+        for clip in (idle, walk, run, hit, *HITX.values(), EXTRA["limp"][0], EXTRA["knockdown"][0]):
             for p in clip:
                 Rp = fk_world(p, "RightHand") @ Rt0["RightHand"].inverted()
                 W = frame(carry, Vector((0, 0, 1))) @ frame(Rp @ d_r, Rp @ up_r).inverted()
@@ -2032,7 +2880,7 @@ def _apply_pose(p):
     bpy.context.view_layer.update()
 
 
-def declip(poses, loop, label=""):
+def declip(poses, loop, label="", deep=False):
     if DECLIP is None or not poses:
         return poses
     import numpy as _np
@@ -2105,10 +2953,11 @@ def declip(poses, loop, label=""):
             return None
         return (side, deg, ax.normalized(), bone)
 
-    def solve(p, iters=20, wrist_after=10):
+    def solve(p, iters=20, wrist_after=10, fore_after=None, margin=0.0):
         # upper-arm swings first; if a long prop (shovel, cross) is still in the head after
         # wrist_after rounds, the wrist joins in and tips the prop itself away
         moved = 0
+        last = {}
         for it in range(iters):
             _apply_pose(p)
             trees = body_trees()
@@ -2121,6 +2970,9 @@ def declip(poses, loop, label=""):
                     if t: turns.append(t)
                     if it >= wrist_after and not gun:
                         t = swing(side, where, push.normalized(), min(8.0, 2.0 + 0.1 * n), bone="Hand")
+                        if t: turns.append(t)
+                    if fore_after is not None and it >= fore_after and not gun:   # deep: the elbow too
+                        t = swing(side, where, push.normalized(), min(8.0, 2.0 + 0.1 * n), bone="ForeArm")
                         if t: turns.append(t)
             if len(W) == 2:
                 ov = W["Left"][2].overlap(W["Right"][2])
@@ -2135,9 +2987,15 @@ def declip(poses, loop, label=""):
                             t = swing(side, Vector(tuple(W[side][0].mean(0))), sv, 4.0, bone="Hand")
                             if t: turns.append(t)
             if not turns:
+                # just clear is not clear enough: the baked keys are a few frames apart and the
+                # blend between two touching poses dips back in -- carry on a little further out
+                if moved and margin:
+                    for (side, bone), ax in last.items():
+                        turn_world(p, f"{side}{bone}", ax, margin)
                 break
             for side, deg, ax, bone in turns:
                 turn_world(p, f"{side}{bone}", ax, deg)
+                last[(side, bone)] = ax
             moved += 1
         return moved
 
@@ -2158,7 +3016,23 @@ def declip(poses, loop, label=""):
             qa = Quaternion(acc); qa.normalize()
             poses[i][a][0] = qa @ before[i][a]
     left = sum(1 for p in poses if solve(p, iters=45, wrist_after=3) > 0)   # ...then mop up the residue
-    print(f"enemy: declip {label}: {n_fixed}/{n} frames corrected, {left} re-touched after smoothing")
+    if left and not deep:     # a frame the mop-up ran out of rounds on (a cross against a swinging robe):
+        for _ in range(3):    # keep at it, wrist and all, until a pass finds nothing left to move
+            again = sum(1 for p in poses if solve(p, iters=60, wrist_after=1, margin=2.5) > 0)
+            if not again:
+                break
+        left = again
+    if deep:      # falls (deaths, knockdown): fast motion, body folding over the weapon -- a harder last pass
+        left = sum(1 for p in poses if solve(p, iters=90, wrist_after=1, fore_after=6) > 0)
+    stuck = []
+    if left and not deep:
+        for i, p in enumerate(poses):
+            _apply_pose(p); trees = body_trees()
+            for side in wpn:
+                _, _, c = contacts(weapon(side), trees, side)
+                if c: stuck.append((i, side, c))
+    print(f"enemy: declip {label}: {n_fixed}/{n} frames corrected, {left} re-touched after smoothing"
+          + (f", still touching {stuck[:8]}" if stuck else ""))
     return poses
 
 
@@ -2196,6 +3070,7 @@ def fix_knees(poses, label):
 
 idle, walk, run, attack, hit, death = (fix_knees(ps, lb) for ps, lb in
     ((idle, "idle"), (walk, "walk"), (run, "run"), (attack, "attack"), (hit, "hit"), (death, "death")))
+EXTRA = {k: (fix_knees(v, k), kind, st) for k, (v, kind, st) in EXTRA.items()}
 
 if DECLIP is not None:
     idle, walk, run, hit, death = (declip(ps, lp, label=lb) for ps, lp, lb in
@@ -2203,6 +3078,9 @@ if DECLIP is not None:
                                     (hit, False, "hit"), (death, False, "death")))
     if not GUN.get("parts"):        # gun aims are hand-built (aim_gun); melee swings get de-clipped
         attack = declip(attack, False, label="attack")
+    HITX = {k: declip(v, False, label=k) for k, v in HITX.items()}
+    EXTRA = {k: (declip(v, kind == "walk", label=k, deep=(k.startswith("death") or k == "knockdown")), kind, st)
+             for k, (v, kind, st) in EXTRA.items()}
 
 # grip: a hand that holds a prop is a closed fist on EVERY frame. fist() adds a curl on top of
 # the mocap, so open-handed clips (the run's flat palms) left knives floating off open
@@ -2250,8 +3128,8 @@ def fore_clear(p, hole, ax):
 
 if SPEC.get("two_hand") == "shaft":
     hbR = hand_basis("Right"); worst = 0.0; worst_clear = 9.0
-    TH = {"idle": idle, "walk": walk, "run": run, "hit": hit, "attack": attack}
-    for cn in SPEC.get("two_hand_clips", ("idle", "walk", "run", "hit", "attack")):
+    TH = {"idle": idle, "walk": walk, "run": run, "hit": hit, "attack": attack, **HITX, "limp": EXTRA["limp"][0]}
+    for cn in SPEC.get("two_hand_clips", ("idle", "walk", "run", "hit", "attack", *HITX.keys(), "limp")):
         for p in TH[cn]:
             Rr = fk_world(p, "RightHand") @ Rt0["RightHand"].inverted()
             hole = fk_pos(p, "RightHand") + Rr @ (hbR["hole"] - hbR["hand"])
@@ -2294,13 +3172,19 @@ if SPEC.get("two_hand") == "shaft":
           f"min forearm clearance {worst_clear * 100:.1f} cm")
 
 idle, walk, run, attack, hit, death = (grip(ps) for ps in (idle, walk, run, attack, hit, death))
+HITX = {k: grip(v) for k, v in HITX.items()}
+EXTRA = {k: (grip(v), kind, st) for k, (v, kind, st) in EXTRA.items()}
 print(f"enemy: grip {GRIP_SIDES} closed, relaxed {sorted({b[:4] for b in RELAXQ})} on every frame")
 
 idle, walk, run, attack, hit, death = (tentacle_motion(ps, r) for ps, r in
     ((idle, "idle"), (walk, "walk"), (run, "run"), (attack, "attack"), (hit, "hit"), (death, "death")))
+HITX = {k: tentacle_motion(v, "hit") for k, v in HITX.items()}
+EXTRA = {k: (tentacle_motion(v, kind), kind, st) for k, (v, kind, st) in EXTRA.items()}
 
 for name, poses, step in (("idle", idle, 1), ("walk", walk, 1), ("run", run, 1),
-                          ("attack", attack, 2), ("hit", hit, 1), ("death", death, 2)):
+                          ("attack", attack, 2), ("hit", hit, 1), ("death", death, 2),
+                          *((k, v, 1) for k, v in HITX.items()),
+                          *((k, v, st) for k, (v, kind, st) in EXTRA.items())):
     clips.append(bake(name, poses, step))
 if "cast" in SPEC["clips"]:     # optional spell clip (priest), separate from the melee swing
     clips.append(bake("cast", grip(declip(fix_knees(take("cast"), "cast"), False, label="cast")), 2))
@@ -2400,7 +3284,7 @@ def material_image(m):
     if not m or not m.use_nodes:
         return None
     for n in m.node_tree.nodes:
-        if n.type == "TEX_IMAGE" and n.image and n.name != "ORM":
+        if n.type == "TEX_IMAGE" and n.image and n.name not in ("ORM", "EMIT"):
             return n.image
     return None
 
@@ -2577,6 +3461,8 @@ bpy.ops.export_scene.gltf(export_tangents=DETAIL, filepath=OUT, export_format="G
                           export_animations=True, export_animation_mode="NLA_TRACKS", export_skins=True,
                           export_apply=True, export_materials="EXPORT", export_image_format="AUTO",
                           export_frame_range=False, export_force_sampling=True)
+with open(os.path.splitext(OUT)[0] + ".gait", "w") as _f:      # the game reads this: role, m/s (at scale 1)
+    _f.write("".join(f"{k} {v:.3f}\n" for k, v in GAIT_MPS.items()))
 print("enemy: wrote", OUT, os.path.getsize(OUT) // 1024, "KB;",
       sum(len(o.data.vertices) for o in bpy.data.objects if o.type == "MESH"), "verts total")
 

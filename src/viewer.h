@@ -226,6 +226,9 @@ static int RunGallery(void){
         const char *c=strchr(rs,':'); if (c) rangeTest=(float)atof(c+1); } }
     for (int c=0;c<NUM_CRATES;c++) g_crates[c].pos.y=-100.0f;   // the arena's invisible crates would eat bullets
     if (range){ RangeTargetReset(type); RangeAimHome(type); }
+    float aimDY=0, aimDP=0;                                                // dev: CHERNOBYL_GALLERY_AIM="yaw:pitch" degrees off the chest
+    { const char *ae=getenv("CHERNOBYL_GALLERY_AIM"); if (ae && *ae){ aimDY=(float)atof(ae); const char *c=strchr(ae,':'); if (c) aimDP=(float)atof(c+1); } }
+    if (range){ g_yaw+=aimDY*DEG2RAD; g_pitch+=aimDP*DEG2RAD; }
     GalThumbs();
     EnableCursor();
     while (!WindowShouldClose()){
@@ -272,10 +275,18 @@ static int RunGallery(void){
         rg=&g_rig[type];
         if (!rg->ok || rg->animN<=0){ type=(type+1)%EN_NTYPES; continue; }
         ModelAnimation *an=&rg->anim[rg->clip[kGalRole[st]]];
+        float galRate=GalFps(type,st);
+        if ((st==GS_WALK || st==GS_RUN) && rg->gaitN>0){                    // the gait and cadence the game picks for this pace
+            float spd=(st==GS_RUN)?kEnemy[type].speed:kEnemy[type].speed*0.45f, gsc=kEnemy[type].scale, best=1e9f; int role=kGalRole[st];
+            for (int g=0;g<rg->gaitN;g++){ float m=rg->mps[rg->gait[g]]*gsc; if (m<0.1f) continue;
+                float d=fabsf(logf(spd/m)); if (d<best){ best=d; role=rg->gait[g]; } }
+            float m=rg->mps[role]*gsc;
+            an=&rg->anim[rg->clip[role]]; if (m>0.1f) galRate=30.0f*Clamp(spd/m,0.5f,1.7f);
+        }
         int nf=ANIM_FRAMES(*an); if (nf<1) nf=1;
         if (!paused){
             stT+=dt;
-            float prev=frame; frame+=dt*GalFps(type,st);
+            float prev=frame; frame+=dt*galRate;
             if (st==GS_DIE){ if (frame>=(float)rg->deathFrame){ frame=(float)rg->deathFrame; hold+=dt; } }
             else {
                 if (st==GS_ATTACK && kEnemy[type].kind==AK_BOLT){           // the bolt leaves the hand
@@ -294,6 +305,9 @@ static int RunGallery(void){
                        rg=&g_rig[type]; if (!rg->ok || rg->animN<=0) continue;
                        an=&rg->anim[rg->clip[kGalRole[st]]]; nf=ANIM_FRAMES(*an); if (nf<1) nf=1; }
         }
+        { const char *fc=getenv("CHERNOBYL_GALLERY_CLIP");               // dev: force a clip by glb name (stills)
+          if (fc && *fc) for (int ci=0;ci<rg->animN;ci++) if (!strcmp(rg->anim[ci].name,fc)){
+              an=&rg->anim[ci]; nf=ANIM_FRAMES(*an); if (nf<1) nf=1; if (frame>=nf) frame=0; } }
         if (poseN>0) frame=poseF[poseI]*(nf-1);
 
         // ---- weapon range: aim, trigger, the target's flinch / death / stand-up
@@ -320,16 +334,28 @@ static int RunGallery(void){
             Weapon *cw=&g_weapons[g_curWeapon];
             if (cw->magSize>0 && cw->reserve<cw->magSize) cw->reserve=cw->reserveStart;   // the range never runs dry
             if (tg->state==0) RangeTargetReset(type);
-            if (tg->state==2){                                             // shot dead: fall, lie there, stand back up
+            static float limpClock=0;
+            int dRole=tg->deathRole?tg->deathRole:CL_DEATH;
+            if (tg->state==2){                                             // shot dead: fall (by cause), lie there, stand back up
                 deadT+=dt;
-                drawAn=&rg->anim[rg->clip[CL_DEATH]];
-                drawFrame=fminf(deadT*60.0f,(float)rg->deathFrame);
-                if (deadT>(float)rg->deathFrame/60.0f+2.0f){ RangeTargetReset(type); deadT=0; }
+                drawAn=&rg->anim[rg->clip[dRole]];
+                drawFrame=fminf(deadT*60.0f,(float)rg->settle[dRole]);
+                if (deadT>(float)rg->settle[dRole]/60.0f+2.0f){ RangeTargetReset(type); deadT=0; }
+            } else if (tg->knockT>0){                                      // flattened: the knockdown, then back up
+                drawAn=&rg->anim[rg->clip[CL_KNOCK]];
+                int kf=ANIM_FRAMES(*drawAn); drawFrame=fminf((kf/60.0f-tg->knockT)*60.0f,(float)(kf>0?kf-1:0));
+                tg->knockT-=dt; if (tg->hitT>0) tg->hitT-=dt; tg->pushV=(Vector3){0,0,0};
             } else if (tg->hitT>0){                                        // flinch
-                drawAn=&rg->anim[rg->clip[CL_HIT]];
+                drawAn=&rg->anim[rg->clip[tg->hitRole>=CL_HIT_HEAD?tg->hitRole:CL_HIT]];
                 int hf=ANIM_FRAMES(*drawAn); drawFrame=fminf((0.45f-tg->hitT)*30.0f,(float)(hf>0?hf-1:0));
                 tg->hitT-=dt;
+            } else if (tg->limpT>0 && (st==GS_WALK || st==GS_RUN)){        // walking on a shot leg
+                drawAn=&rg->anim[rg->clip[CL_LIMP]];
+                int lf=ANIM_FRAMES(*drawAn); limpClock+=dt*30.0f*LIMP_SPEED/LIMP_CLIP_MPS;
+                if (lf>0) while (limpClock>=lf) limpClock-=lf;
+                drawFrame=limpClock;
             }
+            if (tg->limpT>0) tg->limpT-=dt;
         }
         RigPose(rg,drawAn,drawFrame);
         float esc=ENEMY_SCALE*kEnemy[type].scale;
@@ -345,11 +371,16 @@ static int RunGallery(void){
         // floor lines scroll under walk/pursue at the enemy's real speed (feet should "grip")
         float sp = (st==GS_RUN)?kEnemy[type].speed:((st==GS_WALK)?kEnemy[type].speed*0.45f:0.0f);
         if (range && tg->state!=1) sp=0;
+        if (range && tg->state==1 && tg->knockT>0) sp=0;
+        if (range && tg->state==1 && tg->limpT>0 && sp>0) sp=LIMP_SPEED;
         float off=fmodf(GetTime()*sp,1.0f); if (paused) off=0;
         for (int z=-8;z<=8;z++){ float zz=z+off; DrawLine3D((Vector3){-8,0,zz},(Vector3){8,0,zz},(Color){60,56,52,255}); }
         for (int x=-8;x<=8;x++) DrawLine3D((Vector3){(float)x,0,-8},(Vector3){(float)x,0,8},(Color){48,45,42,255});
         ViewerLights(cam.position);
-        DrawModelEx(rg->model,(Vector3){0,0,0},(Vector3){0,1,0},ENEMY_YAW_OFFSET,(Vector3){esc,esc,esc},WHITE);
+        float drawYawG=(range && tg->state==2)?tg->deathYaw:ENEMY_YAW_OFFSET;
+        DrawModelEx(rg->model,(Vector3){0,0,0},(Vector3){0,1,0},drawYawG,(Vector3){esc,esc,esc},WHITE);
+        if (range){ tg->drawAn=drawAn; tg->drawFrame=drawFrame; tg->drawYaw=drawYawG;     // wounds go on the pose shown
+            if (tg->wN>0) DrawWounds(drawAn, drawFrame, (Vector3){0,0,0}, drawYawG, esc, tg->wN, tg->wBone, tg->wOff, tg->wSz); }
         if (boltT>=0 && !(range && tg->state!=1)){                         // the radiation bolt, flying off "at the player"
             Vector3 bp={boltP.x, boltP.y-1.0f*boltT, boltP.z+13.0f*boltT};       // from the hand it left
             DrawSphere(bp,0.12f,(Color){140,255,90,255}); DrawSphereWires(bp,0.2f,6,6,(Color){90,220,60,120});
@@ -425,8 +456,8 @@ static int RunGallery(void){
             float pc=rangeClock; rangeClock+=dt;
             if (floorf(rangeClock/0.5f)>floorf(pc/0.5f)){
                 TakeScreenshot(TextFormat("build/range_%02d.png",rangeShot++));
-                DebugLog("range","\"t\":%.2f,\"slot\":%d,\"hp\":%.1f,\"state\":%d,\"hitT\":%.2f,\"mag\":%d",
-                         rangeClock,g_curWeapon,tg->hp,tg->state,tg->hitT,g_weapons[g_curWeapon].mag); }
+                DebugLog("range","\"t\":%.2f,\"slot\":%d,\"hp\":%.1f,\"state\":%d,\"hitT\":%.2f,\"hitRole\":%d,\"mag\":%d",
+                         rangeClock,g_curWeapon,tg->hp,tg->state,tg->hitT,tg->hitRole,g_weapons[g_curWeapon].mag); }
             if (rangeClock>rangeTest+1.5f) break;
         }
     }
