@@ -1022,12 +1022,146 @@ def skull_slice(z, band=0.012):
 print("enemy: eyes", tuple(round(x, 3) for x in eye_c), "nose", tuple(round(x, 3) for x in nose), "crown", round(crown, 3))
 
 # ---------------------------------------------------------------- painted prop textures
+def _vn(size, cy, cx, seed):
+    """Value noise with its own cell count per axis (streaks: few cells one way, many the other)."""
+    rng = np.random.default_rng(seed)
+    small = rng.random((cy, cx)).astype(np.float32)
+    ys = np.arange(size) * (cy - 1) / max(1, size - 1); xs = np.arange(size) * (cx - 1) / max(1, size - 1)
+    y0 = np.floor(ys).astype(int); x0 = np.floor(xs).astype(int)
+    y1 = np.minimum(y0 + 1, cy - 1); x1 = np.minimum(x0 + 1, cx - 1)
+    fy = (ys - y0)[:, None]; fx = (xs - x0)[None, :]
+    fy = fy * fy * (3 - 2 * fy); fx = fx * fx * (3 - 2 * fx)
+    return (small[y0][:, x0] * (1 - fx) + small[y0][:, x1] * fx) * (1 - fy) + (small[y1][:, x0] * (1 - fx) + small[y1][:, x1] * fx) * fy
+
+
+def _fbm2(size, cells, seed, octaves=4):
+    out = np.zeros((size, size), np.float32); amp = 1.0; tot = 0.0
+    for k in range(octaves):
+        c = min(size // 2, cells * 2 ** k)
+        out += amp * _vn(size, c, c, seed + 31 * k); tot += amp; amp *= 0.5
+    out /= tot
+    lo, hi = np.percentile(out, 2), np.percentile(out, 98)        # spread to 0..1 whatever the octave mix
+    return np.clip((out - lo) / max(1e-6, hi - lo), 0, 1)
+
+
+def _lines(size, n, lmin, lmax, seed, width=1):
+    """Scratches: n straight-ish strokes (lengths as fractions of the texture), 0..1."""
+    rng = np.random.default_rng(seed)
+    m = np.zeros((size, size), np.float32)
+    for _ in range(n):
+        x, y = rng.uniform(0, size, 2); ang = rng.uniform(0, 2 * math.pi)
+        L = rng.uniform(lmin, lmax) * size; bend = rng.normal(0, 0.25)
+        t = np.arange(0, L, 0.6)
+        aa = ang + bend * t / max(1.0, L)
+        xs = (x + np.cumsum(np.cos(aa)) * 0.6).astype(int) % size; ys = (y + np.cumsum(np.sin(aa)) * 0.6).astype(int) % size
+        m[ys, xs] = np.maximum(m[ys, xs], rng.uniform(0.5, 1.0) * np.sin(np.pi * t / max(1.0, L)) ** 0.5)
+    return np.clip(blur(m, width) * (2.2 * width + 1.0), 0, 1) if width else m
+
+
+def _worley2(size, cells, seed):
+    """2-D cellular noise -> (F1, F2 - F1) in cell units; F2 - F1 -> 0 on the cell walls (cracks)."""
+    rng = np.random.default_rng(seed)
+    pts = rng.random((cells + 2, cells + 2, 2)).astype(np.float32)
+    g = np.arange(size, dtype=np.float32) * cells / size
+    gy, gx = np.meshgrid(g, g, indexing="ij")
+    iy, ix = gy.astype(int), gx.astype(int)
+    f1 = np.full((size, size), 9.0, np.float32); f2 = f1.copy()
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            cy_, cx_ = (iy + dy) % cells, (ix + dx) % cells
+            py = iy + dy + pts[cy_, cx_, 0]; px = ix + dx + pts[cy_, cx_, 1]
+            d = np.sqrt((gy - py) ** 2 + (gx - px) ** 2)
+            f2 = np.where(d < f1, f1, np.minimum(f2, d)); f1 = np.minimum(f1, d)
+    return f1, f2 - f1
+
+
+# How each prop surface has aged. WEAR[name] = (bare-metal mask, dull dust/rust mask): the
+# detail pass turns them into gloss where paint is gone and matte where dirt sits.
+FINISH = [(("helmet", "axe_head", "tank", "filter"), "paint"), (("spade",), "rust"), (("rubber", "hood"), "rubber"),
+          (("gunmetal", "iron"), "metal"), (("wood", "furniture"), "wood"), (("leather", "strap", "belt"), "leather"),
+          (("growth", "tentacle"), None)]
+WEAR = {}
+
+
+def weather(a, name, base, grime, seed, size):
+    fin = next((f for keys, f in FINISH if any(k in name for k in keys)), "cloth")
+    if fin is None:
+        return
+    base = np.array(base, np.float32)
+    fine = _fbm2(size, 48, seed + 12)
+    dust = sstep(_fbm2(size, 6, seed + 16), 0.45, 0.85) * min(0.45, 0.8 * grime)
+    zero = np.zeros((size, size), np.float32)
+    bare, dull = zero, zero
+    if fin == "paint":          # enamel over steel: flaked chips with a pale rim, scratches, rust creeping out
+        f = _fbm2(size, 30, seed + 11, octaves=3) * 0.55 + _fbm2(size, 120, seed + 19, octaves=2) * 0.45
+        f *= 0.55 + 0.45 * sstep(_fbm2(size, 5, seed + 20), 0.3, 0.7)       # chips come in clusters: where it gets knocked
+        thr = 0.74 - 0.10 * grime
+        chip = sstep(f, thr, thr + 0.025)
+        gouge = _lines(size, 10, 0.015, 0.05, seed + 15)
+        chip = np.clip(chip + sstep(gouge, 0.35, 0.6), 0, 1)
+        rim = np.clip(blur(chip, 1) * 1.7 - chip, 0, 1)
+        rusty = sstep(_fbm2(size, 14, seed + 13), 0.45, 0.75)
+        under = np.array((0.21, 0.20, 0.19), np.float32)[None, None] * (1 - rusty[..., None]) + np.array((0.34, 0.17, 0.07), np.float32)[None, None] * rusty[..., None]
+        halo = np.clip(blur(chip * rusty, 4) * 2.5, 0, 1) * (1 - chip) * 0.32
+        mix_to(a, (0.36, 0.19, 0.08), halo)
+        mix_to(a, np.clip(base * 1.35 + 0.08, 0, 1), rim * 0.55)
+        for ch in range(3):
+            a[..., ch] = a[..., ch] * (1 - chip) + under[..., ch] * chip
+        mix_to(a, np.clip(base * 1.6 + 0.07, 0, 1), _lines(size, 70, 0.008, 0.06, seed + 14, width=0) * 0.5 * (1 - chip))
+        mix_to(a, (0.44, 0.41, 0.35), dust * 0.55)
+        bare, dull = chip * (1 - rusty), np.clip(chip * rusty + halo + dust, 0, 1)
+    elif fin == "rust":         # a spade left out: scale, dark pits, bright metal only where it still digs
+        mix_to(a, (0.43, 0.21, 0.08), sstep(_fbm2(size, 10, seed + 11), 0.35, 0.70) * 0.75)
+        mix_to(a, (0.15, 0.09, 0.06), sstep(_fbm2(size, 40, seed + 13), 0.55, 0.80) * 0.65)
+        bare = _lines(size, 60, 0.03, 0.16, seed + 14) * 0.7
+        mix_to(a, (0.56, 0.55, 0.54), bare * 0.7)
+        dull = 1 - bare
+    elif fin == "rubber":       # scuffed pale where it rubs, fine scratches, dust settled on it
+        scuff = sstep(_fbm2(size, 14, seed + 11), 0.52, 0.82) * (0.45 + 0.55 * fine)
+        mix_to(a, np.clip(base * 1.5 + 0.11, 0, 1), scuff * 0.34)
+        mix_to(a, np.clip(base * 1.7 + 0.12, 0, 1), _lines(size, 60, 0.01, 0.08, seed + 14) * 0.40)
+        mix_to(a, (0.40, 0.38, 0.33), dust * 0.5)
+        dull = np.clip(scuff * 0.6 + dust, 0, 1)
+    elif fin == "metal":        # blued steel: the finish worn silver on the high spots, scratches, rust freckles
+        for ch in range(3):
+            a[..., ch] *= 0.82 + 0.36 * _fbm2(size, 12, seed + 11)
+        worn = sstep(_fbm2(size, 8, seed + 17) * 0.6 + fine * 0.4, 0.60, 0.76)
+        sc = _lines(size, 90, 0.02, 0.12, seed + 14)
+        bare = np.clip(worn * 0.6 + sc * 0.7, 0, 1)
+        mix_to(a, (0.52, 0.52, 0.54), bare * 0.6)
+        dull = sstep(_fbm2(size, 60, seed + 13), 0.74, 0.84) * min(1.0, 2.0 * grime)
+        mix_to(a, (0.33, 0.16, 0.07), dull * 0.75)
+    elif fin == "wood":         # grain running the length, hand-polished pale patches, grime in the pores, dents
+        g = _vn(size, 5, 150, seed + 11) * 0.6 + _vn(size, 11, 420, seed + 12) * 0.4
+        for ch in range(3):
+            a[..., ch] *= 0.70 + 0.60 * g
+        worn = sstep(_fbm2(size, 6, seed + 17), 0.55, 0.85)
+        mix_to(a, np.clip(base * 1.55 + 0.09, 0, 1), worn * 0.38)
+        mix_to(a, (0.07, 0.05, 0.04), _lines(size, 26, 0.01, 0.05, seed + 14, width=2) * 0.6)
+        bare, dull = worn * 0.25, dust
+    elif fin == "leather":      # cracked where it flexes, scuffed pale on the edges
+        _, wall = _worley2(size, 46, seed + 11)
+        crack = (1 - sstep(wall, 0.0, 0.09)) * sstep(_fbm2(size, 8, seed + 17), 0.35, 0.65)
+        for ch in range(3):
+            a[..., ch] *= 1 - 0.6 * crack
+        scuff = sstep(_fbm2(size, 12, seed + 18), 0.58, 0.85)
+        mix_to(a, np.clip(base * 1.6 + 0.10, 0, 1), scuff * 0.32)
+        dull = np.clip(scuff + crack, 0, 1)
+    else:                        # cloth: old stains, sun-faded patches, lint
+        mix_to(a, base * 0.55, sstep(_fbm2(size, 7, seed + 11), 0.50, 0.82) * 0.40)
+        mix_to(a, np.clip(base * 1.25 + 0.05, 0, 1), sstep(_fbm2(size, 5, seed + 17), 0.55, 0.88) * 0.22)
+        for ch in range(3):
+            a[..., ch] *= 0.93 + 0.14 * fine
+    WEAR[name] = (np.clip(bare, 0, 1), np.clip(dull, 0, 1))
+
+
 def paint(name, base, grime=0.25, blood=0, drops=0, size=1024, seed=1, stripes=None):
     a = np.zeros((size, size, 4), np.float32); a[..., 3] = 1
     n1 = smooth_noise(size, size, 6, seed); n2 = smooth_noise(size, size, 23, seed + 1)
     shade = 1.0 - grime * (0.6 * n1 + 0.4 * n2)
     for ch in range(3):
         a[..., ch] = base[ch] * shade
+    weather(a, name, base, grime, seed, size)
     if stripes:   # (period px, rgb) -- e.g. ticking on a neckerchief
         per, col = stripes
         m = ((np.arange(size) // per) % 2 == 0)[None, :]
@@ -1048,6 +1182,8 @@ M_wood = paint("wood", (0.30, 0.17, 0.08), grime=0.45, seed=5)
 M_blood = simple_material("blood", None, (0.34, 0.02, 0.02), 0.3)
 M_lens = simple_material("lens", None, (0.30, 0.62, 0.18), 0.15, emit=(0.30, 0.68, 0.17))
 M_dark = paint("darkcloth", (0.13, 0.13, 0.15), grime=0.3, seed=6)
+M_hood = paint("hood_rubber", (0.33, 0.35, 0.33), grime=0.45, seed=15) if SPEC["props"] in ("liquidator", "fiend") else M_rubber
+M_rim = paint("rim_gunmetal", (0.17, 0.17, 0.18), grime=0.4, seed=16) if SPEC["props"] in ("liquidator", "fiend") else M_dark
 M_strap = paint("strap_leather", (0.20, 0.14, 0.09), grime=0.4, seed=14)
 M_rust = paint("spade", (0.36, 0.24, 0.15), grime=0.6, seed=7)
 M_brass = simple_material("brass", None, (0.70, 0.52, 0.22), 0.35, metal=0.9)
@@ -1193,18 +1329,25 @@ def gas_mask():
     bmesh.ops.delete(bm, geom=[f for f in bm.faces if not all(keep(v) for v in f.verts)], context="FACES")
     bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
     bm.normal_update()
-    for v in bm.verts:
-        v.co += v.normal * 0.007
+    orig = {v.index: (v.co.copy(), v.normal.copy()) for v in bm.verts}
+    edge = {v.index for e in bm.edges if e.is_boundary for v in e.verts}
+    for _ in range(14):                 # rubber spans the hollows of a face (eye sockets, lips, round the ears)...
+        bmesh.ops.smooth_vert(bm, verts=[v for v in bm.verts if v.index not in edge], factor=0.5, use_axis_x=True, use_axis_y=True, use_axis_z=True)
+    for v in bm.verts:                  # ...but never sinks into it
+        co, no = orig[v.index]
+        d = (v.co - co).dot(no)
+        if d < 0.007: v.co += no * (0.007 - d)
     bm.to_mesh(hood.data); bm.free()
     hood.vertex_groups.clear()
-    hood.data.materials.clear(); hood.data.materials.append(M_rubber)
+    hood.data.materials.clear(); hood.data.materials.append(M_hood)
     props.append((hood, "Head"))
     for s, e in ((-1, eyeR), (1, eyeL)):
         a = Vector((e.x, nose.y + 0.025, e.z))
-        cyl(f"eye_rim_{s}", a, a + Vector((0, -0.022, 0)), 0.024, M_dark, "Head", verts=24)
+        cyl(f"eye_rim_{s}", a, a + Vector((0, -0.022, 0)), 0.024, M_rim, "Head", verts=24)
+        cyl(f"eye_seat_{s}", a + Vector((0, 0.004, 0)), a + Vector((0, -0.006, 0)), 0.030, M_hood, "Head", verts=24)   # the moulded boss it sits in
         cyl(f"eye_lens_{s}", a + Vector((0, -0.021, 0)), a + Vector((0, -0.024, 0)), 0.019, M_lens, "Head", verts=24)
     v = Vector((eye_c.x, nose.y + 0.012, mouth_z))
-    cyl("valve", v, v + Vector((0, -0.035, -0.008)), 0.026, M_dark, "Head", verts=20)
+    cyl("valve", v, v + Vector((0, -0.035, -0.008)), 0.026, M_rim, "Head", verts=20)
     for i in range(3):   # ribbed canister, screwed on below the valve, angled down-forward
         a = v + Vector((0, -0.03 - i * 0.022, -0.035 - i * 0.03))
         cyl(f"canister_{i}", a, a + Vector((0, -0.02, -0.028)), 0.04 if i != 1 else 0.042, M_filter, "Head", verts=24)
@@ -1698,7 +1841,7 @@ def robe():
     hood = blob("cowl", (c.x, c.y + 0.03, (crown + mouth_z) / 2 - 0.01), 1.0, o.data.materials[0], "Head",
                 scale=(rx + 0.05, ry + 0.07, (crown - mouth_z) / 2 + 0.09), sub=4)
     bmh = bmesh.new(); bmh.from_mesh(hood.data)
-    fco, fno = Vector((0, -0.46, 0.45)), Vector((0, 1, 0.34)).normalized()      # the face opening: one slanted cut, so
+    fco, fno = Vector((0, -0.66, 0.45)), Vector((0, 1, 0.42)).normalized()      # the face opening: one slanted cut, so
     for co, no in ((fco, fno), (Vector((0, 0, -0.80)), Vector((0, 0, 1)))):       # the rim is an oval peaking over the brow
         bmesh.ops.bisect_plane(bmh, geom=bmh.verts[:] + bmh.edges[:] + bmh.faces[:], dist=1e-5,
                                plane_co=co, plane_no=no)
@@ -3318,6 +3461,12 @@ if DETAIL:
         orm = np.stack([np.ones((S, S), np.float32),
                         np.clip(rough + 0.12 * (var - 0.5) - 0.5 * mask, 0.05, 1),
                         np.clip(spec * (0.8 + 0.4 * var) + 0.6 * mask, 0, 1)], -1)
+        wr = WEAR.get(m.name)
+        if wr is not None:
+            k = max(1, wr[0].shape[0] // S)
+            bare, dull = (x[::k, ::k][:S, :S] for x in wr)
+            orm[..., 1] = np.clip(orm[..., 1] * (1 - bare) * (1 - dull) + 0.26 * bare * (1 - dull) + 0.92 * dull, 0.05, 1)
+            orm[..., 2] = np.clip(orm[..., 2] * (1 - bare) * (1 - dull) + 0.95 * bare * (1 - dull) + 0.04 * dull, 0, 1)
         nimg, oimg = save_maps(f"{ENEMY}_{m.name}", nrm, orm)
         attach_detail(m, nimg, oimg)
         done += 1
