@@ -142,7 +142,11 @@ static int     g_lookSet = 0;            // --look <yaw> <pitch>: aim the spawn 
 static float   g_lookYaw = 0.0f, g_lookPitch = 0.0f;
 static float   g_vy    = 0.0f;
 static int     g_grounded = 1;
+#if defined(__EMSCRIPTEN__)
+static int     g_devOverlay = 0;   // the public browser build ships without the dev readout
+#else
 static int     g_devOverlay = 1;
+#endif
 static float   g_bob = 0.0f;
 // Procedural viewmodel motion (view-space, decaying): sway lags the mouse, bob
 // follows the stride, and the raise/lower offset drives weapon switches.
@@ -2542,11 +2546,13 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
                 DebugLog("gib","\"i\":%d,\"cause\":%d", ei, g_hurtCause); } }
           DebugLog("edeath","\"i\":%d,\"role\":%d,\"cause\":%d", ei, e->deathRole, g_hurtCause); }
         g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
+        int bossTheme=0;                                                             // the boss's death track stands in for his own cry (both at once was a muddle)
         if (g_enemies[ei].boss && g_audio && g_hasBossDeadSnd){                      // the boss is down
             if (g_hasBossSnd) StopSound(g_bossSnd);
-            SetSoundVolume(g_bossDeadSnd,0.85f); PlaySound(g_bossDeadSnd); DebugLog("bossdead","\"wave\":%d", g_wave); }
+            bossTheme=1; SetSoundVolume(g_bossDeadSnd,0.85f); PlaySound(g_bossDeadSnd); DebugLog("bossdead","\"wave\":%d", g_wave); }
         if (!g_noCredit){ g_kills++; if (head) g_headshots++; }
         if (g_enemies[ei].state==0){ g_gibKills++; }                                  // blown apart: nothing left to scream (the gib burst is his sound)
+        else if (bossTheme){}
         else if (EnemyVoice(&g_enemies[ei], EC_DEATH, 1.0f, 0.0f)){}                  // his kind's own death, when it has one
         else if (g_audio && g_hasSgDeathSnd && g_hurtCause==HC_BULLET && g_weapons[g_curWeapon].pellets>1 && GetRandomValue(0,99)<45)
             SfxAt(g_sgDeathSnd, g_enemies[ei].pos, 1.0f);                             // killed by buckshot: sometimes this scream instead
@@ -4153,13 +4159,18 @@ static void Update(void) {
     WeaponAnimate(dt, moving);                             // the gun's idle/shot/reload clips
 
     // overlay + inspect + reset
-    if (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB)) g_devOverlay=!g_devOverlay;
-    if (IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
+#if defined(__EMSCRIPTEN__)
+    const int devKeys=0;                                   // browser build: no dev overlay, inspect or orient mode (N would also clear the field mid-run)
+#else
+    const int devKeys=1;
+#endif
+    if (devKeys && (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB))) g_devOverlay=!g_devOverlay;
+    if (devKeys && IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
     if (IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode){ g_playerHp=100.0f; g_cheatUsed=1; }   // refill on re-enable; the run is tagged
         DebugLog("mode","\"godMode\":%s", g_godMode?"true":"false"); }
     if (IsKeyPressed(KEY_F) && g_hasMap){ g_noclip=!g_noclip; g_vy=0.0f;   // map: fly/noclip <-> walk
         DebugLog("mode","\"noclip\":%s", g_noclip?"true":"false"); }
-    if (IsKeyPressed(KEY_N)){                          // N: toggle orient mode (no enemies, weapon-aim tuning)
+    if (devKeys && IsKeyPressed(KEY_N)){               // N: toggle orient mode (no enemies, weapon-aim tuning)
         g_noEnemies=!g_noEnemies;
         for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
         for (int c=0;c<MAX_CORPSES;c++) g_corpses[c].active=0;  // and clear corpses
@@ -5027,7 +5038,7 @@ static void DrawHUD(void) {
       if (g_speedT>0){ DrawText(TextFormat("SPEED %d",(int)g_speedT+1),W-170,y,24,(Color){90,240,255,255}); }
       if (g_pkMsgT>0){ int fs=28, tw=MeasureText(g_pkMsg,fs); unsigned char a=(unsigned char)(255*fminf(1.0f,g_pkMsgT/0.5f));
           DrawText(g_pkMsg,W/2-tw/2+2,H/2+92,fs,(Color){0,0,0,a}); DrawText(g_pkMsg,W/2-tw/2,H/2+90,fs,(Color){140,255,140,a}); } }
-    DrawFPS(W-90,10);
+    if (g_devOverlay) DrawFPS(W-90,10);
     // kills + headshots + player health
     DrawMinimap(W, H);
     if (g_userMute) DrawText("MUTED  (M)", W-160, 84, 16, (Color){200,200,210,255});
