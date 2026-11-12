@@ -120,16 +120,18 @@ SPECS.update({
         phenotype=dict(gender=1.0, age=0.5, muscle=0.7, weight=0.45, proportions=0.6, height=0.6),
         targets={},
         skin="young_caucasian_male2", eyebrows="eyebrow003",
-        clothes=["male_worksuit01", "shoes03"],
-        recolor={"worksuit": ((0.40, 0.43, 0.29), 4, 3, 10)},
+        clothes=["male_casualsuit05", "shoes03"],            # a four-pocket field jacket + trousers: dyed khaki = the Soviet "afghanka"
+        recolor={"casualsuit05": ((0.44, 0.41, 0.26), 4, 3, 10), "shoes03": ((0.06, 0.06, 0.06), 0, 1, 2)},
+        soviet=True,
         props="rifleman", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE, stride=WALK_NAT, jog=JOG, run=RUN_ARMY),
         aim_hand_out=0.04),   # the receiver clears the gas-mask filter
     "gunner": dict(   # machine-gunner: heavy, bursts
         phenotype=dict(gender=1.0, age=0.6, muscle=0.85, weight=0.8, proportions=0.3, height=0.62),
         targets={"measure-neck-circ-incr": 0.6, "torso-scale-horiz-incr": 0.35},
         skin="middleage_caucasian_male", eyebrows="eyebrow010",
-        clothes=["male_worksuit01", "shoes03"],
-        recolor={"worksuit": ((0.30, 0.32, 0.26), 6, 4, 14)},
+        clothes=["male_casualsuit05", "shoes03"],
+        recolor={"casualsuit05": ((0.38, 0.36, 0.23), 6, 4, 14), "shoes03": ((0.06, 0.06, 0.06), 0, 1, 2)},
+        soviet=True,
         props="gunner", aim_gun="line", clips=dict(BASE_CLIPS, attack=AIM_RIFLE, stride=WALK_NAT, jog=JOG, run=RUN_ARMY),
         aim_hand_drop=0.14, aim_hand_out=0.10, aim_hand_fwd=0.08),   # the big receiver clears the helmet, the stock the belt and his forearm   # shouldered, like the rifleman (the heavy-aim mocap held the gun at his sternum)
     "mutant": dict(   # glowing mutant: irradiated skin, throws radiation bolts
@@ -203,6 +205,8 @@ LOOKS = {
 for _k, _v in LOOKS.items():
     SPECS[_k].update(_v)
 SPEC = SPECS[ENEMY]
+if os.environ.get("ENEMY_CLOTHES"):      # dev: try other garments on this enemy (look-dev), e.g. ENEMY_CLOTHES=male_elegantsuit01,shoes03
+    SPEC = dict(SPEC, clothes=os.environ["ENEMY_CLOTHES"].split(","))
 if os.environ.get("CHEF_SPEC"):      # dev: try spec values without editing, e.g. CHEF_SPEC='{"aim_hand_drop": 0.2}'
     import json as _json
     SPEC = dict(SPEC, **_json.loads(os.environ["CHEF_SPEC"]))
@@ -1661,6 +1665,24 @@ def steel_helmet():
         st = cyl(f"chinstrap_{k}", pts[k] - (pts[k + 1] - pts[k]) * 0.08, pts[k + 1] + (pts[k + 1] - pts[k]) * 0.08, 0.0042, M_strap, "Head", verts=6)
     bz_ = pts[len(pts) // 2 - 3]                         # the buckle, on his left cheek
     box_basis("strap_buckle", bz_ + Vector((0.003, 0, 0)), Vector((0, 1, 0)), Vector((0, 0, 1)), Vector((1, 0, 0)), (0.016, 0.014, 0.004), M_steel, "Head", bevel=0.001)
+    if SPEC.get("soviet"):               # the red star, painted on the front of the shell
+        a_, b_, h_ = rx + 0.03, ry + 0.035, crown - brow_z + 0.07
+        c0 = Vector((c.x, c.y + 0.008, brow_z - 0.005)); th = math.radians(38)
+        n = Vector((0, -math.cos(th) / b_, math.sin(th) / h_)).normalized()
+        pc = c0 + Vector((0, -b_ * math.cos(th), h_ * math.sin(th))) + n * 0.0165       # (the shell is 1 cm thick and bulges between its facets: sit clear of it)
+        T = Vector((1, 0, 0)); B = n.cross(T).normalized()
+        bm = bmesh.new()
+        ring = [bm.verts.new(pc + (T * math.sin(2 * math.pi * k / 10) + B * math.cos(2 * math.pi * k / 10)) * (0.027 if k % 2 == 0 else 0.011)) for k in range(10)]
+        cv = bm.verts.new(pc + n * 0.0015)
+        for k in range(10):
+            f = bm.faces.new((cv, ring[k], ring[(k + 1) % 10]))
+            if f.normal.dot(n) < 0 and (f.normal_update() or True): pass
+        bm.normal_update()
+        for f in bm.faces:
+            if f.normal.dot(n) < 0: f.normal_flip()
+        me = bpy.data.meshes.new("helmet_star"); bm.to_mesh(me); bm.free()
+        so = bpy.data.objects.new("helmet_star", me); bpy.context.collection.objects.link(so)
+        me.materials.append(paint("helmet_star_enamel", (0.62, 0.06, 0.05), grime=0.5, seed=31)); props.append((so, "Head"))
 
 
 def bandolier():
@@ -1732,6 +1754,127 @@ def bandolier():
         q0 = path[k] + o_ * 0.014
         wts = weights(q0)
         cyl(f"cartridge_{k}", q0 - w_ * 0.03, q0 + w_ * 0.03, 0.007, M_brass, max(wts, key=wts.get), verts=8)
+
+
+def soviet_kit():
+    """What turns the khaki jacket into a Soviet Army field uniform: red shoulder boards, a brown
+    leather belt with a brass buckle over the jacket, and tall black jackboots with the trousers
+    tucked in. Everything is fitted to the dressed body by ray-casts."""
+    bz = lambda n: (rig.matrix_world @ rig.data.bones[n].head_local)
+    dg = bpy.context.evaluated_depsgraph_get()
+    trees = [(BVHTree.FromObject(o, dg), o.matrix_world.copy()) for o in meshes if "low-poly" not in o.name]
+    def out_from(P, dv, lim=0.6):          # from inside the body: the outermost wall of the layers he wears, along dv
+        hits = []
+        for t, mw in trees:
+            inv = mw.inverted(); h = t.ray_cast(inv @ P, (inv.to_3x3() @ dv).normalized(), lim)
+            if h[0] is not None: hits.append(((mw @ h[0]) - P).length)
+        if not hits: return None
+        return max(x for x in hits if x <= min(hits) * 1.6 + 0.02)
+    def down_on(x, y, z0):                 # the top surface under (x, y)
+        best = None
+        for t, mw in trees:
+            inv = mw.inverted(); h = t.ray_cast(inv @ Vector((x, y, z0)), (inv.to_3x3() @ Vector((0, 0, -1))).normalized(), 0.5)
+            if h[0] is not None: z = (mw @ h[0]).z; best = z if best is None else max(best, z)
+        return best
+    names = {g.index: g.name for g in body.vertex_groups}
+    from mathutils.kdtree import KDTree
+    kd = KDTree(len(body.data.vertices))
+    for v in body.data.vertices: kd.insert(body.matrix_world @ v.co, v.index)
+    kd.balance()
+    def torso_w(pt):
+        acc = {}
+        for _, idx, _d in kd.find_n(pt, 4):
+            for g in body.data.vertices[idx].groups:
+                n = names[g.group]
+                if any(k in n for k in ("Hips", "Spine")) and g.weight > 0.01: acc[n] = acc.get(n, 0.0) + g.weight
+        tot = sum(acc.values())
+        return {n: w / tot for n, w in acc.items()} if tot > 0 else {"Spine": 1.0}
+    def strip(name, rings, mat, closed_u=True):   # quads between consecutive rings (each ring a closed loop of points)
+        bm = bmesh.new(); uvl = bm.loops.layers.uv.new()
+        vr = [[bm.verts.new(p) for p in r] for r in rings]; n = len(rings[0])
+        for a in range(len(rings) - 1):
+            for q in range(n):
+                f = bm.faces.new((vr[a][q], vr[a][(q + 1) % n], vr[a + 1][(q + 1) % n], vr[a + 1][q]))
+                for lp, (u, w) in zip(f.loops, ((q, a), (q + 1, a), (q + 1, a + 1), (q, a + 1))): lp[uvl].uv = (u / n * 4, w / max(1, len(rings) - 1))
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        me = bpy.data.meshes.new(name); bm.to_mesh(me); bm.free()
+        ob = bpy.data.objects.new(name, me); bpy.context.collection.objects.link(ob)
+        me.polygons.foreach_set("use_smooth", [True] * len(me.polygons)); me.materials.append(mat); return ob
+    # ---- belt: a 5 cm leather strap round the waist, over the jacket
+    hips, spine = bz("Hips"), bz("Spine")
+    M_belt = paint("uniform_belt_leather", (0.24, 0.14, 0.07), grime=0.45, seed=33)
+    zb = hips.z + (spine.z - hips.z) * 0.55; C = Vector((hips.x, hips.y, zb)); NP = 56
+    rad = []
+    for k in range(NP):
+        a = 2 * math.pi * k / NP; r = out_from(C, Vector((math.cos(a), math.sin(a), 0)))
+        rad.append(min(max(r if r else 0.15, 0.09), 0.30))
+    for _ in range(3): rad = [(rad[k] * 2 + rad[k - 1] + rad[(k + 1) % NP]) / 4 for k in range(NP)]
+    prof = ((0.006, -0.026), (0.011, -0.022), (0.011, 0.022), (0.006, 0.026))             # (out, up): a flat strap with turned edges
+    rings = [[C + Vector((math.cos(2 * math.pi * k / NP), math.sin(2 * math.pi * k / NP), 0)) * (rad[k] + o) + Vector((0, 0, u)) for k in range(NP)] for o, u in prof]
+    belt = strip("uniform_belt", rings, M_belt)
+    grp = {}
+    for v in belt.data.vertices:
+        for n, w in torso_w(v.co).items():
+            if n not in grp: grp[n] = belt.vertex_groups.new(name=n)
+            grp[n].add([v.index], w, "REPLACE")
+    props.append((belt, None))
+    kf = min(range(NP), key=lambda k: math.sin(2 * math.pi * k / NP))                    # straight ahead (-Y)
+    pf = C + Vector((0, -1, 0)) * (rad[kf] + 0.014)
+    wf = torso_w(pf)
+    box_basis("uniform_buckle", pf, Vector((1, 0, 0)), Vector((0, 0, 1)), Vector((0, -1, 0)), (0.062, 0.050, 0.006), M_brass, max(wf, key=wf.get), bevel=0.0015)
+    # ---- shoulder boards: red, lying on each shoulder from the collar out
+    M_board = paint("shoulder_board", (0.58, 0.07, 0.06), grime=0.35, seed=34)
+    nk = bz("Neck")
+    for side in ("Left", "Right"):
+        sh = bz(side + "Arm")
+        pts = []
+        for f in (0.44, 0.90):               # (nearer the neck the ray comes down on the jaw, not the shoulder)
+            x, y = nk.x + (sh.x - nk.x) * f, nk.y + (sh.y - nk.y) * f
+            z = down_on(x, y, sh.z + 0.10)
+            pts.append(Vector((x, y, (z if z is not None else sh.z + 0.03) + 0.007)))
+        X = (pts[1] - pts[0]).normalized(); Y = Vector((0, 1, 0)); Z = X.cross(Y).normalized()
+        if Z.z < 0: Z = -Z
+        Y = Z.cross(X).normalized()
+        box_basis(f"shoulder_board_{side}", (pts[0] + pts[1]) / 2, X, Y, Z, ((pts[1] - pts[0]).length, 0.055, 0.007), M_board, side + "Shoulder", bevel=0.0015)
+        cyl(f"board_button_{side}", pts[0] + X * 0.012 + Z * 0.002, pts[0] + X * 0.012 + Z * 0.008, 0.007, M_brass, side + "Shoulder", verts=10)
+    # ---- jackboots: a fitted leather shaft from under the knee to the ankle, the trousers inside it
+    M_boot = paint("jackboot_leather", (0.045, 0.045, 0.05), grime=0.35, seed=35)
+    btree = BVHTree.FromObject(body, dg); binv = body.matrix_world.inverted()
+    def skin_r(P, dv):                     # the bare leg: the boot is cut to the calf, not to the trouser leg
+        h = btree.ray_cast(binv @ P, (binv.to_3x3() @ dv).normalized(), 0.25)
+        return ((body.matrix_world @ h[0]) - P).length if h[0] is not None else None
+    ztop = min((bz(sd + "Leg") + (bz(sd + "Foot") - bz(sd + "Leg")) * 0.20).z for sd in ("Left", "Right"))
+    for o in meshes:                       # the trousers go INTO the boots: cut the legs off below the boot tops
+        if "suit" not in o.name.lower(): continue
+        bm = bmesh.new(); bm.from_mesh(o.data); mw = o.matrix_world
+        def cuff(w):                       # sleeves rolled to the elbow (summer field order): the gun lies along the bare
+            for sd in ("Left", "Right"):   # forearm, and a cloth sleeve there was in its stock on every bent-wrist frame
+                H = bz(sd + "Hand"); E = bz(sd + "ForeArm"); u = (E - H).normalized(); t = (w - H).dot(u)
+                if t < (E - H).length * 0.88 and ((w - H) - u * t).length < 0.12: return True
+            return False
+        gone = [f for f in bm.faces if all((mw @ v.co).z < ztop - 0.03 for v in f.verts) or all(cuff(mw @ v.co) for v in f.verts)]
+        bmesh.ops.delete(bm, geom=gone, context="FACES"); bm.to_mesh(o.data); bm.free()
+        print("enemy: soviet kit -- %d faces (trouser legs below the boot tops, sleeves below the elbow) removed from %s" % (len(gone), o.name))
+    for side in ("Left", "Right"):
+        K, A = bz(side + "Leg"), bz(side + "Foot"); d = (A - K).normalized(); L = (A - K).length
+        e1 = d.cross(Vector((0, 1, 0))).normalized(); e2 = d.cross(e1).normalized(); NA = 16; rings = []
+        for i in range(9):
+            sfr = 0.20 + (1.04 - 0.20) * i / 8; P = K + d * (L * sfr); ring = []
+            for q in range(NA):
+                a = 2 * math.pi * q / NA; dv = e1 * math.cos(a) + e2 * math.sin(a)
+                r = skin_r(P, dv) if i > 1 else out_from(P, dv, 0.25)      # the top two rings clear the trouser cloth gathered there
+                ring.append(min(max(r if r else 0.06, 0.040), 0.085) + (0.016 if i > 1 else 0.010) + (0.004 if i == 0 else 0.0))
+            for _ in range(2): ring = [(ring[q] * 2 + ring[q - 1] + ring[(q + 1) % NA]) / 4 for q in range(NA)]
+            rings.append((P, ring))
+        for _ in range(2):                                   # smooth down the shaft too: leather, not a cast of the calf
+            rings = [(rings[i][0], [(rings[i][1][q] * 2 + rings[max(0, i - 1)][1][q] + rings[min(8, i + 1)][1][q]) / 4 for q in range(NA)]) for i in range(9)]
+        loops = [[P + (e1 * math.cos(2 * math.pi * q / NA) + e2 * math.sin(2 * math.pi * q / NA)) * rr[q] for q in range(NA)] for P, rr in rings]
+        boot = strip(f"jackboot_{side}", loops, M_boot)
+        m = boot.modifiers.new("solid", "SOLIDIFY"); m.thickness = 0.006; m.offset = 1.0
+        bpy.context.view_layer.objects.active = boot; bpy.ops.object.modifier_apply(modifier="solid")
+        boot.data.polygons.foreach_set("use_smooth", [True] * len(boot.data.polygons))
+        props.append((boot, side + "Leg"))
+    print("enemy: soviet kit -- belt r %.3f..%.3f, boards, jackboots" % (min(rad), max(rad)))
 
 
 def growths():
@@ -2148,8 +2291,8 @@ PROPS_EXTRA = {
 
 
 PROPS = {
-    "rifleman": lambda: (steel_helmet(), respirator(), rifle()),
-    "gunner": lambda: (steel_helmet(), bandolier(), rifle(1.15, heavy=True)),
+    "rifleman": lambda: (steel_helmet(), respirator(), soviet_kit(), rifle()),
+    "gunner": lambda: (steel_helmet(), soviet_kit(), bandolier(), rifle(1.15, heavy=True)),
     "mutant": lambda: (growths(),),
     "priest": lambda: (robe(), lantern(), iron_cross()),
     "cook": lambda: (toque(), respirator(), cleaver("Right", "RightHand"), meat_hook("Left", "LeftHand")),

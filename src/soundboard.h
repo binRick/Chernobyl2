@@ -118,6 +118,7 @@ static int RunSoundboard(void){
     DebugLog("soundboard","\"rows\":%d,\"ok\":%d,\"borrowed\":%d,\"missing\":%d,\"failed\":%d", g_sbN,nOk,nBor,nMiss,nBad);
     float scroll=0; int onlyGaps=0, playing=-1, frame=0; const int RH=30, GH=46;
     while (!WindowShouldClose()){
+        if (IsKeyPressed(KEY_ESCAPE)) break;                 // ESC leaves the dev mode (the game turns raylib's own exit key off)
         if (g_maxFrames>0 && ++frame>g_maxFrames) break;
         if (g_hasAmb){ UpdateMusicStream(g_amb[0]); UpdateMusicStream(g_amb[1]); }
         for (int k=0;k<g_nWaveBg;k++) if (IsMusicStreamPlaying(g_waveBg[k])) UpdateMusicStream(g_waveBg[k]);

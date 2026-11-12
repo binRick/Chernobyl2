@@ -58,6 +58,7 @@ static int RunViewer(void){
     // hats, toques and tentacles would throw that off
     float hA=ViewerHeadY(&A), hB=two?ViewerHeadY(&B):hA;
     while (!WindowShouldClose()){
+        if (IsKeyPressed(KEY_ESCAPE)) break;                 // ESC leaves the dev mode (the game turns raylib's own exit key off)
         float dt=GetFrameTime();
         if (g_viewShots){                                        // scripted stills
             role=shots[shot].role; t=shots[shot].t; turn=shots[shot].turn; face=shots[shot].face; paused=1;
@@ -163,9 +164,43 @@ static void GalThumbs(void){
     }
 }
 
+// The gallery lists every enemy type, then the boss variants that are not a type of their own:
+// the Archimandrite (wave 2's boss) is a priest half as tall again. g_galArch = that entry is up.
+#define GAL_N (EN_NTYPES+1)
+static int g_galArch=0;
+#define GAL_BSC (g_galArch?ARCH_SCALE:1.0f)
+// Sounds: with S on (the default) the selected enemy's own voice plays as each state starts --
+// pursue = charge, attack, hit = hurt, die = death, cast = the raise -- falling back to whatever
+// the game would use for his kind (shared roar, his gunshot, the bolt, a shared death cry, the
+// boss themes). The VOICE panel on the left shows each slot and plays it on a click.
+static int g_galSnd=1; static Sound g_galLast; static int g_galHasLast=0;
+static void GalPlay(Sound sd){ if (!g_audio || sd.frameCount==0) return; if (g_galHasLast) StopSound(g_galLast);
+    SetSoundPan(sd,0.0f); SetSoundPitch(sd,1.0f); SetSoundVolume(sd,1.0f); PlaySound(sd); g_galLast=sd; g_galHasLast=1; }
+// What a cue plays for this type, and where it comes from: 0 nothing, 1 his own, 2 his family's, 3 a shared stand-in.
+static int GalCueSound(int type, int cue, Sound *out, const char **from){
+    int o=EnemyVoiceOwner(type,cue);
+    if (o>=0){ *out=g_eCue[o][cue][GetRandomValue(0,g_hasECue[o][cue]-1)]; *from=(o==type)?"own":kEnemy[o].name; return o==type?1:2; }
+    if (cue==EC_ATTACK){
+        if (kEnemy[type].kind==AK_HITSCAN && g_hasEShot){ *out=g_eShotSnd; *from="shared gunshot"; return 3; }
+        if (kEnemy[type].kind==AK_BOLT && g_hasEBolt){ *out=g_eBoltSnd; *from="shared bolt"; return 3; }
+        if (kEnemy[type].kind==AK_RAISE && g_hasERaise){ *out=g_eRaiseSnd; *from="shared raise"; return 3; }
+        if (g_hasAttackSnd){ *out=g_attackSnd; *from="shared roar"; return 3; } }
+    if (cue==EC_DEATH && g_nDeathSnd>0){ *out=g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)]; *from="shared death cries"; return 3; }
+    *from="missing"; return 0;
+}
+static void GalCue(int type, int st){
+    int cue = st==GS_RUN?EC_CHARGE : st==GS_ATTACK?EC_ATTACK : st==GS_HIT?EC_HURT : st==GS_DIE?EC_DEATH : -1;
+    if (st==GS_CAST && g_hasERaise){ GalPlay(g_eRaiseSnd); return; }
+    if (cue<0) return;
+    int boss=(type==EN_HEADCHEF || g_galArch);
+    if (cue==EC_DEATH && boss && g_hasBossDeadSnd && EnemyVoiceOwner(type,cue)!=type){ GalPlay(g_bossDeadSnd); return; }   // a boss with no death cry of his own goes down to the theme
+    if (cue==EC_CHARGE && boss && g_hasBossSnd && EnemyVoiceOwner(type,cue)<0){ GalPlay(g_bossSnd); return; }   // ...and arrives to it
+    Sound sd; const char *from; if (GalCueSound(type,cue,&sd,&from)) GalPlay(sd);
+}
+static Rectangle GalVoiceRow(int c){ return (Rectangle){ 22, 178+c*26.0f, 430, 24 }; }
 // screen rectangle of enemy button k (column down the right edge)
 static Rectangle GalButton(int k, int sw, int sh){
-    float top=20, bottom=sh-40.0f, rowH=(bottom-top)/EN_NTYPES;
+    float top=20, bottom=sh-40.0f, rowH=(bottom-top)/GAL_N;
     if (rowH>72) rowH=72;
     float w=200;
     return (Rectangle){ sw-w-12, top+k*rowH, w, rowH-4 };
@@ -184,11 +219,12 @@ static Rectangle GalWeaponButton(int k, int sh){        // k=0: the ON/OFF toggl
 static void RangeTargetReset(int type){
     for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;
     Enemy *e=&g_enemies[0]; memset(e,0,sizeof *e);
-    e->type=type; e->state=1; e->hp=e->maxHp=kEnemy[type].hp; e->pos=(Vector3){0,0,0};
+    e->type=type; e->state=1; e->hp=e->maxHp=g_galArch?ARCH_HP:kEnemy[type].hp; e->pos=(Vector3){0,0,0};
+    e->sc=GAL_BSC; e->boss=g_galArch;
     for (int i=0;i<MAX_SPARKS;i++) g_sparks[i].life=0;  // wipe the last body's blood
 }
 static void RangeAimHome(int type){                     // look at the chest
-    g_yaw=PI; g_pitch=atan2f(1.15f*kEnemy[type].scale-EYE_H, RANGE_DIST);
+    g_yaw=PI; g_pitch=atan2f(1.15f*kEnemy[type].scale*GAL_BSC-EYE_H, RANGE_DIST);
 }
 static void RangeSilence(void){
     Weapon *w=&g_weapons[g_curWeapon];
@@ -213,6 +249,9 @@ static int RunGallery(void){
           while (f && poseN<16){ poseF[poseN++]=(float)atof(f+1); f=strchr(f+1,','); } }
         paused=1; } }
     if (getenv("CHERNOBYL_GALLERY_TURN")) turn=(float)atof(getenv("CHERNOBYL_GALLERY_TURN"));   // dev: camera angle
+    g_galArch=0;
+    { const char *ss=getenv("CHERNOBYL_GALLERY_START"), *ps=getenv("CHERNOBYL_GALLERY_POSE");          // "archimandrite" names the boss entry
+      if ((ss && !strncmp(ss,"archimandrite",13)) || (ps && !strncmp(ps,"archimandrite",13))){ type=EN_PRIEST; g_galArch=1; } }
     // CHERNOBYL_GALLERY_START="name[:clip]" (dev-enemies.sh gunner 4): open on that enemy / clip, playing
     { const char *ss=getenv("CHERNOBYL_GALLERY_START");
       if (ss && *ss){ char nm[32]={0}; const char *c=strchr(ss,':'); size_t n=c?(size_t)(c-ss):strlen(ss);
@@ -232,11 +271,15 @@ static int RunGallery(void){
     GalThumbs();
     EnableCursor();
     while (!WindowShouldClose()){
+        if (IsKeyPressed(KEY_ESCAPE)) break;                 // ESC leaves the dev mode (the game turns raylib's own exit key off)
         float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
         EnemyRig *rg=&g_rig[type];
-        int prevType=type, prevSt=st, prevRange=range;
-        if (IsKeyPressed(KEY_TAB)||IsKeyPressed(KEY_RIGHT_BRACKET)) type=(type+1)%EN_NTYPES;
-        if (IsKeyPressed(KEY_LEFT_BRACKET)) type=(type+EN_NTYPES-1)%EN_NTYPES;
+        int prevType=type, prevSt=st, prevRange=range, prevArch=g_galArch;
+        { int pick=g_galArch?EN_NTYPES:type, was=pick;                    // the list position: the types, then the Archimandrite
+          if (IsKeyPressed(KEY_TAB)||IsKeyPressed(KEY_RIGHT_BRACKET)) pick=(pick+1)%GAL_N;
+          if (IsKeyPressed(KEY_LEFT_BRACKET)) pick=(pick+GAL_N-1)%GAL_N;
+          if (pick!=was){ g_galArch=(pick==EN_NTYPES); type=g_galArch?EN_PRIEST:pick; } }
+        if (IsKeyPressed(KEY_S)) g_galSnd=!g_galSnd;
         for (int k=0;k<GS_N;k++) if (IsKeyPressed(KEY_ONE+k)) st=k;
         if (IsKeyPressed(KEY_A)) autoMode=!autoMode;
         if (IsKeyPressed(KEY_SPACE)) paused=!paused;
@@ -249,14 +292,16 @@ static int RunGallery(void){
             if (IsKeyDown(KEY_DOWN))  dist+=1.5f*dt;
         }
         int sw0=GetScreenWidth(), sh0=GetScreenHeight();
-        int overPick=-1, overW=-1;                                         // buttons: click to pick
+        int overPick=-1, overW=-1, overV=-1;                               // buttons: click to pick
         { Vector2 mp=GetMousePosition();
-          for (int k=0;k<EN_NTYPES;k++) if (CheckCollisionPointRec(mp,GalButton(k,sw0,sh0))) overPick=k;
+          for (int k=0;k<GAL_N;k++) if (CheckCollisionPointRec(mp,GalButton(k,sw0,sh0))) overPick=k;
+          if (!range) for (int c=0;c<EC_N;c++) if (CheckCollisionPointRec(mp,GalVoiceRow(c))) overV=c;
           for (int k=0;k<=4;k++) if (CheckCollisionPointRec(mp,GalWeaponButton(k,sh0))) overW=k; }
         static int dragging=0;                                             // a drag that starts on a button doesn't turn
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
             armed=0; dragging=0;
-            if (overPick>=0){ type=overPick; autoMode=0; }
+            if (overPick>=0){ g_galArch=(overPick==EN_NTYPES); type=g_galArch?EN_PRIEST:overPick; autoMode=0; }
+            else if (overV>=0){ Sound sd; const char *from; if (GalCueSound(type,overV,&sd,&from)) GalPlay(sd); }
             else if (overW==0) range=!range;
             else if (overW>0){ int sl=kRangeSlot[overW-1];
                 if (g_weapons[sl].has){ if (!range){ range=1; ActivateWeapon(sl); } else if (sl!=g_curWeapon) SwitchWeapon(sl); } }
@@ -271,13 +316,15 @@ static int RunGallery(void){
         }
         if (range && !prevRange){ autoMode=0; RangeTargetReset(type); RangeAimHome(type); g_vmRaise=1.0f; }
         if (!range && prevRange){ RangeSilence(); g_autoFire=0; for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0; }
-        if (range && type!=prevType){ RangeTargetReset(type); RangeAimHome(type); deadT=0; }
+        if (range && (type!=prevType || g_galArch!=prevArch)){ RangeTargetReset(type); RangeAimHome(type); deadT=0; }
+        { static int vSt=-1, vType=-1, vArch=-1;                          // a state (or an enemy) just came up: his sound for it
+          if (st!=vSt || type!=vType || g_galArch!=vArch){ if (vSt>=0 && g_galSnd && !range) GalCue(type,st); vSt=st; vType=type; vArch=g_galArch; } }
         rg=&g_rig[type];
         if (!rg->ok || rg->animN<=0){ type=(type+1)%EN_NTYPES; continue; }
         ModelAnimation *an=&rg->anim[rg->clip[kGalRole[st]]];
         float galRate=GalFps(type,st);
         if ((st==GS_WALK || st==GS_RUN) && rg->gaitN>0){                    // the gait and cadence the game picks for this pace
-            float spd=(st==GS_RUN)?kEnemy[type].speed:kEnemy[type].speed*0.45f, gsc=kEnemy[type].scale, best=1e9f; int role=kGalRole[st];
+            float spd=(st==GS_RUN)?kEnemy[type].speed:kEnemy[type].speed*0.45f, gsc=kEnemy[type].scale*GAL_BSC, best=1e9f; int role=kGalRole[st];
             for (int g=0;g<rg->gaitN;g++){ float m=rg->mps[rg->gait[g]]*gsc; if (m<0.1f) continue;
                 float d=fabsf(logf(spd/m)); if (d<best){ best=d; role=rg->gait[g]; } }
             float m=rg->mps[role]*gsc;
@@ -300,7 +347,7 @@ static int RunGallery(void){
         if (autoMode){                                                     // ~3 s a state, death held 1.5 s
             int done = (st==GS_DIE) ? (hold>1.5f) : (stT>3.0f);
             if (done){ do { st++; } while (st==GS_CAST && kEnemy[type].kind!=AK_RAISE);
-                       if (st>=GS_N){ st=GS_IDLE; type=(type+1)%EN_NTYPES; }
+                       if (st>=GS_N){ st=GS_IDLE; int pick=((g_galArch?EN_NTYPES:type)+1)%GAL_N; g_galArch=(pick==EN_NTYPES); type=g_galArch?EN_PRIEST:pick; }
                        frame=0; stT=0; hold=0; boltT=-1;                // fresh clock for the new state
                        rg=&g_rig[type]; if (!rg->ok || rg->animN<=0) continue;
                        an=&rg->anim[rg->clip[kGalRole[st]]]; nf=ANIM_FRAMES(*an); if (nf<1) nf=1; }
@@ -358,8 +405,8 @@ static int RunGallery(void){
             if (tg->limpT>0) tg->limpT-=dt;
         }
         RigPose(rg,drawAn,drawFrame);
-        float esc=ENEMY_SCALE*kEnemy[type].scale;
-        float head=ViewerHeadY(rg)*kEnemy[type].scale, tall=head/0.92f;
+        float esc=ENEMY_SCALE*kEnemy[type].scale*GAL_BSC;
+        float head=ViewerHeadY(rg)*kEnemy[type].scale*GAL_BSC, tall=head/0.92f;
         float d=face?0.95f*tall/1.75f:dist*tall/1.75f, ly=face?head+0.02f:1.05f*tall/1.75f;
         float yr=turn*DEG2RAD;
         Camera3D cam={ (Vector3){sinf(yr)*d, ly+(face?0.02f:0.15f), cosf(yr)*d}, (Vector3){0,ly,0}, (Vector3){0,1,0}, face?32.0f:42.0f, CAMERA_PERSPECTIVE };
@@ -406,9 +453,22 @@ static int RunGallery(void){
             DrawText(tg->state==2?"DOWN -- back up in a moment":TextFormat("hp %.0f / %.0f", fmaxf(0.0f,tg->hp), tg->maxHp), 274, 157, 16, (Color){200,200,200,255});
             if (g_hsFlash>0) DrawText("HEADSHOT!", sw/2-MeasureText("HEADSHOT!",40)/2, sh/2-90, 40, (Color){255,70,50,(unsigned char)fminf(255.0f,g_hsFlash*400.0f)});
         }
-        DrawText(TextFormat("%s", kEnemy[type].name), 24, 20, 40, (Color){255,90,70,255});
-        DrawText(TextFormat("%d/%d   %s   hp %.0f   speed %.1f m/s", type+1, EN_NTYPES, kGalKind[kEnemy[type].kind], kEnemy[type].hp, kEnemy[type].speed),
+        { const char *nm=g_galArch?"archimandrite":kEnemy[type].name; int nw=MeasureText(nm,40);
+          DrawText(nm, 24, 20, 40, (Color){255,90,70,255});
+          if (g_galArch || type==EN_HEADCHEF) DrawText(g_galArch?"BOSS  -  ends wave 2":"BOSS  -  ends every other wave", 24+nw+16, 36, 20, (Color){255,200,80,255}); }
+        DrawText(TextFormat("%d/%d   %s   hp %.0f   speed %.1f m/s", (g_galArch?EN_NTYPES:type)+1, GAL_N, kGalKind[kEnemy[type].kind], g_galArch?ARCH_HP:kEnemy[type].hp, kEnemy[type].speed),
                  26, 66, 18, (Color){170,170,170,255});
+        if (!range){                                                       // VOICE: his four slots, each playable
+            DrawText(TextFormat("VOICE    click a row to play    S: play with each state  [%s]", g_galSnd?"ON":"OFF"), 26, 154, 16, (Color){255,200,80,255});
+            for (int c=0;c<EC_N;c++){ Rectangle r=GalVoiceRow(c); Sound sd; const char *from; int k=GalCueSound(type,c,&sd,&from);
+                if (c==overV) DrawRectangleRec(r,(Color){44,40,40,235});
+                Color tc = k==1?(Color){110,200,120,255} : k==0?(Color){230,80,70,255} : (Color){240,180,60,255};
+                DrawText(kECue[c],(int)r.x+6,(int)r.y+4,16,(Color){225,225,230,255});
+                const char *t = k==1 ? TextFormat("OK   %d take%s", g_hasECue[type][c], g_hasECue[type][c]==1?"":"s")
+                              : k==2 ? TextFormat("BORROWED   the %s's", from) : k==3 ? TextFormat("BORROWED   %s", from)
+                              : TextFormat("MISSING   wants %s", g_eCuePath[type][c]);
+                DrawText(t,(int)r.x+84,(int)r.y+4,16,tc); }
+        }
         int x=26;
         for (int k=0;k<GS_N;k++){
             if (k==GS_CAST && kEnemy[type].kind!=AK_RAISE) continue;
@@ -421,16 +481,18 @@ static int RunGallery(void){
         DrawText(range ? "click fire   right-drag/arrows aim   C re-aim   R reload   W weapon off   click/TAB enemy   1-7 state   ESC quit"
                        : "click/TAB/[ ] enemy   1-7 state   W weapon   A auto   SPACE pause   drag/arrows turn   wheel zoom   F face   ESC quit",
                  14, sh-28, 18, (Color){150,150,150,255});
-        for (int k=0;k<EN_NTYPES;k++){
+        for (int k=0;k<GAL_N;k++){
             Rectangle r=GalButton(k,sw,sh);
-            int sel=(k==type), hov=(k==overPick);
+            int kt=(k<EN_NTYPES)?k:EN_PRIEST, sel=(k<EN_NTYPES)?(k==type && !g_galArch):g_galArch, hov=(k==overPick);
             DrawRectangleRec(r, sel?(Color){60,40,20,235}:(hov?(Color){44,40,40,235}:(Color){24,22,25,220}));
             float th=r.height-6, tw=th*GAL_THUMB_W/(float)GAL_THUMB_H;
-            DrawTexturePro(g_galThumb[k].texture,(Rectangle){0,0,GAL_THUMB_W,-GAL_THUMB_H},   // render textures are upside down
+            DrawTexturePro(g_galThumb[kt].texture,(Rectangle){0,0,GAL_THUMB_W,-GAL_THUMB_H},   // render textures are upside down
                            (Rectangle){r.x+3,r.y+3,tw,th},(Vector2){0,0},0,WHITE);
             int fs=r.height>=48?20:16;
-            DrawText(kEnemy[k].name,(int)(r.x+tw+12),(int)(r.y+r.height/2-fs/2),fs,
+            int bossRow=(k==EN_HEADCHEF || k==EN_NTYPES);
+            DrawText(k<EN_NTYPES?kEnemy[k].name:"archimandrite",(int)(r.x+tw+12),(int)(r.y+r.height/2-fs/2)-(bossRow?6:0),k<EN_NTYPES?fs:(fs>16?16:fs),
                      sel?(Color){255,220,90,255}:(hov?(Color){230,230,230,255}:(Color){160,160,160,255}));
+            if (bossRow) DrawText("BOSS",(int)(r.x+tw+12),(int)(r.y+r.height/2+fs/2-5),12,(Color){255,90,70,255});
             if (sel) DrawRectangleLinesEx(r,2,(Color){255,90,70,255});
         }
         for (int k=0;k<=4;k++){                                            // weapon bar
