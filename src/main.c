@@ -164,6 +164,8 @@ static int             g_hasGun = 0;
 static int             g_aIdle=0, g_aShoot=1, g_aReload=2, g_aWalk=-1;  // idle = hold last frame of "Take"; aWalk=-1 = no walk clip
 static int             g_reloadSeq[6], g_reloadSeqN=0;  // active weapon's multi-phase reload clips
 static int             g_reloadStep=-1;                 // -1 idle; >=0 index into g_reloadSeq
+#define LOOP_OVERLAP 0.07f                              // seconds the next pass of a looped fire sound starts before the last ends
+static int             g_loopOn=0, g_loopAlt=0; static float g_loopT=0.0f;   // looped fire sound: playing / which voice / seconds into this pass
 static int             g_reloading=0;                   // a reload (single or sequence) is in progress
 static int             g_drawTopUp=0;                   // a weapon was just drawn: reload it if it is not full
 static int g_glPhase=0, g_glCut=0, g_glFire=0;   // 1 opening, 2 feeding, 3 shutting; cut = trigger pulled mid-reload; fire = shoot as it shuts
@@ -265,6 +267,7 @@ typedef struct {
     Vector3         gunC;                        // gun centre at the rest pose, model space
     float           reloadSteady;                // 0..1: how much of the gun-body's reload roll/swing to cancel (VmSteady)
     Sound           fireSnd;                     // per-weapon fire report
+    Sound           fireSnd2;                    // looped weapons: a second voice on the same samples, so one pass can start under the tail of the last
     int             hasSnd;                      // fireSnd loaded OK
     int             sndLoop;                     // 1 = loop while trigger held (auto); 0 = one-shot per shot
     int             burst;                       // >0: rounds per trigger pull (burst fire)
@@ -570,8 +573,8 @@ static void ActivateWeapon(int n){
 static void SwitchWeapon(int n){
     if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
     // silence the weapon we're holstering so its loop doesn't bleed past the swap
-    if (g_audio && g_weapons[g_curWeapon].hasSnd && IsSoundPlaying(g_weapons[g_curWeapon].fireSnd))
-        StopSound(g_weapons[g_curWeapon].fireSnd);
+    if (g_audio && g_weapons[g_curWeapon].hasSnd){ StopSound(g_weapons[g_curWeapon].fireSnd); if (g_weapons[g_curWeapon].sndLoop) StopSound(g_weapons[g_curWeapon].fireSnd2); }
+    g_loopOn=0;
     if (g_audio && g_weapons[g_curWeapon].hasAuxSnd && IsSoundPlaying(g_weapons[g_curWeapon].auxSnd))
         StopSound(g_weapons[g_curWeapon].auxSnd);
     StashActiveTuning();
@@ -849,6 +852,7 @@ static void LoadWeaponSound(int slot, const char *path, const char *alt, int loo
     w->fireSnd=LoadSound(fp);
     w->hasSnd=(w->fireSnd.frameCount>0);
     w->sndLoop=loop;
+    if (w->hasSnd && loop) w->fireSnd2=LoadSoundAlias(w->fireSnd);
     DebugLog("wsound","\"slot\":%d,\"path\":\"%s\",\"frames\":%u,\"loop\":%d",slot,JStr(fp),w->fireSnd.frameCount,loop);
 }
 
@@ -2367,6 +2371,8 @@ enum { HC_BULLET=0, HC_BLAST, HC_FLAME, HC_MELEE };
 #define MOB_RANGE 16.0f
 static int g_gibKills=0;        // kills that left no body (a running tally: callers compare before / after)
 #define MULTIKILL_N 3           // one grenade killing this many sets off the crowd scream
+#define BOLT_FRIENDLY_MULT 2.5f  // a radiation bolt does this much of its player damage to a hostile it strikes (they have far more health)
+static int g_noCredit=0;        // the damage being dealt is not the player's doing: no kill tally, marker or confirm sound
 #define GIB_BLAST_DMG 100.0f     // a grenade doing this much to the round that kills him blows him apart
 static int g_hurtCause=HC_BULLET; static Vector3 g_hurtFrom;   // g_hurtFrom: the blast centre
 #define LIMP_TIME     6.0f      // seconds of limping after a leg hit
@@ -2508,7 +2514,7 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
     if (g_enemies[ei].hp<=0){
         g_enemies[ei].prevClip=g_enemies[ei].clip; g_enemies[ei].prevT=g_enemies[ei].animT; g_enemies[ei].blendT=ENEMY_BLEND;
         EnemyPoseSnap(&g_enemies[ei],1);                      // the fall eases out of whatever he was doing
-        g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0; g_killMark=0.32f;
+        g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0; if (!g_noCredit) g_killMark=0.32f;
         { Enemy *e=&g_enemies[ei]; const Weapon *cw=&g_weapons[g_curWeapon];   // how he dies: by cause, then where it hit
           e->deathYaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;   // facing the shooter
           e->pushV=(Vector3){0,0,0};
@@ -2539,13 +2545,13 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
         if (g_enemies[ei].boss && g_audio && g_hasBossDeadSnd){                      // the boss is down
             if (g_hasBossSnd) StopSound(g_bossSnd);
             SetSoundVolume(g_bossDeadSnd,0.85f); PlaySound(g_bossDeadSnd); DebugLog("bossdead","\"wave\":%d", g_wave); }
-        g_kills++; if (head) g_headshots++;
+        if (!g_noCredit){ g_kills++; if (head) g_headshots++; }
         if (g_enemies[ei].state==0){ g_gibKills++; }                                  // blown apart: nothing left to scream (the gib burst is his sound)
         else if (EnemyVoice(&g_enemies[ei], EC_DEATH, 1.0f, 0.0f)){}                  // his kind's own death, when it has one
         else if (g_audio && g_hasSgDeathSnd && g_hurtCause==HC_BULLET && g_weapons[g_curWeapon].pellets>1 && GetRandomValue(0,99)<45)
             SfxAt(g_sgDeathSnd, g_enemies[ei].pos, 1.0f);                             // killed by buckshot: sometimes this scream instead
         else if (g_audio && g_nDeathSnd>0){ SfxAt(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)], g_enemies[ei].pos, 1.0f); }
-        if (g_audio && g_hasSy){ SetSoundPitch(g_sy[SY_KILL], 0.92f+GetRandomValue(0,16)/100.0f); SetSoundVolume(g_sy[SY_KILL],0.55f); PlaySound(g_sy[SY_KILL]); }   // the kill, confirmed
+        if (g_audio && g_hasSy && !g_noCredit){ SetSoundPitch(g_sy[SY_KILL], 0.92f+GetRandomValue(0,16)/100.0f); SetSoundVolume(g_sy[SY_KILL],0.55f); PlaySound(g_sy[SY_KILL]); }   // the kill, confirmed
         { void PickupOnKillAt(int ei); PickupOnKillAt(ei); }
     } else {
         // flame ticks every frame: re-flinching on each one froze a burning enemy in place.
@@ -2853,7 +2859,7 @@ static void EnemyNudge(int i, float mx, float mz){
 // Bolts: slow glowing radiation shots aimed where the player WAS (dodge by moving);
 // hitscan: instant, but accuracy falls with distance and while the player moves; raise:
 // the priest channels a beam into a corpse and it stands back up.
-typedef struct { Vector3 pos, vel; float life, dmg; int active; } Bolt;
+typedef struct { Vector3 pos, vel; float life, dmg; int active; int owner; } Bolt;   // owner = the thrower's slot + 1 (it never hits him)
 #define MAX_BOLTS 32
 static Bolt  g_bolts[MAX_BOLTS];
 typedef struct { Vector3 a, b; float t; } Beam;     // priest raise beam (t: seconds left)
@@ -2961,7 +2967,7 @@ static void EnemyBolt(Enemy *e, float d){
     if (!EnemyClearShot(e)){ e->los=0; e->losT=0.25f; return; }
     Vector3 m=EnemyBoltOrigin(e), tgt=Vector3Add(g_cam.position,(Vector3){0,-0.3f,0});
     Vector3 v=Vector3Scale(Vector3Normalize(Vector3Subtract(tgt,m)),13.0f);
-    for (int i=0;i<MAX_BOLTS;i++) if (!g_bolts[i].active){ g_bolts[i]=(Bolt){m,v,3.0f,(e->boss && e->type==EN_PRIEST)?ARCH_BOLT_DMG:kEnemy[e->type].shotDmg,1}; break; }
+    for (int i=0;i<MAX_BOLTS;i++) if (!g_bolts[i].active){ g_bolts[i]=(Bolt){m,v,3.0f,(e->boss && e->type==EN_PRIEST)?ARCH_BOLT_DMG:kEnemy[e->type].shotDmg,1,(int)(e-g_enemies)+1}; break; }
     DebugLog("ebolt","\"d\":%.1f,\"from\":[%.2f,%.2f,%.2f],\"enemy\":[%.2f,%.2f,%.2f]",d,m.x,m.y,m.z,e->pos.x,e->drawY,e->pos.z);
     g_sfxAt=e->pos; EnemySfx(g_eBoltSnd,g_hasEBolt,d);
 }
@@ -2971,7 +2977,9 @@ static void BoltsReset(void){ memset(g_bolts,0,sizeof g_bolts); memset(g_beams,0
 // over the results screen and into the next run.
 static void StopAllSfx(void){
     if (!g_audio) return;
-    for (int i=0;i<g_numWeapons;i++){ if (g_weapons[i].hasSnd) StopSound(g_weapons[i].fireSnd); if (g_weapons[i].hasAuxSnd) StopSound(g_weapons[i].auxSnd); }
+    for (int i=0;i<g_numWeapons;i++){ if (g_weapons[i].hasSnd){ StopSound(g_weapons[i].fireSnd); if (g_weapons[i].sndLoop) StopSound(g_weapons[i].fireSnd2); }
+        if (g_weapons[i].hasAuxSnd) StopSound(g_weapons[i].auxSnd); }
+    g_loopOn=0;
     if (g_hasEShot) StopSound(g_eShotSnd); if (g_hasEBolt) StopSound(g_eBoltSnd); if (g_hasERaise) StopSound(g_eRaiseSnd);
     if (g_hasAttackSnd) StopSound(g_attackSnd); if (g_hasHeartSnd) StopSound(g_heartSnd);
     EnemyVoiceStopAll();
@@ -2995,6 +3003,19 @@ static void BoltsUpdate(float dt){
                 b->active=0; continue; }
         }
         b->pos=Vector3Add(b->pos,step);
+        {   // another hostile in its path takes the bolt: it burns him and stops there (never its thrower)
+            int struck=-1;
+            for (int k=0;k<MAX_ENEMIES && struck<0;k++){ const Enemy *t=&g_enemies[k];
+                if (t->state!=1 || k==b->owner-1) continue;
+                float sc=kEnemy[t->type].scale*t->sc, dx=b->pos.x-t->pos.x, dz=b->pos.z-t->pos.z, rr=ENEMY_RADIUS*sc*0.8f+0.16f;
+                if (dx*dx+dz*dz<rr*rr && b->pos.y>=t->pos.y && b->pos.y<=t->pos.y+ENEMY_HEIGHT*sc) struck=k; }
+            if (struck>=0){
+                Vector3 dn=(sl>1e-5f)?Vector3Scale(step,1.0f/sl):(Vector3){0,0,1};
+                for (int q=0;q<10;q++) SpawnLiquid(b->pos,Vector3Negate(dn));
+                g_noCredit=1; HurtEnemy(struck, b->dmg*BOLT_FRIENDLY_MULT, 0, dn, b->pos, 1); g_noCredit=0;   // not the player's kill
+                DebugLog("boltfriendly","\"victim\":\"%s\",\"dmg\":%.0f", kEnemy[g_enemies[struck].type].name, b->dmg*BOLT_FRIENDLY_MULT);
+                b->active=0; continue; }
+        }
         Vector3 chest=Vector3Add(g_cam.position,(Vector3){0,-0.45f,0});
         if (Vector3Distance(b->pos,chest)<0.6f){
             if (!g_godMode) g_playerHp-=b->dmg;
@@ -3800,8 +3821,16 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
 
     // looped fire sound (rifle burst / minigun) follows the actual firing
     if (g_audio && cw->hasSnd && cw->sndLoop && !cw->soundGated){
-        if (firingNow){ if (!IsSoundPlaying(cw->fireSnd)) PlaySound(cw->fireSnd); }
-        else if (IsSoundPlaying(cw->fireSnd)) StopSound(cw->fireSnd);
+        // Seamless: the loop used to be "play it again once it has stopped", which left a hole every
+        // pass (2.4 s on the minigun) while the mixer noticed and restarted. Now the next pass starts
+        // on the other voice a moment BEFORE this one ends, so the fire never drops out while held.
+        float len=(float)cw->fireSnd.frameCount/(float)(cw->fireSnd.stream.sampleRate>0?cw->fireSnd.stream.sampleRate:44100);
+        if (firingNow){
+            if (!g_loopOn){ PlaySound(cw->fireSnd); g_loopOn=1; g_loopAlt=0; g_loopT=0.0f; }
+            g_loopT+=dt;
+            if (g_loopT>=len-LOOP_OVERLAP){ g_loopAlt^=1; Sound nx=g_loopAlt?cw->fireSnd2:cw->fireSnd;
+                SetSoundVolume(nx,1.0f); PlaySound(nx); g_loopT=0.0f; }
+        } else if (g_loopOn){ StopSound(cw->fireSnd); StopSound(cw->fireSnd2); g_loopOn=0; }
     }
 
 }
@@ -3975,7 +4004,7 @@ static void Update(void) {
     if (IsKeyPressed(KEY_M) && !g_dead && !g_menu){            // M: mute / unmute everything
         g_userMute=!g_userMute; SetMasterVolume(g_userMute?0.0f:1.0f);
         DebugLog("mute","\"on\":%d", g_userMute); }
-    if (IsKeyPressed(KEY_P)){
+    if (IsKeyPressed(KEY_P) && !g_dead){                       // not on the death / initials screen (P is a letter there)
         g_paused=!g_paused;
         DebugLog("pause","\"paused\":%s", g_paused?"true":"false");
     }
@@ -5905,7 +5934,7 @@ int main(int argc, char **argv) {
     {
         static const struct { float dmg; int pel; float spr, kick; int mag, res; } S[6]={
             {  0.0f, 0, 0.0f, 2.5f,    6,  18 },   // 0 grenade launcher (GREN_DMG on the blast)
-            { 13.0f, 8, 3.5f, 3.2f,    5,  25 },   // 1 remington: a pellet wall, brutal up close
+            { 19.0f, 9, 3.6f, 3.6f,    5,  25 },   // 1 remington: nine pellets at 19 (171 a blast, was 104): drops a cook at range, staggers a butcher
             {  7.0f, 0, 2.2f, 0.25f, 300, 300 },   // 2 minigun: belt-fed hose, wide
             { 14.0f, 0, 1.6f, 0.8f,   80, 160 },   // 3 LMG: chunky gated bursts
             { 34.0f, 0, 0.7f, 1.1f,   30, 120 },   // 4 AK-74M: 3-tap body, 1-tap head

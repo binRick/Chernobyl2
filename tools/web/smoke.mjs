@@ -32,7 +32,11 @@ try {
   let ready = false; const t0 = Date.now();
   while (Date.now() - t0 < 120000 && !ready) { await sleep(500); ready = await ev("document.getElementById('gate').style.display==='none' || document.getElementById('cta').className==='ready'"); }
   console.log(ready ? `ready after ${((Date.now() - t0) / 1000).toFixed(1)} s` : 'NOT READY after 120 s; status: ' + await ev("document.getElementById('cta').textContent"));
-  await sleep(runSecs * 1000);
+  for (let k = 0; k < +(process.env.SMOKE_SHOTS || 0); k++) {     // a strip of stills, runSecs apart: out_0.png, out_1.png ...
+    await sleep(runSecs * 1000); const s = await send('Page.captureScreenshot', { format: 'png' });
+    if (s.data) writeFileSync(out.replace(/\.png$/, `_${k}.png`), Buffer.from(s.data, 'base64'));
+  }
+  if (!process.env.SMOKE_SHOTS) await sleep(runSecs * 1000);
   if (process.env.SMOKE_TYPE) {            // type into the page (the death screen's initials), then ENTER
     for (const ch of process.env.SMOKE_TYPE) { await send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch, key: ch, code: 'Key' + ch.toUpperCase(), windowsVirtualKeyCode: ch.toUpperCase().charCodeAt(0) });
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch, code: 'Key' + ch.toUpperCase(), windowsVirtualKeyCode: ch.toUpperCase().charCodeAt(0) }); await sleep(120); }
@@ -46,6 +50,6 @@ try {
   const keep = logs.filter(l => !/^\[(log|info)\] (INFO|DEBUG): (FILEIO|IMAGE|TEXTURE|MODEL|VAO|SHADER: \[ID \d+\] (Vertex|Fragment) shader compiled|TIMER|AUDIO|WAVE|STREAM|FONT|GL: |DISPLAY|PLATFORM|RLGL|SYSTEM|FBO)/.test(l));
   const tally = new Map(); for (const l of keep) tally.set(l, (tally.get(l) || 0) + 1);       // each distinct line once, with its count
   console.log(`console: ${logs.length} lines, ${tally.size} distinct shown`);
-  for (const [l, n] of [...tally].slice(0, 40)) console.log(`  ${n > 1 ? n + 'x ' : ''}${l.slice(0, 260)}`);
+  for (const [l, n] of [...tally].slice(0, 90)) console.log(`  ${n > 1 ? n + 'x ' : ''}${l.slice(0, 260)}`);
 } catch (e) { console.log('smoke failed: ' + e.message); }
 finally { try { ws && ws.close(); } catch {} chrome.kill(); }
