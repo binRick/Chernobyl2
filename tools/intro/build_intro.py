@@ -640,11 +640,10 @@ def press_png(path):
     im.save(path)
 
 
-# Title-screen controls (keep in step with main.c: kSlotForKey maps keys 1-6 to slots).
+# Title-screen controls (keep in step with main.c: kSlotForKey maps keys 1-4 to slots).
 CONTROLS = [("MOVE", "W A S D"), ("LOOK", "MOUSE"), ("FIRE", "LEFT CLICK"), ("RELOAD", "R"),
             ("SPRINT", "SHIFT"), ("JUMP", "SPACE"), ("MENU", "ESC")]
-WEAPONS = [("1", "MINIGUN"), ("2", "FLAMETHROWER"), ("3", "GRENADE LAUNCHER"), ("4", "REMINGTON"),
-           ("5", "LMG"), ("6", "AK-74M")]
+WEAPONS = [("1", "MINIGUN"), ("2", "FLAMETHROWER"), ("3", "GRENADE LAUNCHER"), ("4", "REMINGTON")]
 
 
 def controls_png(path):

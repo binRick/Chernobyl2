@@ -176,7 +176,7 @@ static Rectangle GalButton(int k, int sw, int sh){
 // button per gun, in the game's number-key order. Left click fires, right-drag aims, R reloads,
 // ammo never runs out. The target flinches, dies, and stands back up 2 s later.
 #define RANGE_DIST 5.0f
-static const int kRangeSlot[6]={2,5,0,1,3,4};          // = the game's kSlotForKey: minigun first
+static const int kRangeSlot[4]={2,5,0,1};              // = the game's kSlotForKey: minigun first
 static Rectangle GalWeaponButton(int k, int sh){        // k=0: the ON/OFF toggle, 1..6: guns
     float w=(k==0)?150.0f:132.0f, x=14.0f+(k>0?150.0f+6.0f+(k-1)*(132.0f+6.0f):0.0f);
     return (Rectangle){ x, sh-28.0f-44.0f, w, 36.0f };
@@ -252,7 +252,7 @@ static int RunGallery(void){
         int overPick=-1, overW=-1;                                         // buttons: click to pick
         { Vector2 mp=GetMousePosition();
           for (int k=0;k<EN_NTYPES;k++) if (CheckCollisionPointRec(mp,GalButton(k,sw0,sh0))) overPick=k;
-          for (int k=0;k<=6;k++) if (CheckCollisionPointRec(mp,GalWeaponButton(k,sh0))) overW=k; }
+          for (int k=0;k<=4;k++) if (CheckCollisionPointRec(mp,GalWeaponButton(k,sh0))) overW=k; }
         static int dragging=0;                                             // a drag that starts on a button doesn't turn
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
             armed=0; dragging=0;
@@ -433,7 +433,7 @@ static int RunGallery(void){
                      sel?(Color){255,220,90,255}:(hov?(Color){230,230,230,255}:(Color){160,160,160,255}));
             if (sel) DrawRectangleLinesEx(r,2,(Color){255,90,70,255});
         }
-        for (int k=0;k<=6;k++){                                            // weapon bar
+        for (int k=0;k<=4;k++){                                            // weapon bar
             Rectangle r=GalWeaponButton(k,sh);
             int sl=(k>0)?kRangeSlot[k-1]:-1, hov=(k==overW);
             int on = (k==0) ? range : (range && sl==g_curWeapon);
