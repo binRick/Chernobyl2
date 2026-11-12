@@ -18,6 +18,7 @@ typedef struct { char ini[4]; int score, wave, kills; } LbRow;
 static struct {
     int state;                       // LB_*
     char ini[4]; int n;              // initials being typed
+    int prefilled;                   // they are last run's, shown ready to reuse: the first letter typed replaces them
     int score, kills, headshots, wave, shots, acc; float time; char weapon[24];
     volatile int postDone, rank, total;              // worker -> main
     volatile int topReady; LbRow top[LB_TOP]; int topN;
@@ -85,7 +86,7 @@ static void LbOnDeath(int score, const char *weapon){
     g_lb.score=score; g_lb.kills=g_kills; g_lb.headshots=g_headshots; g_lb.wave=g_wave; g_lb.shots=g_shotsFired;
     g_lb.acc=g_shotsFired>0?(int)(100.0f*g_shotsHit/g_shotsFired+0.5f):0; g_lb.time=g_runT;
     { int k=0; for (const char *c=weapon; c && *c && k<23; c++) if (isalnum((unsigned char)*c) || *c==' ' || *c=='-') g_lb.weapon[k++]=*c; g_lb.weapon[k]=0; }
-    strcpy(g_lb.ini,g_lbSaved); g_lb.n=(int)strlen(g_lb.ini);
+    strcpy(g_lb.ini,g_lbSaved); g_lb.n=(int)strlen(g_lb.ini); g_lb.prefilled=(g_lb.n>0);
     g_lb.state=LB_ENTER;
     LbSpawn(0);                                           // the board, while he types
     const char *au=getenv("CHERNOBYL_SCORES_AUTO");
@@ -96,12 +97,14 @@ static int LbDeadUpdate(void){
     if (g_lb.topReady){ g_lb.topN=g_lb.topWN; memcpy(g_lb.top,g_lb.topW,sizeof g_lb.top); g_lb.topReady=0; }
     int enter=IsKeyPressed(KEY_ENTER)||IsKeyPressed(KEY_KP_ENTER), click=IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (g_lb.state==LB_ENTER){
-        int ch; while ((ch=GetCharPressed())>0){ ch=toupper(ch); if (g_lb.n<3 && isalnum(ch) && ch<128){ g_lb.ini[g_lb.n++]=(char)ch; g_lb.ini[g_lb.n]=0; } }
-        if (IsKeyPressed(KEY_BACKSPACE) && g_lb.n>0) g_lb.ini[--g_lb.n]=0;
+        int ch; while ((ch=GetCharPressed())>0){ ch=toupper(ch); if (ch>=128 || !isalnum(ch)) continue;
+            if (g_lb.prefilled){ g_lb.n=0; g_lb.ini[0]=0; g_lb.prefilled=0; }      // typing over last run's initials starts them afresh
+            if (g_lb.n<3){ g_lb.ini[g_lb.n++]=(char)ch; g_lb.ini[g_lb.n]=0; } }
+        if (IsKeyPressed(KEY_BACKSPACE) && g_lb.n>0){ g_lb.ini[--g_lb.n]=0; g_lb.prefilled=0; }
         int autoGo=(getenv("CHERNOBYL_SCORES_AUTO")!=NULL) && g_lb.n>0 && !g_lb.busy;
         if ((enter || autoGo) && g_lb.n>0){
             if (g_lb.busy) return 0;                      // the board fetch is still out: next frame
-            strcpy(g_lbSaved,g_lb.ini); SaveOptions();
+            if (!getenv("CHERNOBYL_SCORES_AUTO")){ strcpy(g_lbSaved,g_lb.ini); SaveOptions(); }   // (a test run's initials are not the player's)
             g_lb.state=LB_POSTING; LbSpawn(1);
             DebugLog("score","\"post\":\"%s\",\"score\":%d", g_lb.ini, g_lb.score);
             return 0; }
@@ -120,7 +123,8 @@ static void LbDraw(int W, int H){
     if (g_lb.state==LB_ENTER){
         snprintf(t,sizeof t,"INITIALS  %c %c %c", g_lb.n>0?g_lb.ini[0]:'_', g_lb.n>1?g_lb.ini[1]:'_', g_lb.n>2?g_lb.ini[2]:'_');
         int w=MeasureText(t,30); DrawText(t,W/2-w/2,y,30,hi);
-        const char *p=g_lb.n>0?"ENTER  -  post score      click  -  skip":"type your initials      click  -  skip";
+        const char *p=g_lb.prefilled?"ENTER  -  post score      type to change      click  -  skip"
+                     :g_lb.n>0?"ENTER  -  post score      BACKSPACE  -  delete      click  -  skip":"type your initials      click  -  skip";
         int pw=MeasureText(p,18); DrawText(p,W/2-pw/2,y+38,18,dim);
     } else if (g_lb.state==LB_POSTING){
         const char *p="posting score..."; int pw=MeasureText(p,22); DrawText(p,W/2-pw/2,y,22,dim);

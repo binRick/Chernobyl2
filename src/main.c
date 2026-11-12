@@ -157,6 +157,7 @@ static int             g_aIdle=0, g_aShoot=1, g_aReload=2, g_aWalk=-1;  // idle 
 static int             g_reloadSeq[6], g_reloadSeqN=0;  // active weapon's multi-phase reload clips
 static int             g_reloadStep=-1;                 // -1 idle; >=0 index into g_reloadSeq
 static int             g_reloading=0;                   // a reload (single or sequence) is in progress
+static int             g_drawTopUp=0;                   // a weapon was just drawn: reload it if it is not full
 static int g_glPhase=0, g_glCut=0, g_glFire=0;   // 1 opening, 2 feeding, 3 shutting; cut = trigger pulled mid-reload; fire = shoot as it shuts
 static int             g_curAnim = 0;           // start in idle (Take, held at end)
 static float           g_animT = 0.0f;          // frame cursor
@@ -567,6 +568,7 @@ static void SwitchWeapon(int n){
         StopSound(g_weapons[g_curWeapon].auxSnd);
     StashActiveTuning();
     ActivateWeapon(n);
+    g_drawTopUp=1;                                     // drawn: top it up if it isn't full (WeaponTrigger, once it is raised)
     g_vmRaise=1.0f;                // new gun comes up from below the frame
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\"", n, g_weapons[n].label);
 }
@@ -1285,7 +1287,7 @@ static int EnemyDualWield(int t){ return t==EN_COOK || t==EN_BUTCHER || t==EN_HE
 #define LIMP_CLIP_MPS_D 0.52f  // limp take's walking speed if it can't be measured
 #define FLAME_FLINCH_GAP 1.5  // seconds between flame-caused flinches (each tick re-flinching froze him)
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; int swing, prevClip; float prevT, blendT; int hitRole; double flameFlinchAt;
-                 int deathRole; float deathYaw, limpT, knockT, riseT; int charged; Vector3 pushV;
+                 int deathRole; float deathYaw, limpT, knockT, riseT; int charged; float sc, sumT, boltT; int phase; Vector3 pushV;
                  int wN, wNext; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS];   // bullet wounds, pinned to bones
                  struct ModelAnimation *drawAn; float drawFrame, drawYaw;
                  // --- motion (EnemyPose / UpdateEnemies): he has momentum, turns at a rate, and his legs and torso are posed apart
@@ -1815,7 +1817,7 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
     g_enemies[i].raiseC=-1; g_enemies[i].chanT=0;
     g_enemies[i].swing=0; g_enemies[i].blendT=0;
     g_enemies[i].hitRole=CL_HIT; g_enemies[i].deathRole=CL_DEATH; g_enemies[i].limpT=0; g_enemies[i].knockT=0; g_enemies[i].flameFlinchAt=-100.0;   // a reused slot starts clean
-    g_enemies[i].pushV=(Vector3){0,0,0}; g_enemies[i].riseT=0; g_enemies[i].charged=0;
+    g_enemies[i].pushV=(Vector3){0,0,0}; g_enemies[i].riseT=0; g_enemies[i].charged=0; g_enemies[i].sc=1.0f; g_enemies[i].sumT=g_enemies[i].boltT=0; g_enemies[i].phase=0;
     g_enemies[i].wN=0; g_enemies[i].wNext=0; g_enemies[i].drawAn=NULL;
     { Enemy *e=&g_enemies[i];                              // motion state: standing, turned to the player, his own pace and approach side
       e->spd*=1.0f+GetRandomValue(-8,8)/100.0f;
@@ -1901,6 +1903,19 @@ static void SpawnEnemyT(int i, int type, int behind){
     float dist=ARENA*0.6f + GetRandomValue(0,(int)(ARENA*0.3f));
     EnemyArm(i,(Vector3){ cosf(ang)*dist, 0, sinf(ang)*dist },type);
 }
+
+// ---- Bosses ---------------------------------------------------------------
+// Wave 2 ends with THE ARCHIMANDRITE instead of the head chef: a priest half as tall again who
+// never comes to you. He hangs back and makes the fight about his dead -- raising the corpses the
+// wave left (faster and from much further than a common priest), and calling fresh ones up out
+// of the floor round himself when there are none. At half health his lantern turns red and he
+// starts throwing radiation bolts as well, and the dead come faster.
+#define ARCH_SCALE   1.5f
+#define ARCH_HP      1000.0f
+#define ARCH_MINIONS 5         // he keeps about this many of his dead on their feet (7 in the second phase)
+#define ARCH_BOLT_DMG 14.0f
+static int BossTypeForWave(int w){ return (w==2) ? EN_PRIEST : EN_HEADCHEF; }
+static const char *BossName(int type){ return type==EN_PRIEST ? "THE ARCHIMANDRITE" : "THE HEAD CHEF"; }
 
 // ---- Wave director (M2): budgeted, trickled, cleared, breathered ------------
 // Wave 1 already fields nearly the whole roster (as ../Chernobyl does: its first wave is a mix,
@@ -2072,7 +2087,7 @@ static void UpdateWaves(float dt){
             g_corpseNext=(g_corpseNext+1)%MAX_CORPSES; }
         g_devCorpses=0;
     }
-    if (g_wave==0 && g_devBoss){ StartWave(1); g_waveBudget=0; return; }   // --boss: empty wave -> boss next frame
+    if (g_wave==0 && g_devBoss){ StartWave(g_devBoss); g_waveBudget=0; return; }   // --boss / --boss-wave N: that wave, emptied -> its boss next frame   // --boss: empty wave -> boss next frame
     if (g_wave==0){ g_waveBreather=3.0f; return; }     // run just started: a 3 s grace, then wave 1
     if (g_waveBudget>0){
         g_spawnTick-=dt;
@@ -2093,8 +2108,11 @@ static void UpdateWaves(float dt){
         g_bossThisWave=1;
         int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
         if (slot>=0){
-            SpawnEnemyT(slot,EN_HEADCHEF,0);
+            int bt=BossTypeForWave(g_wave);
+            SpawnEnemyT(slot,bt,0);
             g_enemies[slot].boss=1;                     // HUD bar, always drops mega + quad
+            if (bt==EN_PRIEST){ Enemy *b=&g_enemies[slot];                    // the Archimandrite: a giant who commands the dead
+                b->sc=ARCH_SCALE; b->maxHp=ARCH_HP*(1.0f+0.12f*(g_wave>1?g_wave-1:0)); b->hp=b->maxHp; b->sumT=3.5f; b->boltT=2.0f; }
             if (g_audio && g_hasBossSnd){ SetSoundVolume(g_bossSnd,0.80f); PlaySound(g_bossSnd); }   // his own entrance (it used to borrow the wave sting)
             else if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
             DebugLog("boss","\"wave\":%d,\"hp\":%.0f", g_wave, g_enemies[slot].maxHp);
@@ -2185,7 +2203,7 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
     for (int i=0;i<MAX_ENEMIES;i++){
         if (g_enemies[i].state!=1) continue;
         Vector3 c=g_enemies[i].pos;          // c.y = the enemy's floor (0 in the arena, map height on a map)
-        float sc=kEnemy[g_enemies[i].type].scale;                    // hitbox tracks the drawn size (head chef looms)
+        float sc=kEnemy[g_enemies[i].type].scale*g_enemies[i].sc;    // hitbox tracks the drawn size (head chef looms)
         float er=ENEMY_RADIUS*sc, eh=ENEMY_HEIGHT*sc;
         BoundingBox bb={ (Vector3){c.x-er, c.y, c.z-er},
                          (Vector3){c.x+er, c.y+eh, c.z+er} };
@@ -2195,10 +2213,16 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
             // The head box lives inside the body box's vertical span, so the
             // nearest-enemy pick above is unaffected; we just additionally ask
             // whether this same ray clips the (narrower) head of that enemy.
-            BoundingBox hb={ (Vector3){c.x-HEAD_RADIUS*sc, c.y+eh-HEAD_ZONE_H*sc, c.z-HEAD_RADIUS*sc},
-                             (Vector3){c.x+HEAD_RADIUS*sc, c.y+eh,                c.z+HEAD_RADIUS*sc} };
-            RayCollision hrc=GetRayCollisionBox((Ray){ro,rd},hb);
-            if (outHead) *outHead = (hrc.hit && hrc.distance>0);
+            // A headshot is judged where the shot passes the body's CENTRE LINE: its height there must
+            // be in the head zone and it must pass within a head's width of the axis. (It used to be
+            // "the ray clips the head box anywhere" -- and the body box is over a metre deep on a boss,
+            // so a rising shot into the chest came out through the back of the head box: a headshot.)
+            if (outHead){
+                float hx=rd.x, hz=rd.z, h2=hx*hx+hz*hz, ty=rc.point.y, miss=0.0f;
+                if (h2>1e-6f){ float t=((c.x-ro.x)*hx+(c.z-ro.z)*hz)/h2; if (t<0) t=0;
+                    ty=ro.y+rd.y*t; float px=ro.x+rd.x*t-c.x, pz=ro.z+rd.z*t-c.z; miss=sqrtf(px*px+pz*pz); }
+                *outHead = (ty>=c.y+eh-HEAD_ZONE_H*sc && ty<=c.y+eh+0.05f && miss<=HEAD_RADIUS*sc);
+            }
         }
     }
     return best;
@@ -2237,7 +2261,7 @@ static void EnemyAddWound(Enemy *e, Vector3 hitPt, Vector3 dir){
     ModelAnimation *an=e->drawAn ? e->drawAn : RigClip(e->type,e->clip);
     float fr=e->drawAn ? e->drawFrame : e->animT;
     float yaw=ps ? e->yaw : e->drawAn ? e->drawYaw : atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
-    float esc=ENEMY_SCALE*kEnemy[e->type].scale; if (esc<=0) return;
+    float esc=ENEMY_SCALE*(kEnemy[e->type].scale*e->sc); if (esc<=0) return;
     Vector3 base={e->pos.x, e->drawY, e->pos.z};
     Vector3 o=Vector3Scale(Vector3RotateByAxisAngle(Vector3Subtract(hitPt,base),(Vector3){0,1,0},-yaw*DEG2RAD),1.0f/esc);   // model space
     Vector3 u=Vector3Normalize(Vector3RotateByAxisAngle(dir,(Vector3){0,1,0},-yaw*DEG2RAD));
@@ -2340,7 +2364,7 @@ static void EnemyKnock(int ei, Vector3 push){
 }
 static int HitZoneRole(const Enemy *e, int head, Vector3 dir, Vector3 hitPt){
     if (head) return CL_HIT_HEAD;
-    float sc=kEnemy[e->type].scale;
+    float sc=(kEnemy[e->type].scale*e->sc);
     float h=(hitPt.y-e->pos.y)/(ENEMY_HEIGHT*sc);
     if (h<0.42f) return CL_HIT_LEG;
     Vector3 r=Vector3CrossProduct(dir,(Vector3){0,1,0});
@@ -2451,14 +2475,16 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
           else e->deathRole=CL_DEATH;
           if (g_hurtCause==HC_BULLET){                         // the round that kills him carries the body with it
               Vector3 pd={dir.x,0,dir.z}; float pl=Vector3Length(pd), mass=fmaxf(0.8f, kEnemy[e->type].hp/100.0f);
-              if (pl>1e-3f) e->pushV=Vector3Scale(pd, fminf(2.6f, (cw->pellets>1?1.5f:0.6f)+dmg*0.02f)/(pl*mass)); }
+              float shove=fminf(3.8f, (cw->pellets>1?2.6f:1.7f)+dmg*0.02f);          // thrown back off his feet, not dropped where he stood
+              if (e->type==EN_RIFLEMAN || e->type==EN_GUNNER) shove*=1.45f;         // the soldiers go down hardest: shot DOWN
+              if (pl>1e-3f) e->pushV=Vector3Scale(pd, shove/(pl*mass)); }
           { float pd2=Vector3Distance(e->pos,g_pos);           // torn apart: the heart of a blast, or buckshot at arm's length
             int gib = !e->boss && e->type!=EN_HEADCHEF &&
                       ((g_hurtCause==HC_BLAST && dmg>=GIB_BLAST_DMG && GetRandomValue(0,99)<65) || (g_hurtCause==HC_BULLET && cw->pellets>1 && pd2<3.2f && GetRandomValue(0,99)<45));
             if (gib){
                 Vector3 c={e->pos.x, e->pos.y+ENEMY_HEIGHT*0.55f, e->pos.z}, aw=(g_hurtCause==HC_BLAST)?(Vector3){e->pos.x-g_hurtFrom.x,0,e->pos.z-g_hurtFrom.z}:(Vector3){dir.x,0,dir.z};
                 float al=Vector3Length(aw); aw=(al>1e-3f)?Vector3Scale(aw,1.0f/al):(Vector3){0,0,0};
-                SpawnGibs(c, aw, e->pos.y, kEnemy[e->type].scale);
+                SpawnGibs(c, aw, e->pos.y, (kEnemy[e->type].scale*e->sc));
                 if (g_audio && g_hasGibSnd){ SetSoundPitch(g_gibSnd,0.92f+GetRandomValue(0,16)/100.0f); SfxAt(g_gibSnd, c, 1.0f); }
                 e->state=0;                                    // nothing left to fall over
                 DebugLog("gib","\"i\":%d,\"cause\":%d", ei, g_hurtCause); } }
@@ -2805,13 +2831,13 @@ static void EnemySfx(Sound snd, int has, float d){
 }
 static Vector3 EnemyMuzzle(const Enemy *e){            // gun/hand height, a little toward the player
     Vector3 to=Vector3Subtract(g_pos,e->pos); to.y=0; float l=Vector3Length(to); if (l>1e-3f) to=Vector3Scale(to,1.0f/l);
-    float sc=kEnemy[e->type].scale;
+    float sc=(kEnemy[e->type].scale*e->sc);
     return (Vector3){ e->pos.x+to.x*0.55f, e->drawY+1.42f*sc, e->pos.z+to.z*0.55f };
 }
 // Line of sight is judged from the enemy's OWN EYES -- never from the offset muzzle. The
 // muzzle sits 0.55 m toward the player, so an enemy hidden just behind a wall's edge could
 // poke it round the corner and shoot (unseen, the tracer leaving the wall).
-static Vector3 EnemyEye(const Enemy *e){ return (Vector3){ e->pos.x, e->drawY+1.45f*kEnemy[e->type].scale, e->pos.z }; }
+static Vector3 EnemyEye(const Enemy *e){ return (Vector3){ e->pos.x, e->drawY+1.45f*(kEnemy[e->type].scale*e->sc), e->pos.z }; }
 static int EnemyClearShot(const Enemy *e){              // fresh, uncached: eye -> player's eye
     if (!(g_hasMap && g_mapCol.ready)) return 1;
     Vector3 a=EnemyEye(e), d=Vector3Subtract(g_cam.position,a); float L=Vector3Length(d);
@@ -2877,7 +2903,7 @@ static Vector3 EnemyBoltOrigin(const Enemy *e){
     float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
     Vector3 h; const EnemyRig *brg=RigOf(e->type);
     if (e->poseOK && brg->bHandR>=0)                         // the hand as posed (he may be turned / twisted)
-        h=Vector3Add((Vector3){e->pos.x,e->drawY,e->pos.z}, Vector3RotateByAxisAngle(Vector3Scale(e->pose[brg->bHandR].translation,ENEMY_SCALE*kEnemy[e->type].scale),(Vector3){0,1,0},e->yaw*DEG2RAD));
+        h=Vector3Add((Vector3){e->pos.x,e->drawY,e->pos.z}, Vector3RotateByAxisAngle(Vector3Scale(e->pose[brg->bHandR].translation,ENEMY_SCALE*(kEnemy[e->type].scale*e->sc)),(Vector3){0,1,0},e->yaw*DEG2RAD));
     else h=RigBoneWorld(e->type, e->clip, e->animT, "RightFingerBase", (Vector3){e->pos.x,e->drawY,e->pos.z}, yaw);
     if (g_hasMap && g_mapCol.ready){ Vector3 eye=EnemyEye(e), d=Vector3Subtract(h,eye); float L=Vector3Length(d);
         if (L>1e-3f){ float w=MapRayNearest(eye,Vector3Scale(d,1.0f/L),L); if (w>0.0f && w<L) return EnemyShotOrigin(e); } }
@@ -2887,7 +2913,7 @@ static void EnemyBolt(Enemy *e, float d){
     if (!EnemyClearShot(e)){ e->los=0; e->losT=0.25f; return; }
     Vector3 m=EnemyBoltOrigin(e), tgt=Vector3Add(g_cam.position,(Vector3){0,-0.3f,0});
     Vector3 v=Vector3Scale(Vector3Normalize(Vector3Subtract(tgt,m)),13.0f);
-    for (int i=0;i<MAX_BOLTS;i++) if (!g_bolts[i].active){ g_bolts[i]=(Bolt){m,v,3.0f,kEnemy[e->type].shotDmg,1}; break; }
+    for (int i=0;i<MAX_BOLTS;i++) if (!g_bolts[i].active){ g_bolts[i]=(Bolt){m,v,3.0f,(e->boss && e->type==EN_PRIEST)?ARCH_BOLT_DMG:kEnemy[e->type].shotDmg,1}; break; }
     DebugLog("ebolt","\"d\":%.1f,\"from\":[%.2f,%.2f,%.2f],\"enemy\":[%.2f,%.2f,%.2f]",d,m.x,m.y,m.z,e->pos.x,e->drawY,e->pos.z);
     g_sfxAt=e->pos; EnemySfx(g_eBoltSnd,g_hasEBolt,d);
 }
@@ -2965,17 +2991,17 @@ static int PriestRaise(int idx, float dt){
                 g_sfxAt=e->pos; EnemySfx(g_eRaiseSnd,g_hasERaise,Vector3Distance(e->pos,g_pos));
                 DebugLog("raise","\"type\":\"%s\"",kEnemy[g_enemies[slot].type].name);
             }
-            e->raiseC=-1; e->fireT=kEnemy[e->type].rate;
+            e->raiseC=-1; e->fireT=e->boss ? (e->phase?1.6f:2.4f) : kEnemy[e->type].rate;
             return 0;
         }
         return 1;
     }
     if (e->fireT>0) return 0;
-    int best=-1; float bd=kEnemy[e->type].range;
+    int best=-1; float bd=e->boss ? 45.0f : kEnemy[e->type].range;
     for (int c=0;c<MAX_CORPSES;c++){ if (!g_corpses[c].active || g_corpses[c].type==EN_HEADCHEF || g_corpses[c].type==EN_PRIEST) continue;
         float d=Vector3Distance(g_corpses[c].pos,e->pos); if (d<bd){ bd=d; best=c; } }
     if (best<0) return 0;
-    e->raiseC=best; e->chanT=1.6f;
+    e->raiseC=best; e->chanT=e->boss?1.0f:1.6f;
     return 1;
 }
 static void UpdateEnemies(float dt){
@@ -3002,7 +3028,32 @@ static void UpdateEnemies(float dt){
                 if (GetRandomValue(0,99)<(int)(1400*dt)) SpawnSmoke((Vector3){e->pos.x+GetRandomValue(-45,45)/100.0f, e->pos.y+0.1f, e->pos.z+GetRandomValue(-45,45)/100.0f}, 0);
                 e->riseT-=dt; }
             if (!e->charged && e->riseT<=0 && d<CHARGE_VOICE_RANGE){ e->charged=1; EnemyVoice(e, EC_CHARGE, 0.8f, 7.0f); }   // his kind's voice, once, as he closes
-            if (e->type==EN_PRIEST) DynLightAdd((Vector3){e->pos.x,e->pos.y+0.9f,e->pos.z}, (Vector3){0.30f,0.95f,0.28f}, 6.0f, 0.05f, 1);   // his lantern
+            if (e->type==EN_PRIEST && !e->boss) DynLightAdd((Vector3){e->pos.x,e->pos.y+0.9f,e->pos.z}, (Vector3){0.30f,0.95f,0.28f}, 6.0f, 0.05f, 1);   // his lantern
+            if (e->type==EN_PRIEST && e->boss && e->riseT<=0){                 // THE ARCHIMANDRITE
+                if (!e->phase && e->hp<e->maxHp*0.5f){ e->phase=1; e->sumT=0.5f; e->boltT=1.0f;
+                    if (g_audio && g_hasBossSnd && !IsSoundPlaying(g_bossSnd)){ SetSoundVolume(g_bossSnd,0.7f); PlaySound(g_bossSnd); }
+                    for (int q=0;q<10;q++) SpawnSmoke((Vector3){e->pos.x,e->pos.y+1.2f,e->pos.z},1);
+                    DebugLog("bossphase","\"phase\":2,\"hp\":%.0f", e->hp); }
+                float fl=0.85f+GetRandomValue(0,30)/100.0f;                    // the lantern: green, then a guttering red
+                DynLightAdd((Vector3){e->pos.x,e->pos.y+1.3f,e->pos.z}, e->phase?(Vector3){1.7f*fl,0.30f*fl,0.15f*fl}:(Vector3){0.40f,1.30f,0.38f}, e->phase?11.0f:9.0f, 0.05f, 1);
+                e->sumT-=dt;
+                if (e->sumT<=0.0f){                                            // no corpse to hand: call one up out of the floor beside him
+                    int up=0, slot=-1, anyCorpse=0;
+                    for (int k=0;k<MAX_ENEMIES;k++){ if (g_enemies[k].state==1 && k!=i) up++; if (g_enemies[k].state==0 && slot<0) slot=k; }
+                    for (int c=0;c<MAX_CORPSES;c++) if (g_corpses[c].active && g_corpses[c].type!=EN_HEADCHEF && g_corpses[c].type!=EN_PRIEST) anyCorpse=1;
+                    if (!anyCorpse && slot>=0 && up<(e->phase?ARCH_MINIONS+2:ARCH_MINIONS)){
+                        static const int kDead[4]={EN_COOK,EN_LINECOOK,EN_LIQUIDATOR,EN_REVENANT};
+                        for (int tr=0;tr<12;tr++){ float a=GetRandomValue(0,628)/100.0f, rr=2.5f+GetRandomValue(0,35)/10.0f;
+                            float x=e->pos.x+cosf(a)*rr, z=e->pos.z+sinf(a)*rr, top=SpawnProbeTop(x,z), fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
+                            if (fd>0 && EnemySpawnOK(x,top-fd,z)){
+                                EnemyArm(slot,(Vector3){x,top-fd,z},kDead[GetRandomValue(0,e->phase?3:2)]); g_enemies[slot].hp=g_enemies[slot].maxHp*0.7f; EnemyRiseIn(slot);
+                                g_sfxAt=e->pos; EnemySfx(g_eRaiseSnd,g_hasERaise,d);
+                                DebugLog("summon","\"type\":\"%s\",\"up\":%d", kEnemy[g_enemies[slot].type].name, up+1); break; } } }
+                    e->sumT=e->phase?2.4f:4.2f;
+                }
+                if (e->phase){ e->boltT-=dt;                                   // second phase: he throws radiation as well
+                    if (e->boltT<=0.0f && d<30.0f && e->hitT<=0 && e->knockT<=0){ EnemyBolt(e,d); e->boltT=1.5f+GetRandomValue(0,60)/100.0f; } }
+            }
             if (e->pushV.x!=0 || e->pushV.z!=0){                       // shoved (knockdown): slide, walls stop it
                 EnemyNudge(i, e->pushV.x*dt, e->pushV.z*dt);
                 float k=expf(-4.0f*dt); e->pushV.x*=k; e->pushV.z*=k;
@@ -3173,7 +3224,7 @@ static void UpdateEnemies(float dt){
               float pt=Clamp(Vector3DotProduct(Vector3Subtract(Vector3Scale(wish,wspd),e->mv),fw)*0.9f,-5.0f,6.0f) + (stag?-5.0f:0.0f);   // into a start, back on a stop / a stagger
               float kl=1.0f-expf(-6.0f*dt); e->lean+=(ln-e->lean)*kl; e->pitch+=(pt-e->pitch)*kl;
               // ---- Legs: the gait for the pace he's really making, stepping in time with the ground
-              EnemyRig *lr=RigOf(e->type); float sc=kEnemy[e->type].scale;
+              EnemyRig *lr=RigOf(e->type); float sc=(kEnemy[e->type].scale*e->sc);
               int rev=(fwdSp<-0.15f), lw;
               if (sp<(e->loco==CL_IDLE?0.35f:0.2f)) lw=CL_IDLE;
               else if (e->limpT>0) lw=CL_LIMP;
@@ -3331,7 +3382,7 @@ static int PlayerIntoEnemy(float nx, float nz){
     for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i];
         if (e->state!=1 || e->riseT>0 || e->knockT>0) continue;                     // on the floor: step over him
         if (fabsf((g_pos.y-EYE_H)-e->pos.y) > ENEMY_HEIGHT) continue;               // another storey
-        float mind=PLAYER_BODY_R+ENEMY_RADIUS*kEnemy[e->type].scale;
+        float mind=PLAYER_BODY_R+ENEMY_RADIUS*(kEnemy[e->type].scale*e->sc);
         float dx=nx-e->pos.x, dz=nz-e->pos.z, d2=dx*dx+dz*dz;
         if (d2>=mind*mind) continue;
         float ox=g_pos.x-e->pos.x, oz=g_pos.z-e->pos.z;
@@ -3527,6 +3578,11 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     // empty, with rounds in reserve: reload without being asked -- after the last shot, or the
     // moment an empty gun is drawn again (it used to wait for a dry trigger pull)
     if (!g_reloading && cw->has && cw->magSize>0 && cw->mag<=0 && cw->reserve>0 && g_fireCd<=0.0f && g_vmRaise<=0.0f) TryReload();
+    // just drawn and not full: top it up -- guns that are loaded by hand (the shotgun's tube, the
+    // launcher's drum; firing cuts either short). The belt and the fuel tank are left as they are.
+    if (g_drawTopUp && g_vmRaise<=0.0f){ g_drawTopUp=0;
+        int byHand = cw->grenade || cw->shellCycle>0 || cw->shellReload;
+        if (byHand && !g_reloading && cw->has && cw->magSize>0 && cw->mag<cw->magSize && cw->reserve>0 && !lmb) TryReload(); }
     else if (!g_reloading){
         if (cw->burst>0){                                  // rifle: one 3-round burst per trigger pull
             if (lmbP && g_burstLeft==0) g_burstLeft=cw->burst;
@@ -4348,7 +4404,7 @@ static void DrawEnemies(void){
             const float hy[3]={0.15f,0.9f,1.7f}, hx[3]={0.0f,-0.55f,0.55f}; int vis=0;
             float sx=g_cam.position.z-e->pos.z, sz=e->pos.x-g_cam.position.x, sl=sqrtf(sx*sx+sz*sz);
             if (sl>1e-4f){ sx/=sl; sz/=sl; } else { sx=1; sz=0; }
-            float esc=kEnemy[e->type].scale;
+            float esc=(kEnemy[e->type].scale*e->sc);
             for (int q=0;q<9 && !vis;q++){
                 int p=q%3, h=q/3;
                 Vector3 pt={e->pos.x+sx*hx[h]*esc, e->drawY+hy[p]*esc, e->pos.z+sz*hx[h]*esc};
@@ -4381,11 +4437,11 @@ static void DrawEnemies(void){
         }
         if (rg->gpu){ EnemyLightUpload(e->pos); EnemyGlowDim(e->state==2?0.55f:0.0f); }   // the glow gutters as he falls
         Vector3 dpos={e->pos.x, e->drawY, e->pos.z};          // smoothed height -> no stair-step jitter
-        float esc=ENEMY_SCALE*kEnemy[e->type].scale;          // per-type size: the head chef looms
+        float esc=ENEMY_SCALE*(kEnemy[e->type].scale*e->sc);          // per-type size: the head chef looms
         DrawModelEx(*EnemyLodModel(rg,dpos), dpos, (Vector3){0,1,0}, yaw,   // no sink: dying body falls onto the floor, not through
                     (Vector3){esc,esc,esc}, kEnemy[e->type].tint);
         {   // a tight dark core at the feet inside a wide soft penumbra; it spreads as the body goes down
-            float sk=kEnemy[e->type].scale*(e->state==2?1.45f:1.0f);
+            float sk=(kEnemy[e->type].scale*e->sc)*(e->state==2?1.45f:1.0f);
             GroundBlob(dpos, 0.95f*sk, 0.42f); GroundBlob(dpos, 0.50f*sk, e->state==2?0.30f:0.50f);
         }
         if (e->burnN>0) DrawBurnMarks(dpos, 1.0f, e->burnY, e->burnR, e->burnN);   // localised char where the flame touched
@@ -4396,7 +4452,7 @@ static void DrawEnemies(void){
             g_woundPose=NULL;
         }
         if (e->state==1 && e->hp<e->maxHp && !e->boss){       // HP bar above damaged enemies (bosses get the HUD bar)
-            Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT*kEnemy[e->type].scale+0.3f, e->pos.z};
+            Vector3 hp={e->pos.x, e->pos.y+ENEMY_HEIGHT*(kEnemy[e->type].scale*e->sc)+0.3f, e->pos.z};
             DrawCube(hp, 0.6f*(e->hp/e->maxHp), 0.08f, 0.02f, (Color){230,60,60,255});
         }
     }
@@ -4826,7 +4882,7 @@ static void DrawHUD(void) {
         DrawRectangle(bx-3,by-3,bw+6,24,(Color){0,0,0,180});
         DrawRectangle(bx,by,(int)(bw*f),18,(Color){200,30,30,255});
         DrawRectangleLines(bx-3,by-3,bw+6,24,(Color){255,200,80,220});
-        const char *t="THE HEAD CHEF"; int fs=22, tw=MeasureText(t,fs);
+        const char *t=BossName(e->type); int fs=22, tw=MeasureText(t,fs);
         DrawText(t,W/2-tw/2+2,by+26,fs,(Color){0,0,0,200}); DrawText(t,W/2-tw/2,by+24,fs,(Color){255,200,80,255});
         break;
     }
@@ -5508,6 +5564,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--sounds")) g_soundboard=1;        // dev: the sound board (soundboard.h)
         else if (!strcmp(argv[i],"--mute")) g_mute=1;
         else if (!strcmp(argv[i],"--no-post")) g_postOff=1;          // draw straight to the screen: no bloom / grade / grain
+        else if (!strcmp(argv[i],"--boss-wave") && i+1<argc){ g_devBoss=atoi(argv[++i]); if (g_devBoss<1) g_devBoss=1; }   // dev: straight to wave N's boss
         else if (!strcmp(argv[i],"--boss")) g_devBoss=1;                // dev: straight to the boss interlude
         else if (!strcmp(argv[i],"--corpses") && i+1<argc) g_devCorpses=atoi(argv[++i]);   // dev: pre-placed corpses
         else if (!strcmp(argv[i],"--enemy") && i+1<argc){                   // only spawn this enemy type (cook/linecook/butcher/liquidator/headchef)
