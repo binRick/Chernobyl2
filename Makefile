@@ -50,3 +50,27 @@ raylib6:
 	mkdir -p $(RAYLIB_DIR)/include $(RAYLIB_DIR)/lib
 	cp vendor/raylib-src/src/raylib.h vendor/raylib-src/src/raymath.h vendor/raylib-src/src/rlgl.h $(RAYLIB_DIR)/include/
 	cp vendor/raylib-src/src/libraylib.a $(RAYLIB_DIR)/lib/libraylib.a
+
+# ---- Web build (WebGL 2 + WebAssembly) --------------------------------------
+#   python3 tools/web/pack_web.py     # build/web/fs: the reduced asset set (textures re-encoded)
+#   make web                          # build/web/dist/index.{html,js,wasm,data}
+#   make web-serve                    # ...and serve it on http://localhost:8642/
+# Needs Homebrew emscripten (emcc wants python >= 3.10, which Xcode's python3 shadows) and
+# vendor/raylib/lib/libraylib.web.a: raylib 6.0 built PLATFORM_WEB / GRAPHICS_API_OPENGL_ES3 with
+# SUPPORT_FILEFORMAT_JPG (the web textures are JPEG). ../Chernobyl builds exactly that archive.
+EMCC_ENV := PATH="/opt/homebrew/bin:$$PATH" EMCC_PYTHON=/opt/homebrew/bin/python3.14
+WEBFS    := $(BUILD)/web/fs
+WEBDIST  := $(BUILD)/web/dist
+.PHONY: web web-serve
+web: src/main.c $(HDRS) web/shell.html $(RAYLIB_DIR)/lib/libraylib.web.a
+	@test -d $(WEBFS)/assets || { echo "run: python3 tools/web/pack_web.py"; exit 1; }
+	@mkdir -p $(WEBDIST)
+	$(EMCC_ENV) emcc -std=gnu11 -O2 -Wall -Wno-unused-result -Wno-unused-function \
+	    -DPLATFORM_WEB -DGRAPHICS_API_OPENGL_ES3 $(INCLUDES) -o $(WEBDIST)/index.html src/main.c \
+	    $(RAYLIB_DIR)/lib/libraylib.web.a \
+	    -s USE_GLFW=3 -s MIN_WEBGL_VERSION=2 -s MAX_WEBGL_VERSION=2 -s FORCE_FILESYSTEM=1 \
+	    -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=512MB -s MAXIMUM_MEMORY=2GB -s STACK_SIZE=4MB \
+	    --preload-file $(WEBFS)@/ --shell-file web/shell.html
+	@ls -la $(WEBDIST) | awk '{print $$5, $$9}'
+web-serve: web
+	cd $(WEBDIST) && python3 -m http.server 8642

@@ -10,7 +10,26 @@
 //   CHERNOBYL_SCORES_URL=http://host:port   point at another server (dev)
 //   CHERNOBYL_SCORES_AUTO=ABC               submit as ABC without typing (dev / tests)
 //   CHERNOBYL_NO_SCORES=1                   leaderboard off
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+// The browser build has neither curl nor threads: the same two requests go out through fetch(),
+// and the frame loop polls for the answers.
+EM_JS_DEPS(c2lb_deps, "$UTF8ToString,$stringToUTF8");
+EM_JS(void, LbJsGo, (const char *url, const char *body, int limit), {
+    var base=UTF8ToString(url), b=body?UTF8ToString(body):null;
+    var st=Module.c2lb={post:0, rank:0, total:0, top:0, topText:"", busy:1};
+    var top=function(){ fetch(base+"/api/scores?limit="+limit).then(function(r){return r.text();})
+        .then(function(t){ st.topText=t; st.top=1; st.busy=0; }).catch(function(){ st.busy=0; }); };
+    if (b) fetch(base+"/api/scores",{method:"POST",headers:{"Content-Type":"application/json"},body:b})
+        .then(function(r){return r.json();}).then(function(j){ st.rank=j.rank|0; st.total=j.total|0; st.post=(st.rank>0)?1:-1; top(); })
+        .catch(function(){ st.post=-1; top(); });
+    else top();
+});
+EM_JS(int, LbJsGet, (int what), { var st=Module.c2lb; if (!st) return 0; return (what==0?st.post:what==1?st.rank:what==2?st.total:what==3?st.busy:st.top)|0; });
+EM_JS(int, LbJsTakeTop, (char *buf, int n), { var st=Module.c2lb; if (!st || !st.top) return 0; stringToUTF8(st.topText, buf, n); st.top=0; return 1; });
+#else
 #include <pthread.h>
+#endif
 
 #define LB_TOP 8
 enum { LB_OFF=0, LB_ENTER, LB_POSTING, LB_DONE, LB_FAILED };
@@ -32,6 +51,9 @@ static int LbEnabled(void){
     const char *u=getenv("CHERNOBYL_SCORES_URL");
     if (u && *u){ int ok=1; for (const char *c=u;*c;c++) if (!(isalnum((unsigned char)*c) || strchr(":/.-_",*c))) ok=0;   // plain URL only
         if (ok && strlen(u)<sizeof g_lbUrl){ strcpy(g_lbUrl,u); return 1; } return 0; }
+#if defined(__EMSCRIPTEN__)
+    strcpy(g_lbUrl,"");              // same origin as the page: /api/scores
+#endif
     return g_maxFrames<=0;           // real play only: test runs stay off the network
 }
 // Pull the first LB_TOP rows out of {"scores":[{...},...]} -- the server sends them best first.
@@ -52,6 +74,7 @@ static int LbParseTop(const char *js, LbRow *out){
     }
     return n;
 }
+#if !defined(__EMSCRIPTEN__)
 static int LbCurl(const char *args, char *out, int outSz){
     char cmd[900]; snprintf(cmd,sizeof cmd,"/usr/bin/curl -s -m 8 %s 2>/dev/null", args);
     FILE *f=popen(cmd,"r"); if (!f) return 0;
@@ -79,6 +102,23 @@ static void LbSpawn(int post){
     g_lb.busy=1; pthread_t t;
     if (pthread_create(&t,NULL,LbWorker,post?(void*)1:NULL)==0) pthread_detach(t); else { g_lb.busy=0; if (post) g_lb.postDone=-1; }
 }
+static void LbPoll(void){}
+#else
+static void LbSpawn(int post){
+    if (g_lb.busy) return;
+    char body[520]="";
+    if (post) snprintf(body,sizeof body,"{\"initials\":\"%s\",\"score\":%d,\"kills\":%d,\"headshots\":%d,\"wave\":%d,"
+                 "\"weapon\":\"%s\",\"time\":%.1f,\"shots\":%d,\"accuracy\":%d,\"platform\":\"web\",\"version\":\"dev\"}",
+                 g_lb.ini, g_lb.score, g_lb.kills, g_lb.headshots, g_lb.wave, g_lb.weapon, g_lb.time, g_lb.shots, g_lb.acc);
+    g_lb.busy=1; LbJsGo(g_lbUrl, post?body:NULL, LB_TOP);
+}
+static void LbPoll(void){                                  // the answers, as they land
+    static char buf[8192];
+    if (g_lb.state==LB_POSTING && !g_lb.postDone){ int p=LbJsGet(0); if (p){ g_lb.rank=LbJsGet(1); g_lb.total=LbJsGet(2); g_lb.postDone=p; } }
+    if (LbJsTakeTop(buf,sizeof buf)){ g_lb.topWN=LbParseTop(buf,g_lb.topW); g_lb.topReady=1; }
+    if (g_lb.busy && !LbJsGet(3)) g_lb.busy=0;
+}
+#endif
 // The run just ended.
 static void LbOnDeath(int score, const char *weapon){
     memset(&g_lb,0,sizeof g_lb);
@@ -94,6 +134,7 @@ static void LbOnDeath(int score, const char *weapon){
 }
 // One frame of the death screen's input. Returns 1 when the player asks to play again.
 static int LbDeadUpdate(void){
+    LbPoll();
     if (g_lb.topReady){ g_lb.topN=g_lb.topWN; memcpy(g_lb.top,g_lb.topW,sizeof g_lb.top); g_lb.topReady=0; }
     int enter=IsKeyPressed(KEY_ENTER)||IsKeyPressed(KEY_KP_ENTER), click=IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (g_lb.state==LB_ENTER){

@@ -40,10 +40,20 @@ static float g_introAuto[2]={-1,-1}, g_introWall=0.0f;
 static float g_introFocusT=0.0f, g_introShot=-1.0f;          // seconds the window has been focused
 static int IntroAnyInput(void){
     for (int i=0;i<2;i++) if (g_introAuto[i]>=0 && g_introWall>=g_introAuto[i]){ g_introAuto[i]=-1; return 1; }
-    int k=GetKeyPressed();
+    // A key only counts if it was meant for the game. Cmd+Tab (and every other system chord) used
+    // to skip the montage: Cmd and Tab are keys too, and they arrive just as the window loses
+    // focus. So: modifiers on their own never count, nothing counts while Cmd / Ctrl / Alt is
+    // held, and nothing counts unless the window has focus now and has had it a moment.
+    int k=0, q;
+    while ((q=GetKeyPressed())!=0){
+        if (q==KEY_LEFT_SUPER || q==KEY_RIGHT_SUPER || q==KEY_LEFT_ALT || q==KEY_RIGHT_ALT || q==KEY_LEFT_CONTROL || q==KEY_RIGHT_CONTROL ||
+            q==KEY_LEFT_SHIFT || q==KEY_RIGHT_SHIFT || q==KEY_CAPS_LOCK || q==KEY_KB_MENU) continue;
+        k=q; }
+    int chord=IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER) || IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT) ||
+              IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     int click=IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
     // the click that focuses the window (or anything in the first moments) is not a skip
-    if (g_introWall<1.5f || g_introFocusT<0.6f){ while (GetKeyPressed()!=0) {} return 0; }
+    if (g_introWall<1.5f || g_introFocusT<0.6f || !IsWindowFocused() || chord) return 0;
     return k!=0 || click;
 }
 

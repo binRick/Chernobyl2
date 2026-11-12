@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chernobyl 2: LIQUIDATOR</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<style>
+  html, body { margin:0; padding:0; background:#050404; color:#eeeade; height:100%; overflow:hidden;
+               font-family: ui-monospace, Menlo, Consolas, monospace; }
+  #stage { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  canvas.emscripten { display:block; background:#000; max-width:100vw; max-height:100vh; outline:none; }
+  #gate { position:fixed; inset:0; background:rgba(5,4,4,.94); display:flex; align-items:center; justify-content:center;
+          flex-direction:column; z-index:10; text-align:center; padding:20px; }
+  #gate .tag { color:#d6281c; font-size:14px; letter-spacing:2px; }
+  #gate h1 { font-size:min(9vw,64px); margin:6px 0 18px; letter-spacing:4px; font-weight:600; }
+  #gate hr { width:min(70vw,520px); border:0; border-top:2px solid #d6281c; margin:0 0 18px; }
+  #gate p { color:#aaa69c; margin:4px 0; font-size:14px; }
+  #gate p b { color:#d6281c; font-weight:600; }
+  #bar { width:min(70vw,520px); height:6px; background:#221c1a; margin-top:26px; }
+  #fill { height:100%; width:0; background:#d6281c; transition:width .15s; }
+  #cta { margin-top:14px; font-size:16px; color:#aaa69c; min-height:22px; }
+  #cta.ready { color:#eeeade; cursor:pointer; animation:blink 1.2s infinite; }
+  #gate.ready { cursor:pointer; }
+  @keyframes blink { 50% { opacity:.35; } }
+</style>
+</head>
+<body>
+  <div id="gate">
+    <div class="tag">CHERNOBYL 2</div>
+    <h1>LIQUIDATOR</h1>
+    <hr>
+    <p><b>W A S D</b> move &nbsp; <b>MOUSE</b> look &nbsp; <b>CLICK</b> fire &nbsp; <b>R</b> reload</p>
+    <p><b>SHIFT</b> sprint &nbsp; <b>SPACE</b> jump &nbsp; <b>M</b> mute &nbsp; <b>ESC</b> menu</p>
+    <p><b>1</b> minigun &nbsp; <b>2</b> flamethrower &nbsp; <b>3</b> grenade launcher &nbsp; <b>4</b> Remington</p>
+    <div id="bar"><div id="fill"></div></div>
+    <div id="cta">loading&hellip;</div>
+  </div>
+  <div id="stage"><canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas></div>
+  <script>
+    var gate=document.getElementById('gate'), fill=document.getElementById('fill'), cta=document.getElementById('cta'), canvas=document.getElementById('canvas');
+    var ready=false;
+    function setReady(){ if (ready) return; ready=true; fill.style.width='100%'; cta.textContent='[ CLICK TO PLAY ]'; cta.className='ready'; gate.className='ready'; }
+    var autostart=/[?&]autostart=1/.test(location.search);       // dev: no gate (headless screenshots)
+    if (autostart) window.__c2_ready=function(){ setReady(); gate.style.display='none'; };
+    gate.addEventListener('click', function(){ if (!ready) return; gate.style.display='none'; canvas.focus();
+        try { canvas.requestPointerLock(); } catch(e){} });
+    var argm=location.search.match(/[?&]args=([^&]*)/);           // dev: ?args=--god,--kite passes game flags
+    var Module = {
+      arguments: argm ? decodeURIComponent(argm[1]).split(',') : [],
+      canvas: canvas,
+      print: function(t){ console.log(t); },
+      printErr: function(t){ console.warn(t); },
+      setStatus: function(t){
+        var m = t && t.match(/\((\d+(?:\.\d+)?)\/(\d+)\)/);
+        if (m) { fill.style.width = (100*parseFloat(m[1])/parseFloat(m[2])).toFixed(1)+'%'; cta.textContent='loading '+Math.round(100*parseFloat(m[1])/parseFloat(m[2]))+'%'; }
+        else if (t && !ready) cta.textContent=t;
+      },
+      totalDependencies: 0,
+      monitorRunDependencies: function(left){ this.totalDependencies=Math.max(this.totalDependencies,left); },
+      onRuntimeInitialized: function(){ window.__c2_runtime=true; }
+    };
+    // the game is "ready" once its first frames are on screen (the C side sets this)
+    if (!autostart) window.__c2_ready=function(){ setReady(); };
+    window.addEventListener('error', function(e){ cta.textContent='error: '+(e.message||e); });
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

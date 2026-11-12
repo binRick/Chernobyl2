@@ -161,6 +161,7 @@ static int RunSoundboard(void){
         DrawRectangle(0,0,W,top-6,(Color){14,14,17,255});
         DrawText("SOUND BOARD",28,18,40,(Color){255,90,70,255});
         DrawText(TextFormat("%d sounds:   %d ok    %d borrowed (stand-ins)    %d missing%s", g_sbN, nOk, nBor, nMiss, nBad?TextFormat("    %d failed to load",nBad):""),30,64,18,(Color){200,200,206,255});
+        DrawText("from Chernobyl 1: none  (all 612 of its sound files compared by content, name and length)",W-30-MeasureText("from Chernobyl 1: none  (all 612 of its sound files compared by content, name and length)",16),64,16,(Color){150,150,158,255});
         DrawText(onlyGaps?"showing: MISSING and BORROWED only  (M: show all)":"showing: all  (M: only missing and borrowed)",W-30-MeasureText("showing: MISSING and BORROWED only  (M: show all)",16),30,16,(Color){150,150,158,255});
         DrawRectangle(0,H-34,W,34,(Color){20,20,24,255});
         DrawText("click a row: play     SPACE: stop     wheel / arrows: scroll     TAB: next group     M: gaps only     ESC: quit",28,H-26,16,(Color){150,150,158,255});

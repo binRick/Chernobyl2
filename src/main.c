@@ -32,6 +32,14 @@
   #include <GLES3/gl3.h>
 #endif
 
+// Every shader starts with this: desktop GL 3.3 core, or GLSL ES 3.00 for WebGL 2 (which wants
+// a default float precision and has no implicit int -> float, so the sources use float literals).
+#if defined(__EMSCRIPTEN__)
+  #define GLSL_HDR "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+#else
+  #define GLSL_HDR "#version 330\n"
+#endif
+
 #include "mapload.h"   // SPIKE: --map loads idTech3 (.map) brush geometry as a Model
 
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
@@ -1341,7 +1349,7 @@ static int EnemySkinInit(void){
     // colour * N.L * (1-d/R)) from the 4 strongest unoccluded arena lamps, a soft fill
     // from the player (enemies stay readable in dark corners, as in ../chernobyl) and
     // a faint rim so silhouettes separate from the walls.
-    const char *vs="#version 330\n"
+    const char *vs=GLSL_HDR
         "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor; in vec3 vertexNormal;\n"
         "in vec4 vertexBoneIndices; in vec4 vertexBoneWeights; in vec4 vertexTangent;\n"
         "uniform mat4 mvp; uniform mat4 matModel; uniform mat4 boneMatrices[64];\n"
@@ -1361,7 +1369,7 @@ static int EnemySkinInit(void){
     //   texEmi = emission (glTF emissiveTexture), added unlit.
     // Occlusion darkens the ambient fully and the lamps by half; specular is a Blinn-Phong
     // highlight per lamp whose tightness follows roughness (wet blood / sweat glint, canvas doesn't).
-    const char *fs="#version 330\n"
+    const char *fs=GLSL_HDR
         "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal; in vec4 fragTangent;\n"
         "uniform sampler2D texture0; uniform sampler2D texture2; uniform sampler2D texOrm; uniform sampler2D texEmi; uniform float emiDim; uniform vec4 colDiffuse;\n"
         "uniform vec3 lPos[8]; uniform vec3 lCol[8]; uniform float lR[8]; uniform int lN;\n"
@@ -1525,6 +1533,19 @@ static void EnemyLightUpload(Vector3 at){
 }
 // Pose a rig for drawing: GPU rigs compute their bone palette (frame-interpolated, as
 // raylib does) and upload it to the skinning shader; anything else falls back to raylib.
+// WebGL: raylib sends a matrix ARRAY with transpose=false (rlSetUniformMatrices; the desktop path
+// passes true), so the bone palette reaches the shader transposed and the skinned mesh comes
+// out torn. raylib does that upload itself, straight before each draw, so there is no getting
+// in after it: the palette is stored already transposed there, and its upload comes out right.
+static void RigUpload(EnemyRig *rg){
+#if defined(__EMSCRIPTEN__)
+    if (!rg->gpu) return;
+    int nb=rg->model.skeleton.boneCount;
+    for (int b=0;b<nb;b++) rg->model.boneMatrices[b]=MatrixTranspose(rg->model.boneMatrices[b]);
+#else
+    (void)rg;
+#endif
+}
 static void RigPose(EnemyRig *rg, ModelAnimation *an, float frame){
     if (!rg->gpu){ ANIM_APPLY(rg->model, *an, frame); return; }
     int nf=an->keyframeCount; if (nf<=0 || !an->keyframePoses) return;
@@ -1538,8 +1559,9 @@ static void RigPose(EnemyRig *rg, ModelAnimation *an, float frame){
         t.scale=Vector3Lerp(a.scale,c.scale,bl);
         rg->model.boneMatrices[b]=MatrixMultiply(rg->invBind[b], XformMat(t));
     }
-    // No manual upload: DrawModelEx already sends model.boneMatrices to the shader's
-    // "boneMatrices" uniform (rmodels.c) -- an upload here would just be overwritten.
+    // Desktop: no manual upload -- DrawModelEx already sends model.boneMatrices to the shader's
+    // "boneMatrices" uniform (rmodels.c). The web build has to (RigUpload).
+    RigUpload(rg);
 }
 // Crossfade: pose blended from clip A at frame fa (weight 1-w) into clip B at fb (w).
 static Transform RigSample(ModelAnimation *an, float frame, int b){
@@ -1563,6 +1585,7 @@ static void RigPoseBlend(EnemyRig *rg, ModelAnimation *A, float fa, ModelAnimati
         t.scale=Vector3Lerp(a.scale,c.scale,w);
         rg->model.boneMatrices[b]=MatrixMultiply(rg->invBind[b], XformMat(t));
     }
+    RigUpload(rg);
 }
 // ---- Layered posing: legs from a locomotion clip, torso from the action ------------------
 static Transform XfLerp(Transform a, Transform c, float w){
@@ -1764,6 +1787,7 @@ static void EnemyPoseSnap(Enemy *e, int all){                 // call just befor
 static void RigPoseStored(EnemyRig *rg, const Transform *pose){
     int nb=rg->model.skeleton.boneCount;
     for (int b=0;b<nb;b++) rg->model.boneMatrices[b]=MatrixMultiply(rg->invBind[b], XformMat(pose[b]));
+    RigUpload(rg);
 }
 static int             g_hasEnemy = 0;
 static int             g_kills = 0;
@@ -1782,6 +1806,7 @@ static int             g_devCorpses = 0;        // --corpses N: lay out N cook c
 static int             g_devBoss = 0;           // --boss: jump straight to wave 1's boss interlude (dev)
 static int             g_vmHoldDev = -1;        // --vm-hold N: freeze the grenade launcher's clip on frame N (dev: read its animation)
 static int             g_soundboard = 0;        // --sounds
+static int             g_userMute = 0;          // M in game: master volume off / on
 static int             g_mute = 0;              // --mute (or CHERNOBYL_MUTE=1): master volume 0 -- headless tests stay silent
 static int             g_autoFire = 0;          // --autofire: hold the trigger every frame (dev: screenshot muzzle FX)
 static int             g_cycleTest = 0;         // --cycle: soak walks all 9 weapon slots twice, logging ammo state
@@ -1999,12 +2024,32 @@ static int PickupRandomSpot(Vector3 *out){
     }
     return 0;
 }
+// Where a kill's drop lands: not on the body. He falls away from the shooter, so the drop goes
+// about a body-length to the player's side of where he stood, fanned out by `slot` when there is
+// more than one; each candidate must have floor at his level and clear of the walls.
+static Vector3 DropSpot(Vector3 at, int slot){
+    float base=atan2f(g_pos.z-at.z, g_pos.x-at.x);
+    static const float kOff[7]={0.55f,-0.55f,1.15f,-1.15f,0.0f,1.9f,-1.9f};
+    for (int k=0;k<7;k++){
+        float a=base+kOff[(k+slot)%7], x=at.x+cosf(a)*1.55f, z=at.z+sinf(a)*1.55f, y=at.y;
+        if (g_hasMap && g_mapCol.ready){
+            float fd=MapRayNearest((Vector3){x,at.y+1.0f,z},(Vector3){0,-1,0},2.2f);
+            if (fd<=0.0f) continue;                              // no floor there (a ledge, a pit)
+            y=at.y+1.0f-fd;
+            if (MapSphereHitsWall((Vector3){x,y+0.6f,z},0.40f)) continue;
+            float w=MapRayNearest((Vector3){at.x,at.y+0.6f,at.z},(Vector3){cosf(a),0,sinf(a)},1.55f);
+            if (w>0.0f && w<1.5f) continue;                      // a wall between him and the spot
+        }
+        return (Vector3){x,y,z};
+    }
+    return at;
+}
 static void PickupOnKill(Vector3 at, int boss){
-    if (boss){ PickupSpawn(at,PK_MEGA); PickupSpawn(Vector3Add(at,(Vector3){1.2f,0,0}),PK_QUAD); return; }
+    if (boss){ PickupSpawn(DropSpot(at,0),PK_MEGA); PickupSpawn(DropSpot(at,1),PK_QUAD); return; }
     int r=GetRandomValue(0,99);
     if (r>=22) return;                                   // ~22% of kills drop something
     int q=GetRandomValue(0,99);
-    PickupSpawn(at, q<50?PK_HEALTH : q<85?PK_AMMO : q<93?PK_SPEED : PK_QUAD);
+    PickupSpawn(DropSpot(at,0), q<50?PK_HEALTH : q<85?PK_AMMO : q<93?PK_SPEED : PK_QUAD);
 }
 static void PickupsUpdate(float dt){
     if (g_quadT>0) g_quadT-=dt; if (g_speedT>0) g_speedT-=dt; if (g_pkMsgT>0) g_pkMsgT-=dt;
@@ -2320,6 +2365,7 @@ enum { HC_BULLET=0, HC_BLAST, HC_FLAME, HC_MELEE };
 #define SURR_RANGE 5.5f
 #define MOB_N 5                 // this many hostiles on their feet within MOB_RANGE of the player = a charging pack
 #define MOB_RANGE 16.0f
+static int g_gibKills=0;        // kills that left no body (a running tally: callers compare before / after)
 #define MULTIKILL_N 3           // one grenade killing this many sets off the crowd scream
 #define GIB_BLAST_DMG 100.0f     // a grenade doing this much to the round that kills him blows him apart
 static int g_hurtCause=HC_BULLET; static Vector3 g_hurtFrom;   // g_hurtFrom: the blast centre
@@ -2494,7 +2540,8 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
             if (g_hasBossSnd) StopSound(g_bossSnd);
             SetSoundVolume(g_bossDeadSnd,0.85f); PlaySound(g_bossDeadSnd); DebugLog("bossdead","\"wave\":%d", g_wave); }
         g_kills++; if (head) g_headshots++;
-        if (EnemyVoice(&g_enemies[ei], EC_DEATH, 1.0f, 0.0f)){}                       // his kind's own death, when it has one
+        if (g_enemies[ei].state==0){ g_gibKills++; }                                  // blown apart: nothing left to scream (the gib burst is his sound)
+        else if (EnemyVoice(&g_enemies[ei], EC_DEATH, 1.0f, 0.0f)){}                  // his kind's own death, when it has one
         else if (g_audio && g_hasSgDeathSnd && g_hurtCause==HC_BULLET && g_weapons[g_curWeapon].pellets>1 && GetRandomValue(0,99)<45)
             SfxAt(g_sgDeathSnd, g_enemies[ei].pos, 1.0f);                             // killed by buckshot: sometimes this scream instead
         else if (g_audio && g_nDeathSnd>0){ SfxAt(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)], g_enemies[ei].pos, 1.0f); }
@@ -2622,7 +2669,7 @@ static void LaunchGrenade(Camera3D cam){
     }
 }
 static void GrenadeExplode(Vector3 p){
-    int killsBefore=g_kills;
+    int killsBefore=g_kills, gibsBefore=g_gibKills;
     for (int i=0;i<MAX_ENEMIES;i++){                        // radial damage, linear falloff
         if (g_enemies[i].state!=1) continue;
         Vector3 c=(Vector3){g_enemies[i].pos.x, g_enemies[i].pos.y+ENEMY_HEIGHT*0.5f, g_enemies[i].pos.z};
@@ -2642,8 +2689,9 @@ static void GrenadeExplode(Vector3 p){
     }
     g_shake=fminf(1.0f, g_shake+0.7f);                     // concussion
     if (g_audio && g_hasGrenSnd) PlaySound(g_grenSnd);
-    if (g_kills-killsBefore>=MULTIKILL_N && g_audio && g_hasCrowdSnd){            // a bunch at once: the crowd scream
-        SfxAt(g_crowdSnd, p, 1.0f); DebugLog("multikill","\"n\":%d", g_kills-killsBefore); }
+    { int bodies=(g_kills-killsBefore)-(g_gibKills-gibsBefore);                   // the ones who are still there to scream
+      if (bodies>=MULTIKILL_N && g_audio && g_hasCrowdSnd){                       // a bunch at once: the crowd scream
+          SfxAt(g_crowdSnd, p, 1.0f); DebugLog("multikill","\"n\":%d,\"gibbed\":%d", bodies, g_gibKills-gibsBefore); } }
     DebugLog("grenade","\"explode\":[%.1f,%.1f,%.1f]", p.x,p.y,p.z);
 }
 static void UpdateGrenades(float dt){
@@ -3917,7 +3965,16 @@ static void Update(void) {
     // The cursor stays hidden and captured in every in-game state -- playing, paused, the
     // death screen -- and only the ESC menu (which needs a pointer) frees it. macOS shows it
     // again whenever the window loses focus, so re-grab the moment we have focus back.
+#if defined(__EMSCRIPTEN__)
+    // (a browser only grants pointer lock on a user gesture, and refuses for a while if it is asked
+    // every frame: re-grab on the click that follows losing it, not continuously)
+    if (!g_menu && !IsCursorHidden() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) DisableCursor();
+#else
     if (!g_menu && IsWindowFocused() && !IsCursorHidden()) DisableCursor();
+#endif
+    if (IsKeyPressed(KEY_M) && !g_dead && !g_menu){            // M: mute / unmute everything
+        g_userMute=!g_userMute; SetMasterVolume(g_userMute?0.0f:1.0f);
+        DebugLog("mute","\"on\":%d", g_userMute); }
     if (IsKeyPressed(KEY_P)){
         g_paused=!g_paused;
         DebugLog("pause","\"paused\":%s", g_paused?"true":"false");
@@ -3956,7 +4013,9 @@ static void Update(void) {
     // Keep the mouse captured the whole time we're playing. macOS releases the
     // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
     // re-grab it the instant we have focus again and it's become visible.
+#if !defined(__EMSCRIPTEN__)
     if (IsWindowFocused() && !IsCursorHidden()) DisableCursor();
+#endif
 
     if (IsWindowReady() && IsCursorHidden()){
         Vector2 md=GetMouseDelta();
@@ -4865,6 +4924,53 @@ static void DrawViewmodel(void){
 // Drop-shadowed text: a near-black copy offset down-right, then the bright text
 // on top. The raylib default font is a small bitmap that turns muddy against the
 // 3D scene; the shadow gives every glyph a hard edge so it stays readable.
+// Minimap (as ../Chernobyl's radar): a disc, top-right under the kill tally, that turns with the
+// player so "ahead" is always up. Walls come from the nav grid (cells nobody can stand in),
+// hostiles are dots in their kind's colour (the boss larger, ringed), pickups are small
+// squares and the power-ups pulse. When something is close BEHIND you the lower half glows red.
+static void DrawMinimap(int W, int H){
+    (void)H; if (!g_hasMap || !g_navOK || g_dead) return;
+    const int cx=W-96, cy=196, R=78; const float mpp=0.34f;        // metres per pixel: the disc shows ~26 m around you
+    Vector3 fw=Vector3Subtract(g_cam.target,g_cam.position); float fl=sqrtf(fw.x*fw.x+fw.z*fw.z);
+    if (fl<1e-4f) return; float fx=fw.x/fl, fz=fw.z/fl, rx=-fz, rz=fx;
+    DrawCircle(cx,cy,R+3,(Color){0,0,0,190}); DrawCircle(cx,cy,R,(Color){16,13,12,215});
+    float reach=R*mpp; int cs=(int)(g_navCS/mpp)+1; if (cs<2) cs=2;
+    int c0=(int)((g_pos.x-reach-g_navMn.x)/g_navCS), c1=(int)((g_pos.x+reach-g_navMn.x)/g_navCS);
+    int r0=(int)((g_pos.z-reach-g_navMn.z)/g_navCS), r1=(int)((g_pos.z+reach-g_navMn.z)/g_navCS);
+    for (int r=r0;r<=r1;r++) for (int c=c0;c<=c1;c++){
+        int solid=(c<0 || r<0 || c>=g_navNX || r>=g_navNZ) ? 1 : (g_navNL[r*g_navNX+c]==0);
+        if (!solid) continue;
+        float wx=g_navMn.x+(c+0.5f)*g_navCS-g_pos.x, wz=g_navMn.z+(r+0.5f)*g_navCS-g_pos.z;
+        float sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp;
+        if (sx*sx+sy*sy>=(float)((R-2)*(R-2))) continue;
+        DrawRectangle(cx+(int)sx-cs/2, cy-(int)sy-cs/2, cs, cs, (Color){86,52,38,235});
+    }
+    int rear=0;
+    for (int i=0;i<MAX_PICKUPS;i++){ const Pickup *k=&g_pk[i]; if (!k->active) continue;
+        float wx=k->pos.x-g_pos.x, wz=k->pos.z-g_pos.z, sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp;
+        if (sx*sx+sy*sy>=(float)((R-4)*(R-4))) continue;
+        int px=cx+(int)sx, py=cy-(int)sy;
+        Color col = k->type==PK_QUAD ? (Color){220,80,230,255} : k->type==PK_SPEED ? (Color){60,210,255,255}
+                  : k->type==PK_AMMO ? (Color){230,190,50,255} : (Color){230,60,60,255};
+        DrawRectangle(px-3,py-3,6,6,col);
+        if (k->type==PK_QUAD || k->type==PK_SPEED || k->type==PK_MEGA){ float pu=0.6f+0.4f*sinf((float)GetTime()*5.0f+(float)i); DrawCircleLines(px,py,6+3*pu,Fade(col,0.85f)); }
+    }
+    for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i]; if (e->state!=1) continue;
+        float wx=e->pos.x-g_pos.x, wz=e->pos.z-g_pos.z, sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp;
+        if (sy<0 && wx*wx+wz*wz<12.0f*12.0f) rear=1;
+        float d2=sx*sx+sy*sy, lim=(float)((R-4)*(R-4));
+        if (d2>=lim){ if (!e->boss) continue; float k=sqrtf(lim/d2); sx*=k; sy*=k; }   // the boss is always on the dial, pinned to its rim
+        static const Color kDot[EN_NTYPES]={ {235,230,220,255},{235,230,220,255},{200,120,110,255},{200,200,150,255},{255,200,80,255},
+                                             {120,175,85,255},{120,175,85,255},{150,235,90,255},{175,95,210,255},{255,135,45,255},{225,60,95,255} };
+        Color col=kDot[e->type]; int px=cx+(int)sx, py=cy-(int)sy;
+        if (e->boss){ DrawCircle(px,py,7,(Color){255,200,80,255}); DrawCircleLines(px,py,10,(Color){255,90,70,255}); }
+        else DrawCircle(px,py,e->riseT>0?3:4,e->riseT>0?Fade(col,0.55f):col);
+    }
+    if (rear){ float pu=0.5f+0.5f*sinf((float)GetTime()*6.0f); unsigned char a=(unsigned char)(40+60*pu);   // something close behind: the rear half glows
+        for (int dy=0;dy<R;dy++){ int span=(int)sqrtf((float)(R*R-dy*dy)); DrawRectangle(cx-span,cy+dy,span*2,1,(Color){200,50,50,a}); } }
+    DrawTriangle((Vector2){(float)cx,(float)(cy-9)},(Vector2){(float)(cx-6),(float)(cy+5)},(Vector2){(float)(cx+6),(float)(cy+5)},(Color){255,230,120,255});
+    DrawCircleLines(cx,cy,R+1,(Color){120,60,48,220}); DrawCircleLines(cx,cy,R+2,(Color){40,20,16,220});
+}
 static void TextSh(const char *t, int x, int y, int sz, Color c){
     DrawText(t, x+2, y+2, sz, (Color){0,0,0,200});
     DrawText(t, x,   y,   sz, c);
@@ -4894,6 +5000,8 @@ static void DrawHUD(void) {
           DrawText(g_pkMsg,W/2-tw/2+2,H/2+92,fs,(Color){0,0,0,a}); DrawText(g_pkMsg,W/2-tw/2,H/2+90,fs,(Color){140,255,140,a}); } }
     DrawFPS(W-90,10);
     // kills + headshots + player health
+    DrawMinimap(W, H);
+    if (g_userMute) DrawText("MUTED  (M)", W-160, 84, 16, (Color){200,200,210,255});
     DrawText(TextFormat("KILLS %d", g_kills), W-160, 36, 22, (Color){255,230,120,255});
     DrawText(TextFormat("HEADSHOTS %d", g_headshots), W-160, 60, 18, (Color){255,140,50,255});
     if (g_spawnMsg>0){                                 // F2 confirmation
@@ -5155,17 +5263,17 @@ static RenderTexture2D PostTargetHDR(int w, int h, int *hdr){
     *hdr=0; return LoadRenderTexture(w,h);
 }
 static void PostInit(int w, int h){
-    static const char *fsBright="#version 330\n"
+    static const char *fsBright=GLSL_HDR
         "in vec2 fragTexCoord; uniform sampler2D texture0; out vec4 finalColor;\n"
         "void main(){ vec3 c=min(texture(texture0,fragTexCoord).rgb, vec3(6.0)); float l=max(c.r,max(c.g,c.b));\n"
         "  finalColor=vec4(c*smoothstep(0.80,1.45,l),1.0); }\n";
-    static const char *fsBlur="#version 330\n"
+    static const char *fsBlur=GLSL_HDR
         "in vec2 fragTexCoord; uniform sampler2D texture0; uniform vec2 dir; out vec4 finalColor;\n"
         "void main(){ vec3 c=texture(texture0,fragTexCoord).rgb*0.227;\n"
         "  c+=(texture(texture0,fragTexCoord+dir*1.385).rgb+texture(texture0,fragTexCoord-dir*1.385).rgb)*0.316;\n"
         "  c+=(texture(texture0,fragTexCoord+dir*3.231).rgb+texture(texture0,fragTexCoord-dir*3.231).rgb)*0.070;\n"
         "  finalColor=vec4(c,1.0); }\n";
-    static const char *fsComp="#version 330\n"
+    static const char *fsComp=GLSL_HDR
         "in vec2 fragTexCoord; uniform sampler2D texture0; uniform sampler2D bloomTex; uniform vec4 P; uniform float time; out vec4 finalColor;\n"   // P = hurt, lowhp, shake, -
         "void main(){ vec2 uv=fragTexCoord, d=uv-0.5; float ca=0.0010+P.x*0.0060+P.z*0.0030;\n"
         "  vec3 c=vec3(texture(texture0,uv+d*ca).r, texture(texture0,uv).g, texture(texture0,uv-d*ca).b);\n"
@@ -5465,12 +5573,12 @@ static void StartSelectedMap(void){
     // lights (DynLight) and distance fog. Built once, reused.
     if (g_hasMap){
         if (!g_hasScrollShader){
-            const char *vs="#version 330\n"
+            const char *vs=GLSL_HDR
                 "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor; in vec3 vertexNormal;\n"
                 "uniform mat4 mvp; uniform mat4 matModel; out vec2 fragTexCoord; out vec4 fragColor; out vec3 fragPos; out vec3 fragNormal;\n"
                 "void main(){ fragTexCoord=vertexTexCoord; fragColor=vertexColor; fragPos=(matModel*vec4(vertexPosition,1.0)).xyz;\n"
                 "  fragNormal=mat3(matModel)*vertexNormal; gl_Position=mvp*vec4(vertexPosition,1.0); }\n";
-            const char *fs="#version 330\n"
+            const char *fs=GLSL_HDR
                 "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal;\n"
                 "uniform sampler2D texture0; uniform vec4 colDiffuse; uniform vec2 uvOffset;\n"
                 "uniform vec3 dPos[8]; uniform vec3 dCol[8]; uniform float dR[8]; uniform int dN; uniform vec3 viewPos; uniform vec4 fog;\n"
@@ -5548,6 +5656,15 @@ static void EndCurrentMap(void){
 #include <emscripten/emscripten.h>
 #endif
 
+#if defined(__EMSCRIPTEN__)
+// Browser main loop: one frame per callback. "Restart Run" and "play again" cannot fall out of
+// a loop here, so the reload the native build does between runs happens in place.
+static void WebFrame(void){
+    static int n=0; if (++n==3) EM_ASM({ if (window.__c2_ready) window.__c2_ready(); });   // first frames are up: the page can offer "click to play"
+    Frame();
+    if (g_returnToMenu){ g_returnToMenu=0; EndCurrentMap(); g_mapPath=DEFAULT_MAP; StartSelectedMap(); }
+}
+#endif
 #include "intro.h"                      // title intro (archival montage + Hell March)
 #include "viewer.h"                     // --viewer: side-by-side enemy model comparison
 #include "soundboard.h"                 // --sounds: every sound, grouped, playable, with the gaps marked
@@ -5659,7 +5776,7 @@ int main(int argc, char **argv) {
     if (g_viewA && strcmp(g_viewA,"all")){ int r=RunViewer(); CloseWindow(); return r; }   // --viewer <glb>: no game, no audio
     // (--viewer all, the enemy gallery, starts further down: its weapon mode needs the guns + audio)
     InitAudioDevice();                 // weapon fire sounds; harmless if it fails
-    if (g_mute || getenv("CHERNOBYL_MUTE")) SetMasterVolume(0.0f);   // silent test runs
+    if (g_mute || getenv("CHERNOBYL_MUTE")){ SetMasterVolume(0.0f); g_userMute=1; }   // silent test runs (M un-mutes)
     if (getenv("CHERNOBYL_NO_LOD")) g_noLod=1;
     g_audio = IsAudioDeviceReady();
     DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
@@ -5848,7 +5965,7 @@ int main(int argc, char **argv) {
     if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
     if (!g_mapPath){ char *p=RunMapSelect(); if (p) g_mapPath=p; }
     StartSelectedMap();
-    emscripten_set_main_loop(Frame,0,1);
+    emscripten_set_main_loop(WebFrame,0,1);
 #else
     if (!RunIntro()){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
     // Per-run outer loop: the game IS the Chernobyl arena (maps/chernobyl.map, rebuilt
