@@ -1,6 +1,6 @@
 // Web build smoke test: open the build in headless Chrome over the DevTools protocol, wait for the
 // game to report its first frames, let it run, then save a screenshot and print what the page logged.
-//   node tools/web/smoke.mjs [url] [seconds-to-run] [out.png]
+//   node tools/web/smoke.mjs [url] [seconds-to-run] [out.png]      (SMOKE_LOOK=1: also test mouse look)
 // Needs Google Chrome and Node >= 22 (built-in WebSocket). Serve build/web/dist first (make web-serve).
 import { spawn } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -27,6 +27,7 @@ try {
     else if (m.method === 'Runtime.exceptionThrown') logs.push('[exception] ' + (m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text));
     else if (m.method === 'Log.entryAdded') logs.push(`[${m.params.entry.level}] ${m.params.entry.text}`); });
   await send('Runtime.enable'); await send('Log.enable'); await send('Page.enable');
+  await send('Emulation.setFocusEmulationEnabled', { enabled: true }); await send('Page.bringToFront');
   await send('Page.navigate', { url });
   const ev = async e => (await send('Runtime.evaluate', { expression: e, returnByValue: true })).result?.value;
   let ready = false; const t0 = Date.now();
@@ -37,6 +38,20 @@ try {
     if (s.data) writeFileSync(out.replace(/\.png$/, `_${k}.png`), Buffer.from(s.data, 'base64'));
   }
   if (!process.env.SMOKE_SHOTS) await sleep(runSecs * 1000);
+  if (process.env.SMOKE_LOOK) {            // click to take pointer lock, then drag the view: before / after stills + whether the lock held
+    const mouse = (type, x, y, extra = {}) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, ...extra });
+    for (let k = 0; k < 2 && !(await ev('!!document.pointerLockElement')); k++) { await mouse('mousePressed', 640, 360); await mouse('mouseReleased', 640, 360); await sleep(600); }   // the gate's click, then the game's own re-grab
+    console.log('pointer locked: ' + await ev('!!document.pointerLockElement') + '  gate: ' + await ev("document.getElementById('gate').style.display"));
+    let s = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(out.replace(/\.png$/, '_look0.png'), Buffer.from(s.data, 'base64'));
+    if (!(await ev('!!document.pointerLockElement'))) {        // headless Chrome refuses pointer lock: stand in for it, and feed the page relative moves
+      console.log('pointer lock refused here: simulating it');
+      await ev("Object.defineProperty(document,'pointerLockElement',{get:function(){return document.getElementById('canvas');},configurable:true}); document.dispatchEvent(new Event('pointerlockchange')); 1");
+      for (let k = 1; k <= 30; k++) { await ev("document.dispatchEvent(new MouseEvent('mousemove',{movementX:12,movementY:0,bubbles:true})); 1"); await sleep(16); }
+    } else
+      for (let k = 1; k <= 30; k++) { await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 640 + k * 12, y: 360, button: 'none' }); await sleep(16); }
+    await sleep(300);
+    s = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(out.replace(/\.png$/, '_look1.png'), Buffer.from(s.data, 'base64'));
+  }
   if (process.env.SMOKE_TYPE) {            // type into the page (the death screen's initials), then ENTER
     for (const ch of process.env.SMOKE_TYPE) { await send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch, key: ch, code: 'Key' + ch.toUpperCase(), windowsVirtualKeyCode: ch.toUpperCase().charCodeAt(0) });
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch, code: 'Key' + ch.toUpperCase(), windowsVirtualKeyCode: ch.toUpperCase().charCodeAt(0) }); await sleep(120); }

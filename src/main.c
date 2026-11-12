@@ -34,6 +34,23 @@
 
 // Every shader starts with this: desktop GL 3.3 core, or GLSL ES 3.00 for WebGL 2 (which wants
 // a default float precision and has no implicit int -> float, so the sources use float literals).
+// Mouse capture, per platform. raylib's web backend never sets its "cursor hidden" flag when the
+// pointer is locked (IsCursorHidden() stays false there) and its GetMouseDelta() keeps only the
+// last move event of a frame, so the browser build asks the page: is the pointer locked, and how
+// far has it moved since last asked (summed over every event).
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+EM_JS(int, WebPointerLocked, (void), { return document.pointerLockElement ? 1 : 0; });
+EM_JS(void, WebMouseInit, (void), {
+    window.__c2_mx = 0; window.__c2_my = 0;
+    document.addEventListener('mousemove', function(e){ if (document.pointerLockElement){ window.__c2_mx += e.movementX || 0; window.__c2_my += e.movementY || 0; } });
+});
+EM_JS(double, WebMouseTakeX, (void), { var v = window.__c2_mx || 0; window.__c2_mx = 0; return v; });
+EM_JS(double, WebMouseTakeY, (void), { var v = window.__c2_my || 0; window.__c2_my = 0; return v; });
+#define MouseCaptured() WebPointerLocked()
+#else
+#define MouseCaptured() IsCursorHidden()
+#endif
 #if defined(__EMSCRIPTEN__)
   #define GLSL_HDR "#version 300 es\nprecision highp float;\nprecision highp int;\n"
 #else
@@ -4003,7 +4020,7 @@ static void Update(void) {
 #if defined(__EMSCRIPTEN__)
     // (a browser only grants pointer lock on a user gesture, and refuses for a while if it is asked
     // every frame: re-grab on the click that follows losing it, not continuously)
-    if (!g_menu && !IsCursorHidden() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) DisableCursor();
+    if (!g_menu && !MouseCaptured() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) DisableCursor();
 #else
     if (!g_menu && IsWindowFocused() && !IsCursorHidden()) DisableCursor();
 #endif
@@ -4052,8 +4069,12 @@ static void Update(void) {
     if (IsWindowFocused() && !IsCursorHidden()) DisableCursor();
 #endif
 
-    if (IsWindowReady() && IsCursorHidden()){
+    if (IsWindowReady() && MouseCaptured()){
+#if defined(__EMSCRIPTEN__)
+        Vector2 md={ (float)WebMouseTakeX(), (float)WebMouseTakeY() };
+#else
         Vector2 md=GetMouseDelta();
+#endif
         g_vmLook=md;
         g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f;
         if (g_pitch>1.5f) g_pitch=1.5f;  if (g_pitch<-1.5f) g_pitch=-1.5f;
@@ -6005,6 +6026,7 @@ int main(int argc, char **argv) {
     if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
     if (!g_mapPath){ char *p=RunMapSelect(); if (p) g_mapPath=p; }
     StartSelectedMap();
+    WebMouseInit();
     emscripten_set_main_loop(WebFrame,0,1);
 #else
     if (!RunIntro()){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
