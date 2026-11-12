@@ -1605,7 +1605,9 @@ def rifle(scale=1.0, heavy=False, lift=0.085):
     S = scale
     box_basis("receiver", g + d * 0.10 * S + up * 0.04 * S, d, sv, up, (0.30 * S, 0.05 * S, 0.075 * S), M_gun, "RightHand")
     box_basis("dust_cover", g + d * 0.11 * S + up * 0.083 * S, d, sv, up, (0.26 * S, 0.044 * S, 0.012 * S), M_gun, "RightHand")
-    box_basis("pistol_grip", g0 + up * (lift * 0.5 + 0.005) * S, d, sv, up, (0.04 * S, 0.035 * S, (lift + 0.04) * S), M_furn, "RightHand")
+    # the grip runs THROUGH the fist (g0 is the fist's centre) and out its underside; it used to
+    # stop 2 cm below g0, so the hand closed on its very tip and looked like it held nothing
+    box_basis("pistol_grip", g0 + up * ((lift - 0.035) * 0.5) * S, d, sv, up, (0.04 * S, 0.035 * S, (lift + 0.075) * S), M_furn, "RightHand")
     # short (folded-style) stock: a full one, modelled along the forearm, ran through the
     # forearm in every carry and through the raised upper arm in the aim
     sl = 0.05 if heavy else 0.08         # the heavy gun's longer reach put its stock in the raised upper arm
@@ -1662,20 +1664,74 @@ def steel_helmet():
 
 
 def bandolier():
+    """Ammo belt slung from the right shoulder to the left hip. It is fitted to the torso by
+    ray-casts and skinned from the body under it: the old one was a fixed-size hoop rigid on one
+    spine bone, so it stood off his back and swung clear of him whenever he bent or twisted."""
     sp1 = rig.matrix_world @ rig.data.bones["Spine1"].head_local
     M_belt = paint("ammo_belt", (0.32, 0.26, 0.14), grime=0.4, seed=24)
-    bpy.ops.mesh.primitive_torus_add(major_radius=0.24, minor_radius=0.025, major_segments=40, minor_segments=8,
-                                     location=(sp1.x, sp1.y - 0.01, sp1.z + 0.02), rotation=(0, math.radians(35), 0))
-    t = bpy.context.active_object; t.name = "bandolier"; t.scale = (1.15, 0.85, 1.0)
-    t.data.materials.append(M_belt); props.append((t, "Spine1"))
-    R = Matrix.Rotation(math.radians(35), 4, "Y")
-    for k in range(26):                   # a row of brass cartridges along the front half of the belt
-        a = math.pi * (0.15 + 0.7 * k / 25) + math.pi    # y<0 = the side facing out
-        p0 = Vector((math.cos(a) * 0.24 * 1.15, math.sin(a) * 0.24 * 0.85, 0))
-        n = Vector((math.cos(a), math.sin(a), 0)) * 0.03
-        q0 = (R @ p0.to_4d()).to_3d() + Vector((sp1.x, sp1.y - 0.01, sp1.z + 0.02))
-        ax = (R @ Vector((0, 0, 1, 0))).to_3d()
-        cyl(f"cartridge_{k}", q0 + (R @ n.to_4d()).to_3d() - ax * 0.03, q0 + (R @ n.to_4d()).to_3d() + ax * 0.03, 0.007, M_brass, "Spine1", verts=8)
+    C = Vector((sp1.x, sp1.y - 0.01, sp1.z + 0.02))
+    R = Matrix.Rotation(math.radians(35), 3, "Y")
+    U, V, N = R @ Vector((1, 0, 0)), R @ Vector((0, 1, 0)), R @ Vector((0, 0, 1))
+    dg = bpy.context.evaluated_depsgraph_get()
+    trees = [(BVHTree.FromObject(o, dg), o.matrix_world.copy()) for o in meshes if "low-poly" not in o.name]
+    NP = 64
+    dirs = [U * math.cos(2 * math.pi * k / NP) + V * math.sin(2 * math.pi * k / NP) for k in range(NP)]
+    rad = []
+    for dv in dirs:                       # from inside the chest outward: the first wall of each layer he wears
+        hits = []
+        for t, mw in trees:
+            inv = mw.inverted()
+            h = t.ray_cast(inv @ C, (inv.to_3x3() @ dv).normalized())
+            if h[0] is not None:
+                hits.append(((mw @ h[0]) - C).length)
+        hits = [x for x in hits if x <= min(hits) * 1.35 + 0.03] if hits else [0.16]    # (not an arm seen through a gap)
+        rad.append(min(max(max(hits), 0.09), 0.32))
+    for _ in range(3):
+        rad = [(rad[k] * 2 + rad[k - 1] + rad[(k + 1) % NP]) / 4 for k in range(NP)]
+    path = [C + dirs[k] * (rad[k] + 0.009) for k in range(NP)]
+    # skin: each point takes the torso weights of the body under it
+    from mathutils.kdtree import KDTree
+    names = {g.index: g.name for g in body.vertex_groups}
+    torso = lambda n: any(k in n for k in ("Hips", "Spine", "Neck", "Shoulder"))
+    kd = KDTree(len(body.data.vertices))
+    for v in body.data.vertices:
+        kd.insert(body.matrix_world @ v.co, v.index)
+    kd.balance()
+    def weights(pt):
+        acc = {}
+        for _, idx, _d in kd.find_n(pt, 4):
+            for g in body.data.vertices[idx].groups:
+                n = names[g.group]
+                if torso(n) and g.weight > 0.01: acc[n] = acc.get(n, 0.0) + g.weight
+        tot = sum(acc.values())
+        return {n: w / tot for n, w in acc.items()} if tot > 0 else {"Spine1": 1.0}
+    bm = bmesh.new(); uvl = bm.loops.layers.uv.new(); SD = 8
+    rings = []
+    for k in range(NP):                   # a flat strap: 6 cm wide, lying on him
+        tan = (path[(k + 1) % NP] - path[k - 1]).normalized(); o_ = (dirs[k] - tan * dirs[k].dot(tan)).normalized(); w_ = tan.cross(o_)
+        rings.append([bm.verts.new(path[k] + o_ * (0.009 * math.cos(2 * math.pi * q / SD)) + w_ * (0.030 * math.sin(2 * math.pi * q / SD))) for q in range(SD)])
+    for k in range(NP):
+        for q in range(SD):
+            f = bm.faces.new((rings[k][q], rings[k][(q + 1) % SD], rings[(k + 1) % NP][(q + 1) % SD], rings[(k + 1) % NP][q]))
+            for lp, (u, v) in zip(f.loops, ((k, q), (k, q + 1), (k + 1, q + 1), (k + 1, q))):
+                lp[uvl].uv = (u / NP * 8, v / SD)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    me = bpy.data.meshes.new("bandolier"); bm.to_mesh(me); bm.free()
+    t = bpy.data.objects.new("bandolier", me); bpy.context.collection.objects.link(t)
+    me.polygons.foreach_set("use_smooth", [True] * len(me.polygons)); me.materials.append(M_belt)
+    grp = {}
+    for v in me.vertices:
+        for n, w in weights(v.co).items():
+            if n not in grp: grp[n] = t.vertex_groups.new(name=n)
+            grp[n].add([v.index], w, "REPLACE")
+    props.append((t, None))
+    for k in range(NP):                   # a row of brass cartridges across the chest
+        if dirs[k].y > -0.25:
+            continue
+        tan = (path[(k + 1) % NP] - path[k - 1]).normalized(); o_ = (dirs[k] - tan * dirs[k].dot(tan)).normalized(); w_ = tan.cross(o_)
+        q0 = path[k] + o_ * 0.014
+        wts = weights(q0)
+        cyl(f"cartridge_{k}", q0 - w_ * 0.03, q0 + w_ * 0.03, 0.007, M_brass, max(wts, key=wts.get), verts=8)
 
 
 def growths():

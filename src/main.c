@@ -1741,32 +1741,46 @@ static void SpawnEnemyT(int i, int type, int behind){
 }
 
 // ---- Wave director (M2): budgeted, trickled, cleared, breathered ------------
-static int WaveBudgetFor(int w){ return 8 + w*5; }                 // ~5 walkers wave 1 -> a 30+ point mix by wave 5
+// Wave 1 already fields nearly the whole roster (as ../Chernobyl does: its first wave is a mix,
+// not one type), so the budget starts where one of each fits and grows from there.
+static int WaveBudgetFor(int w){ return 42 + w*8; }                // 50 points wave 1 (~13 hostiles) -> 82 by wave 5
+static int g_roster[EN_NTYPES], g_rosterN = -1;                    // wave 1's guaranteed line-up, cheapest first (-1 = not dealt yet)
 static int WaveAliveCapFor(int w){ int c=7+w; return c>16?16:c; }  // trickle cap, well under MAX_ENEMIES
 static void StartWave(int w){
     g_wave=w; g_waveBudget=WaveBudgetFor(w); g_aliveCap=WaveAliveCapFor(w);
-    g_spawnTick=0.0f; g_waveBreather=0.0f; g_bossThisWave=0;
+    g_spawnTick=0.0f; g_waveBreather=0.0f; g_bossThisWave=0; g_rosterN=-1;
     { void SeedWavePickups(void); SeedWavePickups(); }
     if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
     DebugLog("wave","\"start\":%d,\"budget\":%d,\"cap\":%d", w, g_waveBudget, g_aliveCap);
 }
-// What to spend budget on (revenants from wave 3, fiends from 5): cooks are the staple; line cooks + liquidators join from
-// wave 2, butchers from wave 3 (the head chef is the between-waves BOSS) -- all weighted heavier as
-// waves rise. Falls back to a cook when the budget can't afford the pick.
+// What to spend budget on. Every type but the head chef (the between-waves BOSS) can turn up from
+// wave 1: cooks stay the staple and the rest weigh heavier as waves rise. Wave 1 opens with one of
+// each type (all but the boss and the fiend, who joins the mix from wave 2), cheapest first, so the
+// first wave shows the roster; what budget is left after that goes on the weighted mix. Falls
+// back to a cook when the budget can't afford the pick.
 static int g_forceEnemy = -1;   // --enemy NAME: every spawn is this type (demo / testing a single enemy); -2 = "all"
 static int WavePickType(void){
     if (g_forceEnemy==-2){ if (g_waveBudget<=0) return -1; int t; do t=GetRandomValue(0,EN_NTYPES-1); while (t==EN_HEADCHEF && GetRandomValue(0,2)); return t; }   // --enemy all (boss rarer)
     if (g_forceEnemy>=0) return (kEnemy[g_forceEnemy].cost<=g_waveBudget) ? g_forceEnemy : -1;
-    int r=GetRandomValue(0,99), t=EN_COOK;
-    // cumulative bands (each threshold must exceed the last, or a band is unreachable)
-    if      (g_wave>=4 && r<5+g_wave)       t=EN_PRIEST;
-    else if (g_wave>=5 && r<9+g_wave*2)     t=EN_FIEND;
-    else if (g_wave>=3 && r<15+g_wave*2)    t=EN_BUTCHER;
-    else if (g_wave>=3 && r<22+g_wave*3)    t=EN_GUNNER;
-    else if (g_wave>=3 && r<29+g_wave*3)    t=EN_REVENANT;
-    else if (g_wave>=2 && r<38+g_wave*3)    t=(GetRandomValue(0,1)?EN_RIFLEMAN:EN_MUTANT);
-    else if (g_wave>=2 && r<46+g_wave*3)    t=EN_LIQUIDATOR;
-    else if (g_wave>=2 && r<62+g_wave*3)    t=EN_LINECOOK;
+    if (g_wave==1 && g_rosterN<0){                     // deal wave 1's line-up
+        g_rosterN=0;
+        for (int k=0;k<EN_NTYPES;k++) if (k!=EN_HEADCHEF && k!=EN_FIEND) g_roster[g_rosterN++]=k;
+        for (int i=1;i<g_rosterN;i++){                 // dearest LAST in the array (dealt from the front): ties in random order
+            int v=g_roster[i], key=kEnemy[v].cost*8+GetRandomValue(0,7), j=i-1;
+            while (j>=0 && kEnemy[g_roster[j]].cost*8+4>key){ g_roster[j+1]=g_roster[j]; j--; }
+            g_roster[j+1]=v; }
+    }
+    if (g_wave==1 && g_rosterN>0){
+        int t=g_roster[0];
+        if (kEnemy[t].cost<=g_waveBudget){ for (int i=1;i<g_rosterN;i++) g_roster[i-1]=g_roster[i]; g_rosterN--; return t; }
+        g_rosterN=0;
+    }
+    int w=g_wave, wt[EN_NTYPES]={0}, sum=0, t=EN_COOK;
+    wt[EN_COOK]=40;         wt[EN_LINECOOK]=12+2*w; wt[EN_LIQUIDATOR]=8+2*w; wt[EN_RIFLEMAN]=7+2*w; wt[EN_MUTANT]=7+2*w;
+    wt[EN_REVENANT]=5+2*w;  wt[EN_GUNNER]=4+2*w;    wt[EN_BUTCHER]=4+2*w;    wt[EN_PRIEST]=2+w;     wt[EN_FIEND]=(w>=2)?1+2*w:0;
+    for (int k=0;k<EN_NTYPES;k++) sum+=wt[k];
+    int r=GetRandomValue(0,sum-1);
+    for (int k=0;k<EN_NTYPES;k++){ if (r<wt[k]){ t=k; break; } r-=wt[k]; }
     if (kEnemy[t].cost>g_waveBudget) t=EN_COOK;
     if (kEnemy[t].cost>g_waveBudget) return -1;        // can't even afford a cook -> budget is spent
     return t;
