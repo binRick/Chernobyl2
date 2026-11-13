@@ -133,8 +133,8 @@ static int MapRegGet(MapReg *R, const char *name){
     snprintf(mt->name,sizeof mt->name,"%s",name);
     mt->emissive=MapIsEmissive(name);
     MapScrollVec(name,&mt->scrollX,&mt->scrollY);
-    char path[256]; const char *ext[2]={".png",".tga"};   // raylib build decodes PNG, not TGA
-    for (int e=0;e<2 && !mt->hasTex;e++){
+    char path[256]; const char *ext[3]={".png",".jpg",".tga"};   // (.jpg: the web / phone asset set re-encodes opaque surfaces, tools/web/pack_web.py; this raylib decodes no TGA)
+    for (int e=0;e<3 && !mt->hasTex;e++){
         snprintf(path,sizeof path,"%s%s%s",MAP_TEXDIR,name,ext[e]);
         if (FileExists(path)){
             mt->tex=LoadTexture(path);

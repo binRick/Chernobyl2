@@ -133,7 +133,11 @@ def main():
             try:
                 img = Image.open(os.path.join(dp, f)); img.load()
                 if max(img.size) > 1024 and not glow: k = 1024 / max(img.size); img = img.resize((round(img.size[0]*k), round(img.size[1]*k)), Image.LANCZOS)   # (the arena's own surfaces are painted at 1024 for a 5 m wall)
-                img.save(dst); mt += os.path.getsize(dst)
+                opaque = not (img.mode in ("RGBA", "LA", "P") and img.convert("RGBA").getextrema()[3][0] < 255)
+                if opaque and not glow and f.lower().endswith(".png"):       # JPEG: a third the size (GitHub caps a file at 100 MB, and index.data is one file); mapload.h tries .jpg after .png
+                    dst = dst[:-4] + ".jpg"; img.convert("RGB").save(dst, "JPEG", quality=88, optimize=True)
+                else: img.save(dst)
+                mt += os.path.getsize(dst)
             except Exception:
                 shutil.copy2(os.path.join(dp, f), dst); mt += os.path.getsize(dst)
     print(f"models {tot_in/1e6:.0f} -> {tot_out/1e6:.1f} MB; sounds/intro/misc {other/1e6:.1f} MB; map textures {mt/1e6:.1f} MB ({len(names)} names)")
