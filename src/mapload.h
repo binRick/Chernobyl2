@@ -259,9 +259,18 @@ static Vector3 g_mapReactor = {0,0,0}; // "info_reactor": where the wrecked core
 static int     g_hasReactor = 0;
 static float   g_mapHall[4] = {0,0,0,0}; // "_hall": the playable floor (min x, min z, max x, max z, raylib space) -- the player is kept inside it,
 static int     g_hasHall = 0;           //   so scenery built beyond the walls (the reactor pit) can never be walked or jumped into
+// "info_hole": a breach in the hall's floor the enemies climb out of (tools/grid2map.py HOLES). pos = the centre of its mouth at
+// floor level; hx/hz = half-extents, depth, all metres; edges = the sides they can come out over (1 -x, 2 +x, 4 -z, 8 +z);
+// fx = strength, tint, smoke, motes, shafts of its light (0..1); busy[e] = who is on that edge now (enemy index+1), busyT = when it was last taken.
+typedef struct { Vector3 pos; float hx, hz, depth; int edges; float fx[5]; int seed, boss; int busy[4]; double busyT[4]; } MapHole;
+#define MAX_MAPPANELS 96
+static Vector3 g_mapPanels[MAX_MAPPANELS]; static int g_nMapPanels = 0;   // "info_panel": a control post (the game plays a control-panel sound near each)
+#define MAX_MAPHOLES 24
+static MapHole g_mapHoles[MAX_MAPHOLES]; static int g_nMapHoles = 0;
 typedef struct { Vector3 pos; float R; Vector3 color; } MapLight;   // point light (raylib space, R=reach)
 static MapLight g_mapLights[2048];
 static int      g_nMapLights = 0;
+#define MAP_BAKE_VER 1                  // bump when the bake below changes what it writes (invalidates every "<map>.bake")
 #define MAP_GLOW_K 6                    // layers in a "_glow" texture
 #define MAP_MAXFLICK 8
 static MapLight g_mapFlick[MAP_MAXFLICK]; // "info_flicker": a failing lamp. Its light is baked apart from the rest (into vertex ALPHA, shadows and
@@ -653,16 +662,19 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     int curSpawn=0, curLight=0, haveOrig=0, spawnSet=0; float entLi=300.0f;
     int curFlick=0, curReactor=0, reactorSet=0, orgSet=0; Vector3 reactorQ={0,0,0}, orgQ={0,0,0};
     int hallSet=0; float hallQ[4]={0,0,0,0};
+    int curHole=0, curPanel=0; MapHole holeQ; memset(&holeQ,0,sizeof holeQ); g_nMapHoles=0; g_nMapPanels=0;
     float mpu=0.0f;     // worldspawn "_mpu" = metres per Quake unit: keep real scale (grid2map.py arenas)
     g_mapTessQ=0.0f;
     char line[2048];
     while (fgets(line,sizeof line,f)){
         const char *p=line; while (*p==' '||*p=='\t') p++;
-        if (*p=='{'){ if (sp==0){ curSpawn=curLight=curReactor=curFlick=haveOrig=0; entLi=300.0f; entCol=(Vector3){1,1,1}; } if (sp<8) ctxN[sp]=0; sp++; }
+        if (*p=='{'){ if (sp==0){ curSpawn=curLight=curReactor=curFlick=haveOrig=curHole=curPanel=0; memset(&holeQ,0,sizeof holeQ); entLi=300.0f; entCol=(Vector3){1,1,1}; } if (sp<8) ctxN[sp]=0; sp++; }
         else if (*p=='}'){ sp--; if (sp>=0 && sp<8 && ctxN[sp]>=4) MapEmitBrush(&R,ctx[sp],ctxN[sp]);
             if (sp==0){
                 if (curSpawn && haveOrig && !spawnSet){ spawnQ=entO; spawnSet=1; }
                 if (curReactor && haveOrig){ reactorQ=entO; reactorSet=1; }
+                if (curPanel && haveOrig && g_nMapPanels<MAX_MAPPANELS) g_mapPanels[g_nMapPanels++]=entO;
+                if (curHole && haveOrig && holeQ.hx>0 && g_nMapHoles<MAX_MAPHOLES){ holeQ.pos=entO; g_mapHoles[g_nMapHoles++]=holeQ; }
                 if (curFlick && haveOrig && g_nMapFlick<MAP_MAXFLICK){ g_mapFlick[g_nMapFlick]=(MapLight){entO,entLi,entCol}; g_nMapFlick++; }
                 if (curLight && haveOrig && g_nMapLights<2048){
                     g_mapLights[g_nMapLights].pos=entO; g_mapLights[g_nMapLights].R=entLi;  // Quake space + raw intensity; transformed below
@@ -670,7 +682,12 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
                 }
             } }
         else if (*p=='"' && sp==1){                                // entity key/value
-            if (!strncmp(p,"\"classname\"",11)){ if (strstr(p,"info_player")) curSpawn=1; else if (strstr(p,"\"light\"")) curLight=1; else if (strstr(p,"info_reactor")) curReactor=1; else if (strstr(p,"info_flicker")) curFlick=1; }
+            if (!strncmp(p,"\"classname\"",11)){ if (strstr(p,"info_player")) curSpawn=1; else if (strstr(p,"\"light\"")) curLight=1; else if (strstr(p,"info_reactor")) curReactor=1; else if (strstr(p,"info_flicker")) curFlick=1; else if (strstr(p,"info_hole")) curHole=1; else if (strstr(p,"info_panel")) curPanel=1; }
+            else if (!strncmp(p,"\"_size\"",7)) sscanf(p,"\"_size\" \"%f %f %f\"",&holeQ.hx,&holeQ.hz,&holeQ.depth);
+            else if (!strncmp(p,"\"_edges\"",8)) sscanf(p,"\"_edges\" \"%d\"",&holeQ.edges);
+            else if (!strncmp(p,"\"_fx\"",5)) sscanf(p,"\"_fx\" \"%f %f %f %f %f\"",&holeQ.fx[0],&holeQ.fx[1],&holeQ.fx[2],&holeQ.fx[3],&holeQ.fx[4]);
+            else if (!strncmp(p,"\"_seed\"",7)) sscanf(p,"\"_seed\" \"%d\"",&holeQ.seed);
+            else if (!strncmp(p,"\"_boss\"",7)) sscanf(p,"\"_boss\" \"%d\"",&holeQ.boss);
             else if (!strncmp(p,"\"_hall\"",7)){ if (sscanf(p,"\"_hall\" \"%f %f %f %f\"",&hallQ[0],&hallQ[1],&hallQ[2],&hallQ[3])==4) hallSet=1; }   // worldspawn: the playable floor's extent (x0 y0 x1 y1)
             else if (!strncmp(p,"\"_origin\"",9)){ if (sscanf(p,"\"_origin\" \"%f %f %f\"",&orgQ.x,&orgQ.y,&orgQ.z)==3) orgSet=1; }   // worldspawn: the point that becomes (0, 0, 0) -- else the bounds' centre and lowest point
             else if (!strncmp(p,"\"origin\"",8)){ if (sscanf(p,"\"origin\" \"%f %f %f\"",&entO.x,&entO.y,&entO.z)==3) haveOrig=1; }
@@ -714,6 +731,8 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     Vector3 L=Vector3Normalize((Vector3){0.45f,0.85f,0.30f});
     g_hasHall=0; if (hallSet){ g_mapHall[0]=(hallQ[0]-cx)*s; g_mapHall[1]=(hallQ[1]-cy)*s; g_mapHall[2]=(hallQ[2]-cx)*s; g_mapHall[3]=(hallQ[3]-cy)*s; g_hasHall=1; }
     g_hasReactor=0; if (reactorSet){ g_mapReactor=(Vector3){(reactorQ.x-cx)*s,(reactorQ.z-Mnz)*s,(reactorQ.y-cy)*s}; g_hasReactor=1; }
+    for (int h=0;h<g_nMapPanels;h++){ Vector3 q=g_mapPanels[h]; g_mapPanels[h]=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s}; }
+    for (int h=0;h<g_nMapHoles;h++){ Vector3 q=g_mapHoles[h].pos; g_mapHoles[h].pos=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s}; }
     if (spawnSet){ g_mapSpawn=(Vector3){(spawnQ.x-cx)*s,(spawnQ.z-Mnz)*s,(spawnQ.y-cy)*s}; g_hasSpawn=1; }
     for (int l=0;l<g_nMapLights;l++){                  // lights: Quake origin -> raylib, intensity -> reach
         Vector3 q=g_mapLights[l].pos;
@@ -745,7 +764,19 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
         samp[i]=(Vector3){cosf(phi)*r, sinf(phi)*r, z}; }
     int *stamp=(int*)calloc(g_mapCol.ntri,sizeof(int)); int rid=0; double t0=GetTime();
     int haveLights=(g_nMapLights>0);
-    for (int i=0;i<R.n;i++){ MapBuf *b=&R.t[i].buf;
+    // The bake is seven seconds of rays for the plant, and the same answer every time: it is kept beside the map
+    // ("<map>.bake": the vertex colours), keyed by the map file's own bytes, so only the first load after a change pays.
+    char bakePath[300]; snprintf(bakePath,sizeof bakePath,"%s.bake",path);
+    unsigned int bakeKey=2166136261u; int baked=0;
+    { int n=0; unsigned char *d=LoadFileData(path,&n);
+      if (d){ for (int k=0;k<n;k++){ bakeKey^=d[k]; bakeKey*=16777619u; } UnloadFileData(d); }
+      bakeKey^=(unsigned int)total*2654435761u; bakeKey^=(unsigned int)(MAP_BAKE_VER*40503u+AO_RAYS); }
+    { FILE *bf=fopen(bakePath,"rb");
+      if (bf){ unsigned int hd[3]={0,0,0};
+          if (fread(hd,4,3,bf)==3 && hd[0]==0x454B4142u && hd[1]==bakeKey && hd[2]==(unsigned int)total){ baked=1;
+              for (int i=0;i<R.n && baked;i++){ MapBuf *b=&R.t[i].buf; if (b->n>0 && fread(b->col,4,(size_t)b->n,bf)!=(size_t)b->n) baked=0; } }
+          fclose(bf); } }
+    for (int i=0;i<R.n && !baked;i++){ MapBuf *b=&R.t[i].buf;
         int emis=R.t[i].emissive;
         for (int k=0;k<b->n;k++){
             if (emis){                                        // light fixture / lava / glow: full-bright, skip shade+AO
@@ -769,6 +800,12 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
             b->col[k*4]=(unsigned char)(cr>255?255:cr); b->col[k*4+1]=(unsigned char)(cg>255?255:cg); b->col[k*4+2]=(unsigned char)(cb>255?255:cb);
         }
     }
+#if !defined(__EMSCRIPTEN__) && !defined(C2_IOS)
+    if (!baked){ FILE *bf=fopen(bakePath,"wb");
+        if (bf){ unsigned int hd[3]={0x454B4142u,bakeKey,(unsigned int)total}; fwrite(hd,4,3,bf);
+            for (int i=0;i<R.n;i++){ MapBuf *b=&R.t[i].buf; if (b->n>0) fwrite(b->col,4,(size_t)b->n,bf); }
+            fclose(bf); } }
+#endif
     free(stamp); g_mapAOsec=(float)(GetTime()-t0);
 
     // 4) build one mesh + material per texture

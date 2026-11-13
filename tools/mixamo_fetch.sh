@@ -36,15 +36,17 @@ export_anim(){  # productId outName
   local payload; payload=$(printf '%s' "$prod" | python3 -c "
 import sys,json
 prod=json.load(sys.stdin)
-g=prod['details']['gms_hash']; g['model']=prod['name']
+g=prod['details']['gms_hash']        # (no 'model' name on it: the export fails with one)
+p=g.get('params')
+if isinstance(p,list): g['params']=','.join(str(x[1]) for x in p)
 print(json.dumps({
  'gms_hash':[g], 'preferences':{'format':'fbx7_2019','skin':'true','fps':'30','reducekf':'0'},
  'character_id':'$MIX_CHAR','type':'Motion','product_name':prod['name']}))")
   api -X POST -H "content-type: application/json" \
       -d "$payload" "https://www.mixamo.com/api/v1/animations/export" >/dev/null
-  # poll monster status
+  # poll the export job
   for i in $(seq 1 40); do
-    local st; st=$(api "https://www.mixamo.com/api/v1/characters/$MIX_CHAR/monster" \
+    local st; st=$(api "https://www.mixamo.com/api/v1/characters/$MIX_CHAR/monitor" \
       | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('status',''),d.get('job_result',''))" 2>/dev/null)
     local status="${st%% *}" url="${st#* }"
     if [ "$status" = "completed" ] && [ -n "$url" ] && [ "$url" != "$status" ]; then

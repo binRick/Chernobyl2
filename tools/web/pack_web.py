@@ -102,14 +102,20 @@ def pack_intro():
 def main():
     pack_intro()
     shutil.rmtree(OUT, ignore_errors=True); os.makedirs(OUT)
+    # Staged loading: only the cook rides in the page's data file. The other enemies are fetched by the game once it is up
+    # (main.c WebFetchLater), so their files go beside the page instead: build/web/later/assets -> dist/assets (the Makefile).
+    LATER = os.path.join(os.path.dirname(OUT), "later"); shutil.rmtree(LATER, ignore_errors=True); os.makedirs(os.path.join(LATER, "assets"))
+    later = lambda n: n in ENEMIES and n != "cook"
     tot_in = tot_out = 0
     for n in ENEMIES + WEAPONS:
-        a, b = shrink_glb(os.path.join(REPO, "assets", n + ".glb"), os.path.join(OUT, "assets", n + ".glb"))
+        a, b = shrink_glb(os.path.join(REPO, "assets", n + ".glb"), os.path.join(LATER if later(n) else OUT, "assets", n + ".glb"))
         tot_in += a; tot_out += b; print(f"  {n:16s} {a/1e6:6.1f} -> {b/1e6:5.1f} MB")
     other = 0
     for n in ENEMIES:
-        for suf in ("_lod.glb", ".gait"):
-            if os.path.exists(os.path.join(REPO, "assets", n + suf)): other += copy(f"assets/{n}{suf}")
+        for suf in ("_lod.glb", ".gait", ".climb"):
+            if not os.path.exists(os.path.join(REPO, "assets", n + suf)): continue
+            if later(n): shutil.copyfile(os.path.join(REPO, "assets", n + suf), os.path.join(LATER, "assets", n + suf))
+            else: other += copy(f"assets/{n}{suf}")
     for n in WEAPONS:                               # true bind poses (ApplyIbmBindPose): without them the arms skin against the rest pose
         if os.path.exists(os.path.join(REPO, "assets", n + ".glb.ibm")): other += copy(f"assets/{n}.glb.ibm")
         if os.path.exists(os.path.join(REPO, "assets", n + ".glb.parts")): other += copy(f"assets/{n}.glb.parts")   # authored gun-piece animation (PartsLoad)
@@ -120,6 +126,7 @@ def main():
     for f in sorted(os.listdir(os.path.join(REPO, "assets", "voice"))): other += copy("assets/voice/" + f)
     # the default map + only the textures it names (any extension), capped at 1024 px
     other += copy("maps/chernobyl.map")
+    if os.path.exists(os.path.join(REPO, "maps", "chernobyl.map.bake")): other += copy("maps/chernobyl.map.bake")   # the baked lighting (mapload.h keys it to the map's bytes: a stale one is ignored), so the browser need not bake
     names = set(re.findall(r"\)\s+([A-Za-z0-9_\-/\.]+)\s+[-\d\.]+\s+[-\d\.]+", open(os.path.join(REPO, "maps", "chernobyl.map")).read()))
     mt = 0
     for dp, _, fs in os.walk(os.path.join(REPO, "maps", "textures")):

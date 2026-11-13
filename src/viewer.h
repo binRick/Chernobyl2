@@ -124,20 +124,21 @@ static int RunViewer(void){
 
 // ---- Enemy gallery (--viewer all / ./dev-enemies.sh) --------------------------------
 // Every enemy type, one at a time, every state at its in-game speed:
-//   TAB / ]  next enemy     [  previous      1 idle 2 walk 3 pursue 4 attack 5 hit 6 die 7 cast
+//   TAB / ]  next enemy     [  previous      1 idle 2 walk 3 pursue 4 attack 5 hit 6 die 7 cast 8 climb (8 again: his next climb)
 //   A auto-cycle (every state of every enemy)   SPACE pause   drag/arrows turn
 //   wheel / UP DOWN zoom   F face close-up   ESC quit
 // Walk/pursue scroll the floor at the enemy's real speed (stride check); the mutant's
 // throw releases a bolt at the release frame; deaths fall and hold at the settle frame.
-enum { GS_IDLE, GS_WALK, GS_RUN, GS_ATTACK, GS_HIT, GS_DIE, GS_CAST, GS_N };
-static const char *kGalState[GS_N]={"IDLE","WALK","PURSUE","ATTACK","HIT","DIE","CAST"};
-static const int   kGalRole[GS_N]={CL_IDLE,CL_WALK,CL_RUN,CL_ATTACK,CL_HIT,CL_DEATH,CL_CAST};
+enum { GS_IDLE, GS_WALK, GS_RUN, GS_ATTACK, GS_HIT, GS_DIE, GS_CAST, GS_CLIMB, GS_N };   // GS_CLIMB: out of a breach in the floor (8 again = the next of his three climbs)
+static int g_galClimb = 0;
+static const char *kGalState[GS_N]={"IDLE","WALK","PURSUE","ATTACK","HIT","DIE","CAST","CLIMB"};
+static const int   kGalRole[GS_N]={CL_IDLE,CL_WALK,CL_RUN,CL_ATTACK,CL_HIT,CL_DEATH,CL_CAST,CL_CLIMB};
 static const char *kGalKind[]={"melee","hitscan","bolt thrower","raises the dead"};
 
 static float GalFps(int type, int st){
     int k=kEnemy[type].kind;
     if (st==GS_ATTACK) return (k==AK_MELEE||k==AK_RAISE)?90.0f:(k==AK_BOLT?BOLT_THROW_FPS:30.0f);
-    if (st==GS_DIE) return 60.0f;
+    if (st==GS_DIE || st==GS_CLIMB) return 60.0f;
     return 30.0f;
 }
 
@@ -285,7 +286,7 @@ static int RunGallery(void){
           if (IsKeyPressed(KEY_LEFT_BRACKET)) pick=(pick+GAL_N-1)%GAL_N;
           if (pick!=was){ g_galArch=(pick==EN_NTYPES); type=g_galArch?EN_PRIEST:pick; } }
         if (IsKeyPressed(KEY_S)) g_galSnd=!g_galSnd;
-        for (int k=0;k<GS_N;k++) if (IsKeyPressed(KEY_ONE+k)) st=k;
+        for (int k=0;k<GS_N;k++) if (IsKeyPressed(KEY_ONE+k)){ if (k==GS_CLIMB && st==GS_CLIMB){ g_galClimb=(g_galClimb+1)%3; frame=0; stT=0; } st=k; }
         if (IsKeyPressed(KEY_A)) autoMode=!autoMode;
         if (IsKeyPressed(KEY_SPACE)) paused=!paused;
         if (IsKeyPressed(KEY_W)) range=!range;
@@ -326,7 +327,9 @@ static int RunGallery(void){
           if (st!=vSt || type!=vType || g_galArch!=vArch){ if (vSt>=0 && g_galSnd && !range) GalCue(type,st); vSt=st; vType=type; vArch=g_galArch; } }
         rg=&g_rig[type];
         if (!rg->ok || rg->animN<=0){ type=(type+1)%EN_NTYPES; continue; }
+        if (st==GS_CLIMB && rg->climbN<=0) st=GS_IDLE;                        // an older model with no climb in it
         ModelAnimation *an=&rg->anim[rg->clip[kGalRole[st]]];
+        if (st==GS_CLIMB){ for (int t=0;t<3 && !(rg->found&(1u<<(CL_CLIMB+g_galClimb)));t++) g_galClimb=(g_galClimb+1)%3; an=&rg->anim[rg->clip[CL_CLIMB+g_galClimb]]; }
         float galRate=GalFps(type,st);
         if ((st==GS_WALK || st==GS_RUN) && rg->gaitN>0){                    // the gait and cadence the game picks for this pace
             float spd=(st==GS_RUN)?kEnemy[type].speed:kEnemy[type].speed*0.45f, gsc=kEnemy[type].scale*GAL_BSC, best=1e9f; int role=kGalRole[st];
@@ -345,12 +348,13 @@ static int RunGallery(void){
                     float rel=nf*BOLT_RELEASE_FRAC; if (prev<rel && frame>=rel){ boltT=0;
                         boltP=RigBoneWorld(type, CL_ATTACK, frame, "RightFingerBase", (Vector3){0,0,0}, ENEMY_YAW_OFFSET); }
                 }
-                if (frame>=nf) frame-=nf;
+                if (st==GS_CLIMB){ if (frame>=(float)(nf-1)){ frame=(float)(nf-1); hold+=dt; if (hold>1.0f){ hold=0; frame=0; g_galClimb=(g_galClimb+1)%3; } } }   // up, a beat on his feet, then his next way of doing it
+                else if (frame>=nf) frame-=nf;
             }
             if (boltT>=0){ boltT+=dt; if (boltT>1.2f) boltT=-1; }
         }
         if (autoMode){                                                     // ~3 s a state, death held 1.5 s
-            int done = (st==GS_DIE) ? (hold>1.5f) : (stT>3.0f);
+            int done = (st==GS_DIE) ? (hold>1.5f) : (st==GS_CLIMB) ? (stT>5.5f) : (stT>3.0f);
             if (done){ do { st++; } while (st==GS_CAST && kEnemy[type].kind!=AK_RAISE);
                        if (st>=GS_N){ st=GS_IDLE; int pick=((g_galArch?EN_NTYPES:type)+1)%GAL_N; g_galArch=(pick==EN_NTYPES); type=g_galArch?EN_PRIEST:pick; }
                        frame=0; stT=0; hold=0; boltT=-1;                // fresh clock for the new state
@@ -419,6 +423,19 @@ static int RunGallery(void){
         BeginDrawing();
         ClearBackground((Color){14,13,15,255});
         BeginMode3D(cam);
+        if (st==GS_CLIMB && !range){                                       // the breach he comes out of: the floor opened behind him, the shaft, the light at the bottom of it
+            float S=ENEMY_SCALE*kEnemy[type].scale*GAL_BSC, rim=rg->climb[g_galClimb].handZ*S+0.06f, hw=1.3f*S, len=2.2f*S, dp=3.0f*S; Color fc={34,32,30,255};
+            DrawPlane((Vector3){0,-0.002f,(rim+15.0f)*0.5f},(Vector2){30,15.0f-rim},fc);                              // floor in front of the lip
+            DrawPlane((Vector3){0,-0.002f,(rim-len-15.0f)*0.5f},(Vector2){30,15.0f+rim-len},fc);                      // ...and beyond the far side
+            DrawPlane((Vector3){-(hw+15.0f)*0.5f,-0.002f,rim-len*0.5f},(Vector2){15.0f-hw,len},fc);
+            DrawPlane((Vector3){ (hw+15.0f)*0.5f,-0.002f,rim-len*0.5f},(Vector2){15.0f-hw,len},fc);
+            DrawCubeV((Vector3){0,-dp*0.5f,rim+0.1f},(Vector3){2*hw+0.4f,dp,0.2f},(Color){26,44,78,255});             // the wall he climbs
+            DrawCubeV((Vector3){0,-dp*0.5f,rim-len-0.1f},(Vector3){2*hw+0.4f,dp,0.2f},(Color){20,36,66,255});
+            DrawCubeV((Vector3){-hw-0.1f,-dp*0.5f,rim-len*0.5f},(Vector3){0.2f,dp,len},(Color){22,40,72,255});
+            DrawCubeV((Vector3){ hw+0.1f,-dp*0.5f,rim-len*0.5f},(Vector3){0.2f,dp,len},(Color){22,40,72,255});
+            DrawCubeV((Vector3){0,-dp-0.05f,rim-len*0.5f},(Vector3){2*hw,0.1f,len},(Color){110,190,255,255});         // the light
+            DrawLine3D((Vector3){-hw,0.004f,rim},(Vector3){hw,0.004f,rim},(Color){150,200,255,255});                  // the lip his hands hold
+        } else
         DrawPlane((Vector3){0,-0.002f,0},(Vector2){30,30},(Color){34,32,30,255});
         // floor lines scroll under walk/pursue at the enemy's real speed (feet should "grip")
         float sp = (st==GS_RUN)?kEnemy[type].speed:((st==GS_WALK)?kEnemy[type].speed*0.45f:0.0f);
@@ -426,8 +443,8 @@ static int RunGallery(void){
         if (range && tg->state==1 && tg->knockT>0) sp=0;
         if (range && tg->state==1 && tg->limpT>0 && sp>0) sp=LIMP_SPEED;
         float off=fmodf(GetTime()*sp,1.0f); if (paused) off=0;
-        for (int z=-8;z<=8;z++){ float zz=z+off; DrawLine3D((Vector3){-8,0,zz},(Vector3){8,0,zz},(Color){60,56,52,255}); }
-        for (int x=-8;x<=8;x++) DrawLine3D((Vector3){(float)x,0,-8},(Vector3){(float)x,0,8},(Color){48,45,42,255});
+        if (!(st==GS_CLIMB && !range)) for (int z=-8;z<=8;z++){ float zz=z+off; DrawLine3D((Vector3){-8,0,zz},(Vector3){8,0,zz},(Color){60,56,52,255}); }
+        if (!(st==GS_CLIMB && !range)) for (int x=-8;x<=8;x++) DrawLine3D((Vector3){(float)x,0,-8},(Vector3){(float)x,0,8},(Color){48,45,42,255});
         ViewerLights(cam.position);
         float drawYawG=(range && tg->state==2)?tg->deathYaw:ENEMY_YAW_OFFSET;
         DrawModelEx(rg->model,(Vector3){0,0,0},(Vector3){0,1,0},drawYawG,(Vector3){esc,esc,esc},WHITE);
@@ -483,9 +500,9 @@ static int RunGallery(void){
             if (k==st) DrawRectangle(x-6,96,w+12,30,(Color){60,40,20,255});
             DrawText(lb,x,100,22,c); x+=w+26;
         }
-        DrawText(TextFormat("frame %.0f/%d   %s%s", frame, nf, autoMode?"AUTO  ":"", paused?"PAUSED":""), 26, 134, 16, (Color){140,140,140,255});
-        DrawText(range ? "click fire   right-drag/arrows aim   C re-aim   R reload   W weapon off   click/TAB enemy   1-7 state   ESC quit"
-                       : "click/TAB/[ ] enemy   1-7 state   W weapon   A auto   SPACE pause   drag/arrows turn   wheel zoom   F face   ESC quit",
+        DrawText(TextFormat("frame %.0f/%d   %s%s%s", frame, nf, st==GS_CLIMB?TextFormat("climb %d of 3 (8 = next)   ",g_galClimb+1):"", autoMode?"AUTO  ":"", paused?"PAUSED":""), 26, 134, 16, (Color){140,140,140,255});
+        DrawText(range ? "click fire   right-drag/arrows aim   C re-aim   R reload   W weapon off   click/TAB enemy   1-8 state   ESC quit"
+                       : "click/TAB/[ ] enemy   1-8 state   W weapon   A auto   SPACE pause   drag/arrows turn   wheel zoom   F face   ESC quit",
                  14, sh-28, 18, (Color){150,150,150,255});
         for (int k=0;k<GAL_N;k++){
             Rectangle r=GalButton(k,sw,sh);

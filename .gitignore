@@ -21,3 +21,4 @@ tools/node_modules
 spawn*.txt
 vendor/raylib-ios/
 ios/Chernobyl2.xcodeproj/
+*.bake

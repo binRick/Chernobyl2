@@ -2535,7 +2535,7 @@ def swing(a, b):
     return a.normalized().rotation_difference(b.normalized()).to_matrix()
 
 
-def sample(src, frames, loop, yaw_fix=True, face=None):
+def sample(src, frames, loop, yaw_fix=True, face=None, rest_ref=False):
     """Retarget src (imported BVH armature) frames (BVH frame numbers) -> list of {bone: (quat, loc|None)}."""
     sb = src.data.bones
     Rs0 = {b.name: (src.matrix_world.to_3x3() @ b.matrix_local.to_3x3()).normalized() for b in sb}
@@ -2560,6 +2560,8 @@ def sample(src, frames, loop, yaw_fix=True, face=None):
     scene.frame_set(f_tpose)
     hip_ref = src.matrix_world @ src.pose.bones["Hips"].head      # standing T-pose hips (the BVH rest has them at 0)
     foot_ref = src.matrix_world @ src.pose.bones["LeftFoot"].head
+    if rest_ref:        # Mixamo: no T-pose frame in the take; the armature's rest IS the standing T-pose
+        hip_ref, foot_ref = Hs0["Hips"].copy(), Hs0["LeftFoot"].copy()
     k = (Ht0["Hips"].z - Ht0["LeftFoot"].z) / (hip_ref.z - foot_ref.z)
     hs = [heading(f) for f in frames[:: max(1, len(frames) // 8)]] if yaw_fix else [heading(frames[0])]
     if face == "release":   # throws: aim the fastest hand's release, not the (side-on) hips
@@ -3703,6 +3705,97 @@ def fix_knees(poses, label):
     return poses
 
 
+# ---- climbs: out of a breach in the floor (Mixamo takes in build/mixamo/, 30 fps, fetched by hand -- see
+# docs/superpowers/specs/2026-11-13-reactor-holes-design.md). Each KEEPS its hip travel and is grounded on its
+# END: the last frame stands at the origin on the floor, so the game puts him where he will stand and the clip
+# itself starts him hanging down in the shaft, his hands on the rim.
+MIXAMO = os.path.join(REPO, "build", "mixamo")
+
+
+def import_mixamo(name):
+    fps0 = scene.render.fps; scene.render.fps = 30
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.fbx(filepath=os.path.join(MIXAMO, name + ".fbx"))
+    scene.render.fps = fps0
+    new = [o for o in bpy.data.objects if o not in before]
+    arm = next(o for o in new if o.type == "ARMATURE")
+    for o in new:
+        if o is not arm:
+            bpy.data.objects.remove(o, do_unlink=True)
+    for b in arm.data.bones:                                  # mixamorig:X -> the names the retarget knows
+        b.name = "mx_" + b.name.split(":")[-1]
+    for b in arm.data.bones:
+        nm = b.name[3:]; b.name = {"Spine": "LowerBack", "Spine1": "Spine", "Spine2": "Spine1"}.get(nm, nm)
+    return arm
+
+
+def mix_take(name, a=0, b=None):
+    src = import_mixamo(name)
+    f0, f1 = (int(v) for v in src.animation_data.action.frame_range)
+    poses = fist(sample(src, list(range(f0 + a, (f1 if b is None else f0 + b) + 1)), loop=False, yaw_fix=False, rest_ref=True))
+    bpy.data.objects.remove(src, do_unlink=True)
+    return poses
+
+
+def wpos(p, bn):
+    return fk_pos(p, bn) + Rt0["Hips"] @ p["Hips"][1]
+
+
+def foot_low(p):
+    return min(wpos(p, "LeftFoot").z, wpos(p, "RightFoot").z)
+
+
+def chain(a, b, xf=8):
+    """b carries on from where a ended: shifted so its feet start where a's finished, crossfaded in."""
+    ea, sb = Rt0["Hips"] @ a[-1]["Hips"][1], Rt0["Hips"] @ b[0]["Hips"][1]
+    b = _rot_root(b, Matrix.Identity(3), Vector((ea.x - sb.x, ea.y - sb.y, foot_low(a[-1]) - foot_low(b[0]))))
+    out = list(a)
+    for i in range(xf):
+        w = (i + 1) / (xf + 1); g = b[0]
+        out.append({bn: [q.slerp(g[bn][0] if q.dot(g[bn][0]) >= 0 else -g[bn][0], w),
+                         (l.lerp(g[bn][1], w) if l is not None and g[bn][1] is not None else l)]
+                    for bn, (q, l) in a[-1].items()})
+    return out + b
+
+
+def ground_end(poses):
+    w = Rt0["Hips"] @ poses[-1]["Hips"][1]
+    dz = min(Ht0["LeftFoot"].z, Ht0["RightFoot"].z) - min(foot_low(p) for p in poses[-4:])
+    return _rot_root(poses, Matrix.Identity(3), Vector((-w.x, -w.y, dz)))
+
+
+EXTRA["climb"] = (ground_end(mix_take("freehang_climb")), "hit", 2)                                  # hang, pull up, leg over, stand
+EXTRA["climb2"] = (ground_end(chain(mix_take("braced_to_crouch"), mix_take("crouch_to_stand"))), "hit", 2)   # feet on the wall, up to a crouch, stand
+EXTRA["climb3"] = (ground_end(chain(mix_take("ledge_pullup"), mix_take("crouch_to_stand"))), "hit", 2)      # dragged over the edge onto hands and knees, stand
+CLIMBS = ("climb", "climb2", "climb3")
+CLIMB_META = {}
+
+
+def pin_climb(name, poses, step):
+    """While he hangs, both hands hold ONE straight rim: pinned (two-bone IK) to where the take had them, levelled.
+    Records where that is for the game: <enemy>.climb."""
+    n = len(poses); k0 = max(2, n // 14)
+    L = [wpos(p, "LeftHand") for p in poses]; R = [wpos(p, "RightHand") for p in poses]
+    hl, hr = sum(L[:k0], Vector()) / k0, sum(R[:k0], Vector()) / k0
+    b = 0
+    while b + 1 < n and (L[b + 1] - hl).length < 0.12 and (R[b + 1] - hr).length < 0.12:
+        b += 1
+    mid = (hl + hr) / 2
+    TL, TR = Vector((hl.x, mid.y, mid.z)), Vector((hr.x, mid.y, mid.z))
+    ease, worst = 6, 0.0
+    for i in range(min(n, b + ease + 1)):
+        w = 1.0 if i <= b else 1.0 - (i - b) / (ease + 1)
+        off = Rt0["Hips"] @ poses[i]["Hips"][1]
+        for side, T, cur in (("Left", TL, L[i]), ("Right", TR, R[i])):
+            miss = ik_arm(poses[i], side, cur.lerp(T, w) - off)
+            if i <= b:
+                worst = max(worst, miss)
+    CLIMB_META[name] = ((n - 1) * step + 1, -mid.y, mid.z, 0, b * step, abs(hl.x - hr.x) / 2)
+    print(f"enemy: {name} {n} poses, hands planted to pose {b}, rim {-mid.y:+.2f} m ahead / {mid.z:+.2f} m up, "
+          f"start hips {wpos(poses[0], 'Hips').z:.2f}, end feet {foot_low(poses[-1]):.3f}, worst pin miss {worst * 100:.1f} cm")
+    return poses
+
+
 idle, walk, run, attack, hit, death = (fix_knees(ps, lb) for ps, lb in
     ((idle, "idle"), (walk, "walk"), (run, "run"), (attack, "attack"), (hit, "hit"), (death, "death")))
 EXTRA = {k: (fix_knees(v, k), kind, st) for k, (v, kind, st) in EXTRA.items()}
@@ -3826,6 +3919,7 @@ attack, hit, death = (apron_motion(ps, False) for ps in (attack, hit, death))
 HITX = {k: apron_motion(v, False) for k, v in HITX.items()}
 EXTRA = {k: (apron_motion(v, kind in ("walk", "run", "idle")), kind, st) for k, (v, kind, st) in EXTRA.items()}
 
+EXTRA = {k: ((pin_climb(k, v, st) if k in CLIMBS else v), kind, st) for k, (v, kind, st) in EXTRA.items()}
 for name, poses, step in (("idle", idle, 1), ("walk", walk, 1), ("run", run, 1),
                           ("attack", attack, 2), ("hit", hit, 1), ("death", death, 2),
                           *((k, v, 1) for k, v in HITX.items()),
@@ -3864,6 +3958,11 @@ if PREVIEW:
         bpy.ops.render.render(write_still=True)
 
     shot("idle", 1, "front"); shot("idle", 1, "three"); shot("idle", 1, "face"); shot("idle", 1, "hands")
+    V["pit"] = ((9.5, 0.3, -0.35), (90, 0, 90))                # the climbs: side on, the floor line mid-frame
+    for cn in CLIMBS:
+        nfr = CLIMB_META[cn][0]
+        for i in range(7):
+            shot(cn, 1 + (nfr - 1) * i // 6, "pit")
     for c in clips:
         n = int(c.frame_range[1])
         for fr in (1, n // 3, (2 * n) // 3, n):
@@ -4114,6 +4213,8 @@ bpy.ops.export_scene.gltf(export_tangents=DETAIL, filepath=OUT, export_format="G
                           export_frame_range=False, export_force_sampling=True)
 with open(os.path.splitext(OUT)[0] + ".gait", "w") as _f:      # the game reads this: role, m/s (at scale 1)
     _f.write("".join(f"{k} {v:.3f}\n" for k, v in GAIT_MPS.items()))
+with open(os.path.splitext(OUT)[0] + ".climb", "w") as _f:     # clip, frames, rim ahead (m), rim up (m), hands planted from..to (frames), half hand spread
+    _f.write("".join("%s %d %.3f %.3f %d %d %.3f\n" % ((k,) + v) for k, v in CLIMB_META.items()))
 print("enemy: wrote", OUT, os.path.getsize(OUT) // 1024, "KB;",
       sum(len(o.data.vertices) for o in bpy.data.objects if o.type == "MESH"), "verts total")
 

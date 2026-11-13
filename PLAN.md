@@ -513,6 +513,10 @@ complete game — Devil Daggers shipped exactly one arena.
   FBX2glTF → `merge_anims.mjs` chain with the same six clip names drops into the
   name-matching loader (`main.c:2726–2733`) with zero code changes. Needs a fresh
   bearer token + an afternoon; never on the critical path.
+  (Since 13 Nov 2026 the enemies are MakeHuman bodies with CMU takes, built by
+  `tools/chef/build_enemy.py`; Mixamo is used only for the three climbs out of the floor
+  breaches, fetched into `build/mixamo/` and retargeted by the same script. See
+  `docs/superpowers/specs/2026-11-13-reactor-holes-design.md`.)
 - **Music (3–4 tracks):** Kevin MacLeod/incompetech (CC-BY, credit on the credits
   page), FreePD, OpenGameArt dark-industrial. **Not** `Chernobyl/sounds/`
   hell-march/soviet-march — presumed C&C rips; anything from v1 requires provenance

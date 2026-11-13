@@ -67,6 +67,24 @@ LAMPS = [(5, 2, SODIUM), (14, 9, TUBE), (24, 5, RED), (5, 16, SODIUM), (24, 16, 
 BREACH_CELLS = [(29, 9), (29, 10)]
 PIT = dict(x0=120.0, x1=140.0, y0=24.0, y1=56.0, z0=-10.0, z1=15.0)
 PIT_LIGHTS = [((0.32, 0.60, 1.0), 58, (129.0, 40.0, -5.0)), ((0.45, 0.70, 1.0), 26, (121.5, 40.0, 2.2))]
+# Breaches in the hall's own floor: the same blue light, coming up through the plant from below. The enemies climb
+# out of these (the game reads each as an "info_hole"). No two alike: (x, y, half x, half y, depth, style, seed,
+# sides they can climb out over, (strength, tint, smoke, motes, shafts) of the live light, boss).
+HOLES = [(14.0, 7.0, 1.5, 1.3, 3.5, "torn", 11, 3, (0.80, 0.30, 0.6, 0.5, 0.3), 0),
+         (22.0, 19.5, 1.3, 1.3, 2.8, "sunk", 12, 2, (0.55, 0.10, 0.9, 0.2, 0.0), 0),
+         (16.0, 51.0, 1.6, 1.6, 4.5, "punched", 13, 3, (1.00, 0.50, 0.2, 0.8, 0.7), 0),
+         (30.0, 71.0, 2.4, 0.8, 3.0, "split", 14, 2, (0.70, 0.80, 0.4, 0.4, 1.0), 0),
+         (10.0, 38.6, 1.3, 1.3, 3.2, "grate", 15, 2, (0.60, 0.20, 1.0, 0.3, 0.2), 0),
+         (58.0, 7.0, 1.7, 1.4, 4.0, "sunk", 16, 3, (0.90, 0.60, 0.5, 0.9, 0.4), 0),
+         (66.0, 26.0, 1.3, 1.5, 3.0, "grate", 17, 2, (0.50, 0.90, 0.3, 0.6, 0.8), 0),
+         (60.0, 51.0, 1.5, 1.5, 5.0, "torn", 18, 3, (1.00, 0.40, 0.8, 0.7, 0.5), 0),
+         (66.0, 71.5, 1.4, 1.4, 3.4, "punched", 19, 2, (0.65, 0.00, 0.5, 0.4, 0.1), 0),
+         (108.6, 7.0, 1.5, 1.5, 3.6, "corner", 20, 2, (0.85, 0.70, 0.7, 0.6, 0.9), 0),
+         (98.0, 20.0, 0.8, 2.0, 2.6, "split", 21, 2, (0.60, 0.35, 0.2, 1.0, 0.3), 0),
+         (98.0, 51.0, 2.25, 2.25, 6.0, "torn", 22, 3, (1.00, 0.50, 1.0, 1.0, 1.0), 1),
+         (106.0, 28.0, 1.6, 1.3, 3.8, "sunk", 23, 3, (0.75, 0.15, 0.9, 0.5, 0.6), 0)]
+PANELS = []                # filled by station(): one point per control post
+HOLE_SIDES = {"-x": ((-1, 0), (0, 1), 1), "+x": ((1, 0), (0, 1), 2), "-y": ((0, -1), (1, 0), 4), "+y": ((0, 1), (1, 0), 8)}
 REACTOR_AT = (129.0, 40.0, -6.0)          # where the game's live glow, light and embers come from (info_reactor)
 # Signs: enamelled plates on the walls. (texture, width m, height m), by zone; placed by a fixed
 # seed on wall faces that look onto open floor, so a rebuilt map hangs them in the same places.
@@ -193,6 +211,7 @@ def station(out, grid_face, wall, mid, spec, seed=0, width=4.0):
     rnd = random.Random(1000 + seed); kind = spec["kind"]
     sg = 1.0 if grid_face[0] == "+" else -1.0; alongx = grid_face[1] == "y"
     def W(u, v, z): return (mid + u, wall + sg * v, z) if alongx else (wall + sg * v, mid + u, z)          # the post's own frame -> the map
+    PANELS.append(W(0.0, 0.7, 1.3))                      # where it is heard from (the game plays a control-panel sound near each: "info_panel")
     def lbox(u0, u1, v0, v1, z0, z1, tex):               # a box in the post's frame: u along the wall, v out from it
         a0, a1 = mid + u0, mid + u1; b0, b1 = sorted((wall + sg * v0, wall + sg * v1))
         return box(a0, b0, z0, a1, b1, z1, tex) if alongx else box(b0, a0, z0, b1, a1, z1, tex)
@@ -343,6 +362,105 @@ def breach(out):
     return len(out) - n0
 
 
+def cut_rects(rect, holes):
+    """The floor slab `rect` (x0, y0, x1, y1) as strips round the openings in it."""
+    rects = [rect]
+    for (cx, cy, hx, hy, *_r) in holes:
+        a0, b0, a1, b1 = cx - hx, cy - hy, cx + hx, cy + hy; nxt = []
+        for (x0, y0, x1, y1) in rects:
+            if a0 >= x1 or a1 <= x0 or b0 >= y1 or b1 <= y0: nxt.append((x0, y0, x1, y1)); continue
+            if x0 < a0: nxt.append((x0, y0, a0, y1))
+            if a1 < x1: nxt.append((a1, y0, x1, y1))
+            if y0 < b0: nxt.append((max(x0, a0), y0, min(x1, a1), b0))
+            if b1 < y1: nxt.append((max(x0, a0), b1, min(x1, a1), y1))
+        rects = nxt
+    return rects
+
+
+def hole(out, h, edges, ftex):
+    """One breach in the floor: the shaft, the light at the bottom of it, and its own broken rim. `edges` = the sides
+    left clean for a climber (a straight lip, nothing standing on it); the others take the wreckage. Returns brushes added."""
+    import random
+    cx, cy, hx, hy, dp, style, seed = h[:7]; rnd = random.Random(seed); n0 = len(out)
+    hide = {k: "hide" for k in ("-x", "+x", "-y", "+y", "-z", "+z")}; inner = lambda face: dict(hide, **{face: "pit"})
+    out.append(box(cx - hx, cy - hy, -dp - 0.4, cx + hx, cy + hy, -dp, dict(hide, **{"+z": "core"})))
+    out.append(box(cx - hx - 0.4, cy - hy, -dp, cx - hx, cy + hy, 0, inner("+x")))
+    out.append(box(cx + hx, cy - hy, -dp, cx + hx + 0.4, cy + hy, 0, inner("-x")))
+    out.append(box(cx - hx - 0.4, cy - hy - 0.4, -dp, cx + hx + 0.4, cy - hy, 0, inner("+y")))
+    out.append(box(cx - hx - 0.4, cy + hy, -dp, cx + hx + 0.4, cy + hy + 0.4, 0, inner("-y")))
+    for k in range(rnd.randint(3, 6)):                                             # what fell in: lumps on the bottom, half in the light
+        out.append(obox((cx + rnd.uniform(-hx, hx) * 0.8, cy + rnd.uniform(-hy, hy) * 0.8, -dp + rnd.uniform(0.05, 0.3)),
+                        (rnd.uniform(0.15, 0.45), rnd.uniform(0.15, 0.4), rnd.uniform(0.1, 0.3)), rnd.uniform(0, 180), rnd.uniform(-30, 30), rnd.uniform(-30, 30), "pit"))
+    closed = [s for s in HOLE_SIDES if s not in edges]
+    def geo(side): n, t, _b = HOLE_SIDES[side]; return n, t, (hx if side[1] == "x" else hy), (hy if side[1] == "x" else hx), math.degrees(math.atan2(n[1], n[0]))
+    def P(side, along, outd, z): n, t, half, _l, _y = geo(side); return (cx + n[0] * (half + outd) + t[0] * along, cy + n[1] * (half + outd) + t[1] * along, z)
+    def cracks(side, k):                                                           # hairlines running on out across the floor from the corners
+        _n, _t, _h, L, yaw = geo(side)
+        for _ in range(k):
+            ln = rnd.uniform(0.5, 1.6); a = rnd.uniform(-L, L)
+            out.append(obox(P(side, a, ln * 0.5, 0.003), (ln * 0.5, rnd.uniform(0.012, 0.035), 0.004), yaw + rnd.uniform(-35, 35), 0, 0, "pit"))
+    def rebar(side, k, reach=(0.3, 0.9)):
+        _n, _t, _h, L, _yaw = geo(side)
+        for _ in range(k):
+            a = rnd.uniform(-L, L) * 0.92; r = rnd.uniform(*reach)
+            out.append(tube(P(side, a, 0.02, -rnd.uniform(0.08, 0.3)), P(side, a + rnd.uniform(-0.25, 0.25), -r, rnd.uniform(-0.55, 0.28)), rnd.uniform(0.011, 0.02), "steel", 5))
+    def slabs_in(side, k, tex, drop=(0.18, 0.4)):                                  # floor that broke and hangs into the shaft
+        _n, _t, _h, L, yaw = geo(side)
+        for i in range(k):
+            w = L / k; a = -L + w * (2 * i + 1) + rnd.uniform(-0.1, 0.1); ln = rnd.uniform(0.35, 0.7); tilt = rnd.uniform(18, 42)
+            c = P(side, a, -ln * math.cos(math.radians(tilt)), -ln * math.sin(math.radians(tilt)) - 0.07)
+            out.append(obox(c, (ln, w * rnd.uniform(0.7, 0.96), 0.07), yaw + rnd.uniform(-7, 7), -tilt, rnd.uniform(-9, 9), {"-x": "pit", "+x": "pit", "-y": "pit", "+y": "pit", "-z": "pit", "+z": tex}))
+    for s_ in HOLE_SIDES:                                                          # every lip is chipped and cracked, and has grit lying off it (all of it walked over)
+        _n, _t, _h, L, yaw = geo(s_); cracks(s_, rnd.randint(1, 2))
+        for _ in range(rnd.randint(3, 6)):
+            sz = rnd.uniform(0.025, 0.06)
+            out.append(obox(P(s_, rnd.uniform(-L, L) * 1.1, rnd.uniform(0.25, 1.5), sz * 0.7), (sz * rnd.uniform(1.0, 2.2), sz * rnd.uniform(0.8, 1.6), sz), rnd.uniform(0, 180), rnd.uniform(-20, 20), rnd.uniform(-20, 20), rnd.choice(("rubble", "pit"))))
+    if style == "punched":                                                         # blown through from below: the floor's own sheet peeled up and back
+        for s_ in closed:
+            _n, _t, _h, L, yaw = geo(s_); k = rnd.randint(2, 4)
+            for i in range(k):
+                w = L / k; a = -L + w * (2 * i + 1); ln = rnd.uniform(0.3, 0.55); tilt = rnd.uniform(14, 34)
+                c = P(s_, a, ln * math.cos(math.radians(tilt)) - 0.04, ln * math.sin(math.radians(tilt)) + 0.012)
+                out.append(obox(c, (ln, w * rnd.uniform(0.6, 0.95), 0.014), yaw + rnd.uniform(-10, 10), tilt, rnd.uniform(-12, 12), {"-x": "steel", "+x": "steel", "-y": "steel", "+y": "steel", "-z": "pit", "+z": ftex}))
+            rebar(s_, rnd.randint(1, 3), (0.15, 0.4))
+    elif style == "torn":                                                          # ripped: bars fanned out over the drop, slabs hanging off them
+        for s_ in closed:
+            rebar(s_, rnd.randint(6, 11)); slabs_in(s_, rnd.randint(1, 2), ftex); cracks(s_, rnd.randint(1, 3))
+        for s_ in edges: rebar(s_, rnd.randint(0, 2), (0.05, 0.2))
+    elif style == "split":                                                         # the floor parted along a line; it runs on past both ends
+        for s_ in closed:
+            _n, _t, _h, L, yaw = geo(s_)
+            for i in range(3):
+                out.append(obox(P(s_, rnd.uniform(-L, L) * 0.3, -0.25 - 0.3 * i, -0.12 - 0.3 * i), (0.22, L * rnd.uniform(0.8, 1.0), 0.09), yaw + rnd.uniform(-6, 6), rnd.uniform(-14, 4), rnd.uniform(-8, 8), {"-x": "pit", "+x": "pit", "-y": "pit", "+y": "pit", "-z": "pit", "+z": ftex}))
+            ln = rnd.uniform(2.2, 3.6); x_, y_, _z = P(s_, 0, 0, 0); a_ = math.radians(yaw)
+            for i in range(5):                                                     # the crack carrying on, narrowing, wandering
+                a_ += rnd.uniform(-0.3, 0.3); sg = ln / 5
+                out.append(obox((x_ + math.cos(a_) * sg / 2, y_ + math.sin(a_) * sg / 2, 0.003), (sg / 2 + 0.02, 0.09 * (1 - i / 5.5), 0.004), math.degrees(a_), 0, 0, "pit"))
+                x_ += math.cos(a_) * sg; y_ += math.sin(a_) * sg
+    elif style == "corner":                                                        # by the wall: what came down is heaped on the far sides
+        for s_ in closed:
+            _n, _t, _h, L, yaw = geo(s_)
+            for _ in range(rnd.randint(5, 9)):
+                sz = rnd.uniform(0.1, 0.24)
+                out.append(obox(P(s_, rnd.uniform(-L, L), rnd.uniform(0.2, 1.0), sz * 0.6), (sz * rnd.uniform(1.0, 1.9), sz * rnd.uniform(0.8, 1.5), sz), rnd.uniform(0, 180), rnd.uniform(-25, 25), rnd.uniform(-25, 25), rnd.choice(("rubble", "pit"))))
+            rebar(s_, rnd.randint(2, 4)); cracks(s_, 2)
+    elif style == "sunk":                                                          # undermined: the floor round it has dropped and tipped in
+        for s_ in closed:
+            slabs_in(s_, rnd.randint(2, 3), ftex); cracks(s_, rnd.randint(2, 4))
+        for s_ in edges: cracks(s_, 1)
+    elif style == "grate":                                                         # a floor grating over a service duct, burst upward
+        for s_ in HOLE_SIDES:
+            _n, _t, _h, L, yaw = geo(s_)
+            out.append(obox(P(s_, 0, 0.05, 0.008), (0.05, L + 0.1, 0.008), yaw, 0, 0, "steel"))
+        for s_ in closed:
+            _n, _t, _h, L, yaw = geo(s_); k = rnd.randint(5, 8)
+            for i in range(k):
+                a = -L + (2 * L) * (i + 0.5) / k; ln = rnd.uniform(0.15, 0.40); tilt = rnd.uniform(-10, 32)      # (ln = HALF its length: nothing here may stand over 0.7 m, or the player's body catches on it)
+                c = P(s_, a, -ln * math.cos(math.radians(tilt)), ln * math.sin(math.radians(tilt)) + 0.02)
+                out.append(obox(c, (ln, 0.022, 0.022), yaw + rnd.uniform(-9, 9), tilt, rnd.uniform(0, 45), "steel"))
+    return len(out) - n0
+
+
 def sign(face, a0, a1, z0, z1, wall, tex, thick=None):
     """A plate a few cm proud of a wall. face: which way it looks ('-x','+x','-y','+y'); a0..a1 its run
     along the wall (m), z0..z1 its height, wall = the wall plane's coordinate. The picture is fitted
@@ -396,7 +514,8 @@ def main():
     # floor + ceiling slabs, one per zone (the outer ring of '#' cells closes the sides)
     xs = (0, ZONE_COLS[0] * CELL, ZONE_COLS[1] * CELL, W)
     for k, z in enumerate("tcr"):
-        out.append(box(xs[k], 0, -0.5, xs[k + 1], D, 0, dict({s_: "hide" for s_ in ("-x", "+x", "-y", "+y", "-z")}, **{"+z": "floor_" + z})))
+        for (rx0, ry0, rx1, ry1) in cut_rects((xs[k], 0, xs[k + 1], D), HOLES):
+            out.append(box(rx0, ry0, -0.5, rx1, ry1, 0, dict({s_: "hide" for s_ in ("-x", "+x", "-y", "+y", "-z")}, **{"+z": "floor_" + z})))
         out.append(box(xs[k], 0, WALL_H, xs[k + 1], D, WALL_H + 0.5, dict({s_: "hide" for s_ in ("-x", "+x", "-y", "+y", "+z")}, **{"-z": "ceil_r" if z == "r" else "ceil"})))
     # walls: merge horizontal runs of '#' per row into one brush each -- broken at the zone lines,
     # and the outer shell kept apart, so each takes its zone's finish
@@ -444,6 +563,25 @@ def main():
     # the breach in the east wall, and the reactor pit beyond it
     nbreach = breach(out)
     bx = BREACH_CELLS[0][0] * CELL; by0 = min(r for _, r in BREACH_CELLS) * CELL; by1 = (max(r for _, r in BREACH_CELLS) + 1) * CELL
+    # the breaches in the floor. A side is one they can climb out over only if there is open, level floor beyond it.
+    import random
+    def open_floor(x, y):
+        c, r = int(x // CELL), int(y // CELL)
+        return 0 <= c < COLS and 0 <= r < ROWS and grid[r][c] == "." and not any(px0 - 0.3 < x < px1 + 0.3 and pz0 - 0.3 < y < pz1 + 0.3 for (px0, pz0, px1, pz1, _t) in plats)
+    nhole = 0; hole_ents = []
+    for h in HOLES:
+        cx, cy, hx, hy, dp, style, seed, nedge, fx, boss = h
+        for dx in (-hx - 1.0, 0, hx + 1.0):
+            for dy in (-hy - 1.0, 0, hy + 1.0): assert open_floor(cx + dx, cy + dy), f"hole at {cx},{cy} is not on open floor"
+        ok = []
+        for s_, (n, t, _b) in HOLE_SIDES.items():
+            half, L = (hx, hy) if s_[1] == "x" else (hy, hx)
+            if all(open_floor(cx + n[0] * (half + o) + t[0] * a, cy + n[1] * (half + o) + t[1] * a) for o in (0.8, 1.6, 2.2) for a in (-L, 0, L)): ok.append(s_)
+        if style == "split": ok = [s_ for s_ in ok if (s_[1] == "y") == (hx > hy)]      # a crack is climbed out of over its long sides
+        random.Random(seed * 7 + 1).shuffle(ok); edges = ok[:nedge]
+        assert edges, f"hole at {cx},{cy} has no side to climb out over"
+        nhole += hole(out, h, edges, "floor_" + zone(int(cx // CELL)))
+        hole_ents.append((h, sum(HOLE_SIDES[s_][2] for s_ in edges)))
     # signs: on wall faces that look onto open floor, a fixed-seed pick, spread out, each zone its own set
     import random
     rnd = random.Random(1986); spots = []
@@ -535,6 +673,7 @@ def main():
         Wp, lb, pl = place(r_, c_, f_); k = frnd.random(); u = frnd.uniform(-0.9, 0.9); used.add((r_, c_)); nfit += 1
         if k < 0.34:                                                                                      # a fire point
             out.append(lb(u - 0.36, u + 0.36, 0.0, 0.20, 0.95, 1.67, "redbox")); out.append(pl(u - 0.34, u + 0.34, 0.97, 1.65, 0.20, "hose_cabinet", 0.02))
+            PANELS.append(Wp(u, 0.3, 1.3))                                                                  # the red box sounds too, like a control post ("info_panel")
             pts = [Wp(u + 0.2, 0.22, 0), Wp(u + 0.3, 0.45, 0)]; x_, y_ = u + 0.3, 0.45; ang = frnd.uniform(-0.6, 0.6)
             for q in range(frnd.randint(7, 13)):                                                           # ...and its hose, pulled out across the floor
                 ang += frnd.uniform(-0.55, 0.55); x_ += math.cos(ang) * 0.5 * frnd.choice((1, 1, -1)) * 0.6; y_ = min(3.2, max(0.3, y_ + abs(math.sin(ang)) * 0.45 + 0.12))
@@ -571,9 +710,15 @@ def main():
         if col is None: continue
         light((cx + 0.5) * CELL, (cz + 0.5) * CELL, WALL_H - 0.35, col, radius); nlit += 1
     for col, radius, (lx, ly, lz) in PIT_LIGHTS: light(lx, ly, lz, col, radius)
+    for (cx, cy, hx, hy, dp, style, seed, nedge, fx, boss), bits in hole_ents:
+        tint = fx[1]; col = tuple(round(a + (b - a) * tint, 3) for a, b in zip((0.22, 0.48, 1.0), (0.55, 0.86, 1.0)))
+        light(cx, cy, -min(1.4, dp * 0.4), col, 7.0 + 6.0 * fx[0])
+        out.append('{\n"classname" "info_hole"\n' f'"origin" "{cx * U:g} {cy * U:g} 0"\n"_size" "{hx:g} {hy:g} {dp:g}"\n"_edges" "{bits}"\n'
+                   f'"_fx" "{fx[0]:g} {fx[1]:g} {fx[2]:g} {fx[3]:g} {fx[4]:g}"\n"_seed" "{seed}"\n"_boss" "{boss}"\n}}\n')
+    for (px_, py_, pz_) in PANELS: out.append('{\n"classname" "info_panel"\n' f'"origin" "{px_ * U:g} {py_ * U:g} {pz_ * U:g}"\n}}\n')
     out.append('{\n"classname" "info_reactor"\n' f'"origin" "{REACTOR_AT[0] * U:g} {REACTOR_AT[1] * U:g} {REACTOR_AT[2] * U:g}"\n}}\n')
     open(OUT, "w").write("".join(out))
-    print(f"{OUT}: {nwall} wall brushes, {len(plats)} platforms, {nlit} lamps lit of {len(LAMPS)}, {nstation} control stations, {nsign} signs, {npost} posters, {nfit} wall fittings, {nbreach} brushes in the breach, spawn {spawn}")
+    print(f"{OUT}: {nwall} wall brushes, {len(plats)} platforms, {nlit} lamps lit of {len(LAMPS)}, {nstation} control stations, {nsign} signs, {npost} posters, {nfit} wall fittings, {nbreach} brushes in the breach, {len(HOLES)} holes ({nhole} brushes), spawn {spawn}")
 
 
 if __name__ == "__main__":

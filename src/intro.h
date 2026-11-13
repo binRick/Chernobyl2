@@ -58,9 +58,36 @@ static int IntroAnyInput(void){
 }
 
 // Returns 0 if the window was closed during the intro (quit), else 1.
+// The music is fed from a thread of its own. The main thread draws, and while the game loads beside the intro its
+// GL calls can wait on the loader's uploads for long stretches; fed from there the stream ran dry and replayed
+// what was left in its buffer -- the montage's music stuttering on over Hell March after a skip.
+#if !defined(__EMSCRIPTEN__) && !defined(C2_IOS)
+#include <pthread.h>
+#include <unistd.h>
+static pthread_mutex_t g_introMuLock=PTHREAD_MUTEX_INITIALIZER; static volatile int g_introMuRun=0; static Music *g_introMu=NULL;
+static void *IntroMusicPump(void *arg){ (void)arg;
+    while (g_introMuRun){ pthread_mutex_lock(&g_introMuLock); if (g_introMu) UpdateMusicStream(*g_introMu); pthread_mutex_unlock(&g_introMuLock); usleep(4000); }
+    return NULL; }
+#define INTRO_MU_LOCK()   pthread_mutex_lock(&g_introMuLock)
+#define INTRO_MU_UNLOCK() pthread_mutex_unlock(&g_introMuLock)
+#else
+#define INTRO_MU_LOCK()
+#define INTRO_MU_UNLOCK()
+#endif
+static int IntroWillPlay(void){
+#if defined(__EMSCRIPTEN__) || defined(C2_IOS)
+    return 0;
+#else
+    char b[256];
+    int automated = (g_maxFrames>0 || g_stress || g_shotFrame>0 || g_shotEvery>0 || g_kite) && !getenv("CHERNOBYL_INTRO_FORCE");   // (FORCE: dev, to test the intro's hand-off with --shot)
+    return !(g_noIntro || getenv("CHERNOBYL_NO_INTRO") || automated)
+        && IntroAsset("intro.mpg",b,sizeof b) && IntroAsset("intro_title.png",b,sizeof b);
+#endif
+}
+// The game's assets may still be loading on the loader thread while this plays (main.c, LoadThreadStart). The
+// montage does not care; the title does: until the loading is done it shows the bar in place of PRESS ANY KEY.
 static int RunIntro(void){
-    if (g_noIntro || getenv("CHERNOBYL_NO_INTRO") || g_maxFrames>0 || g_stress || g_shotFrame>0 || g_shotEvery>0 || g_kite)
-        return 1;
+    if (!IntroWillPlay()) return 1;
     char pv[256], pm[256], pt[256], pp[256], px[256];
     const char *fv=IntroAsset("intro.mpg",pv,sizeof pv), *fm=IntroAsset("intro_music.mp3",pm,sizeof pm);
     const char *ft=IntroAsset("intro_title.png",pt,sizeof pt), *fp=IntroAsset("intro_press.png",pp,sizeof pp);
@@ -94,20 +121,24 @@ static int RunIntro(void){
     Music mu={0}; int hasMu=0;
     if (g_audio && fm){ mu=LoadMusicStream(fm); hasMu=IsMusicValid(mu); }
     if (hasMu){ mu.looping=true; SetMusicVolume(mu,1.0f); PlayMusicStream(mu); }
+    int pump=0; float worstDt=0.0f; int slow=0;
+#if !defined(__EMSCRIPTEN__) && !defined(C2_IOS)
+    pthread_t pth; if (hasMu){ g_introMu=&mu; g_introMuRun=1; pump=(pthread_create(&pth,NULL,IntroMusicPump,NULL)==0); if (!pump) g_introMuRun=0; }
+#endif
     DebugLog("intro","\"video\":\"%s\",\"w\":%d,\"h\":%d,\"music\":%d", fv, vw, vh, hasMu);
 
     double clock=0.0, vidT=-1.0, fps=plm_get_framerate(plm); if (fps<=0) fps=25.0;
     { const char *au=getenv("CHERNOBYL_INTRO_AUTO"); if (au) sscanf(au,"%f,%f",&g_introAuto[0],&g_introAuto[1]); }
     { const char *sh=getenv("CHERNOBYL_INTRO_SHOT"); if (sh) g_introShot=(float)atof(sh); }
     int stage=0, ok=1;                                    // 0 montage, 1 title, 2 fade out
-    float stageT=0.0f;
+    float stageT=0.0f, loadedT=0.0f;                      // loadedT: seconds on the title with everything loaded
     while (GetKeyPressed()!=0) {}                         // drop keys queued before the window
     for (;;){
         if (WindowShouldClose()){ ok=0; break; }
-        float dt=GetFrameTime(); if (dt>0.1f) dt=0.1f;
+        float dt=GetFrameTime(); if (dt>worstDt) worstDt=dt; if (dt>0.1f){ slow++; dt=0.1f; }
         stageT+=dt; g_introWall+=dt;
         g_introFocusT = IsWindowFocused() ? g_introFocusT+dt : 0.0f;
-        if (hasMu){ UpdateMusicStream(mu); clock=GetMusicTimePlayed(mu); } else clock+=dt;
+        if (hasMu){ INTRO_MU_LOCK(); if (!pump) UpdateMusicStream(mu); clock=GetMusicTimePlayed(mu); INTRO_MU_UNLOCK(); } else clock+=dt;
         if (stage==0){
             int dirty=0, ended=0;
             while (vidT+1.0/fps <= clock){                // catch the picture up to the music
@@ -117,14 +148,17 @@ static int RunIntro(void){
             }
             if (dirty) UpdateTexture(vt,rgba);
             if (IntroAnyInput()){                         // skip: straight to the stamp
-                if (hasMu) SeekMusicStream(mu, tStamp-0.05f);
+                if (hasMu){ INTRO_MU_LOCK();              // stop first: that empties the stream's buffer, so none of the montage's music is left in it to replay
+                    StopMusicStream(mu); PlayMusicStream(mu); SeekMusicStream(mu, tStamp-0.05f); UpdateMusicStream(mu); INTRO_MU_UNLOCK(); }
                 stage=1; stageT=0.0f; DebugLog("intro","\"skip\":%.2f", clock);
             } else if (ended || clock>=tEnd-0.05){ stage=1; stageT=0.0f; }
         } else if (stage==1){
-            if (stageT>1.0f && IntroAnyInput()){ stage=2; stageT=0.0f; }
+            loadedT = g_loadFinished ? loadedT+dt : 0.0f;
+            int key=IntroAnyInput();                      // (asked every frame: a key pressed during the loading is dropped, not saved up)
+            if (stageT>1.0f && loadedT>0.35f && key){ stage=2; stageT=0.0f; }
         } else if (stage==2){
             float k=1.0f-stageT/1.2f; if (k<0) k=0;
-            if (hasMu) SetMusicVolume(mu,k);
+            if (hasMu){ INTRO_MU_LOCK(); SetMusicVolume(mu,k); INTRO_MU_UNLOCK(); }
             if (stageT>=1.25f) break;
         }
         BeginDrawing();
@@ -138,7 +172,8 @@ static int RunIntro(void){
                 float a=(stageT-0.6f)/0.6f; if (stage==2) a=1.0f; a=a<0?0:(a>1?1:a);
                 IntroBlit(ct,(Color){255,255,255,(unsigned char)(a*255)});
             }
-            if (pt2.id && stageT>0.9f && stage==1){
+            if (stage==1 && stageT>0.9f && !g_loadFinished) LoadBar(0.915f);
+            else if (pt2.id && stageT>0.9f && stage==1){
                 float a=0.55f+0.45f*sinf((float)GetTime()*3.2f);
                 float sw=(float)GetScreenWidth(), sh=(float)GetScreenHeight();
                 float sc=sh/720.0f;
@@ -154,6 +189,10 @@ static int RunIntro(void){
         }
     }
     while (GetKeyPressed()!=0) {}                         // the start key doesn't leak into the game
+#if !defined(__EMSCRIPTEN__) && !defined(C2_IOS)
+    if (pump){ g_introMuRun=0; pthread_join(pth,NULL); g_introMu=NULL; }
+#endif
+    DebugLog("intro","\"worst_dt\":%.3f,\"slow_frames\":%d", worstDt, slow);
     if (hasMu){ StopMusicStream(mu); UnloadMusicStream(mu); }
     SetMasterVolume(vol);
     UnloadTexture(vt); UnloadTexture(tt); if (pt2.id) UnloadTexture(pt2); if (ct.id) UnloadTexture(ct);

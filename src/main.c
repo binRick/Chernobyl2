@@ -260,8 +260,10 @@ static void AtmosLocs(Shader sh, int *loc){ const char *nm[6]={"aPos","aCol","aN
 static Vector3 g_pos   = { 0, EYE_H, 6 };
 static float   g_yaw   = 0.0f;
 static float   g_pitch = 0.0f;
+static int     g_holeView = -1;          // --hole N: stand at breach N looking into it (dev: stills of each, and of the climbs out of it)
 static int     g_lookSet = 0;            // --look <yaw> <pitch>: aim the spawn camera (dev/map inspection)
 static float   g_lookYaw = 0.0f, g_lookPitch = 0.0f;
+static int     g_devJump = 0;            // dev (CHERNOBYL_WALK): jump this frame
 static float   g_vy    = 0.0f;
 static int     g_grounded = 1;
 #if defined(C2_GLES)
@@ -302,6 +304,7 @@ static float g_glLift=0.0f;                      // 0..1: the launcher brought u
 static int             g_curAnim = 0;           // start in idle (Take, held at end)
 static float           g_animT = 0.0f;          // frame cursor
 static int             g_animOnce = 0;          // current clip is a one-shot (Reload)
+static int             g_swallowClick = 0;      // the left button is still down from the click that un-paused: no shot until it is released
 static float           g_fireCd = 0.0f;
 static float           g_recoil = 0.0f;         // 0..1 recoil kick on fire (decays); drives muzzle-up
 static int             g_burstLeft = 0;         // rounds remaining in the current burst (burst weapons)
@@ -484,7 +487,7 @@ static float  g_painAcc = 0.0f, g_painCd = 0.0f;          // damage taken lately
 // the player's own boots. The ambience is two seamless loops -- a low drone with wind and a
 // Geiger counter ticking over, and a tension layer (a heavy pulse under a dissonant hum, the
 // counter chattering) whose volume follows how many hostiles are up.
-enum { SY_HIT, SY_KILL, SY_CLINK, SY_STEP, SY_JUMP, SY_LAND, SY_N };
+enum { SY_HIT, SY_KILL, SY_CLINK, SY_STEP, SY_JUMP, SY_LAND, SY_BOLT, SY_N };   // SY_BOLT: an enemy throwing radiation (it borrowed the flamethrower's recording, and read as one)
 static Sound g_sy[SY_N]; static int g_hasSy=0;
 static Music g_amb[2]; static int g_hasAmb=0; static float g_ambTense=0.0f;
 static unsigned int g_syRng=0x1234567u;
@@ -492,7 +495,7 @@ static void SfxAt(Sound snd, Vector3 at, float gain);
 static float SyNoise(void){ g_syRng=g_syRng*1664525u+1013904223u; return (float)((g_syRng>>8)&0xFFFF)/32768.0f-1.0f; }
 static void SynthInit(void){
     const int SR=44100;
-    const float len[SY_N]={0.050f,0.200f,0.140f,0.120f,0.130f,0.200f};
+    const float len[SY_N]={0.050f,0.200f,0.140f,0.120f,0.130f,0.200f,0.800f};
     for (int k=0;k<SY_N;k++){
         int n=(int)(len[k]*SR); short *d=(short*)MemAlloc(n*sizeof(short)); float lp=0;
         for (int i=0;i<n;i++){ float t=(float)i/SR, v=0;
@@ -502,6 +505,9 @@ static void SynthInit(void){
             if (k==SY_STEP){ lp+=(SyNoise()-lp)*0.08f; v=lp*expf(-t*38.0f)*1.6f + sinf(t*6.2832f*(74.0f-t*120.0f))*expf(-t*30.0f)*0.7f; }
             if (k==SY_JUMP){ lp+=(SyNoise()-lp)*0.20f; float e=sinf(3.14159f*t/len[k]); v=lp*e*e*1.5f + sinf(t*6.2832f*(95.0f+t*260.0f))*expf(-t*26.0f)*0.35f; }   // boots leaving the floor: a scuff and a push
             if (k==SY_LAND){ lp+=(SyNoise()-lp)*0.06f; v=lp*expf(-t*20.0f)*2.2f + sinf(t*6.2832f*(62.0f-t*90.0f))*expf(-t*17.0f)*0.95f; }                        // both feet coming down: heavier than a step
+            if (k==SY_BOLT){ float e=fminf(1.0f,t*40.0f)*expf(-t*4.2f), w=6.2832f*(310.0f-t*210.0f);                      // a sour, falling electric snarl with a counter's crackle in it
+                float tick=(SyNoise()>0.965f-0.03f*e)?SyNoise()*1.6f:0.0f; lp+=(tick-lp)*0.55f;
+                v=(sinf(t*w)+0.5f*sinf(t*w*2.01f+sinf(t*61.0f)*2.0f)+0.3f*sinf(t*w*3.97f))*e*0.42f*(0.75f+0.25f*sinf(t*6.2832f*37.0f)) + lp*e*1.3f; }
             if (v>1) v=1; if (v<-1) v=-1; d[i]=(short)(v*30000.0f); }
         Wave w={ .frameCount=(unsigned int)n, .sampleRate=SR, .sampleSize=16, .channels=1, .data=d };
         g_sy[k]=LoadSoundFromWave(w); MemFree(d);
@@ -538,6 +544,11 @@ static void SynthInit(void){
     g_hasAmb=1;
 }
 static Sound  g_waveSnd;  static int g_hasWaveSnd  = 0;   // wave-start sting
+static Sound  g_cueSight, g_cueFlee, g_cueTense; static int g_hasCueSight=0, g_hasCueFlee=0, g_hasCueTense=0; static float g_cueUnseen=0;   // moments, voiced (see Update)
+static Sound  g_bossTheme[4]; static int g_nBossTheme=0, g_bossSeen=0;   // each boss's own music, from when he is first seen (assets/boss1_theme.mp3 ..)
+static Sound  g_hornSnd;  static int g_hasHornSnd  = 0;   // a pack charging: the horn, sometimes
+static Sound  g_wave2Snd; static int g_hasWave2Snd = 0;   // ...and wave 2 on another
+static Sound  g_wave1Snd; static int g_hasWave1Snd = 0;   // the run opens on a voice: Russian dialogue over wave 1's start (in place of the sting)
 static Sound  g_clearSnd; static int g_hasClearSnd = 0;   // wave-clear sting
 
 static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll, int idleHold){
@@ -1440,7 +1451,7 @@ static int EnemyDualWield(int t){ return t==EN_COOK || t==EN_BUTCHER || t==EN_HE
 #define LIMP_CLIP_MPS_D 0.52f  // limp take's walking speed if it can't be measured
 #define FLAME_FLINCH_GAP 1.5  // seconds between flame-caused flinches (each tick re-flinching froze him)
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; int swing, prevClip; float prevT, blendT; int hitRole; double flameFlinchAt;
-                 int deathRole; float deathYaw, limpT, knockT, riseT; int charged; float sc, sumT, boltT; int phase; Vector3 pushV;
+                 int hole, edge; float climbT, climbRate, climbWait, dropV; int dropping, climbFx; Vector3 hitOff;   /* climbing out of breach `hole` over side `edge`; hitOff = where his body is against where he will stand */ int deathRole; float deathYaw, limpT, knockT, riseT; int charged; float sc, sumT, boltT; int phase; Vector3 pushV;
                  int wN, wNext; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS]; Vector3 wDir[MAX_WOUNDS]; float wT0[MAX_WOUNDS];   // bullet wounds, pinned to bones; wDir = which way blood runs from it (bone space), wT0 = when it was made (run clock): they bleed
                  struct ModelAnimation *drawAn; float drawFrame, drawYaw;
                  // --- motion (EnemyPose / UpdateEnemies): he has momentum, turns at a rate, and his legs and torso are posed apart
@@ -1460,7 +1471,7 @@ static int             g_corpseNext = 0;
 enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_CAST,
        CL_HIT_HEAD, CL_HIT_LEFT, CL_HIT_RIGHT, CL_HIT_LEG,
        CL_DEATH_HEAD, CL_DEATH_LEG, CL_DEATH_BLAST, CL_DEATH_RIDDLED, CL_KNOCK, CL_LIMP,
-       CL_STRIDE, CL_JOG, CL_NROLES };   // CL_STRIDE / CL_JOG: the gaits between the slow walk and the run (newer models)
+       CL_STRIDE, CL_JOG, CL_CLIMB, CL_CLIMB2, CL_CLIMB3, CL_NROLES };   // CL_CLIMB*: out of a breach in the floor (Mixamo takes; no fallback -- see rg->climbN)   // CL_STRIDE / CL_JOG: the gaits between the slow walk and the run (newer models)
        // deaths by cause (headshot drop / legs shot out / thrown by a blast / riddled by a minigun) fall
        // back to CL_DEATH; CL_KNOCK (flattened, gets up) to CL_HIT; CL_LIMP (after a leg hit) to CL_RUN   // CL_HIT = centre mass; the
        // zone flinches (headshot / his left or right side / legs) fall back to CL_HIT on older models   // CL_CAST: spell clip (priest raising the dead); falls back to attack
@@ -1469,7 +1480,7 @@ typedef struct { Model model; ModelAnimation *anim; int animN; int clip[CL_NROLE
                  Model lod; int hasLod;
                  // layered posing (RigLayerInit): which bones are torso/arms/head, how much of the chest twist and
                  // head turn each takes, and how fast each gait clip really walks (so feet keep pace with the ground)
-                 int layer, bHips, bLB, bNeck, bHandR; unsigned char up[ENEMY_MAX_BONES]; float tw[ENEMY_MAX_BONES], hd[ENEMY_MAX_BONES], mps[CL_NROLES];
+                 struct { int frames; float handZ, handY; int plantA, plantB; float spread; } climb[3]; int climbN;   /* <enemy>.climb: where each climb's hands hold the rim (model space) */ int layer, bHips, bLB, bNeck, bHandR; unsigned char up[ENEMY_MAX_BONES]; float tw[ENEMY_MAX_BONES], hd[ENEMY_MAX_BONES], mps[CL_NROLES];
                  unsigned found; int gaitN, gait[4]; } EnemyRig;   // found: roles the file really has (bit per role); gait[]: its walking gaits, slowest first
                    // lod: <name>_lod.glb, ~30% triangles, drawn past ENEMY_LOD_DIST   // gpu: skinned in the vertex shader (EnemySkinInit)
 static EnemyRig        g_rig[EN_NTYPES];
@@ -1569,12 +1580,16 @@ static Matrix XformMat(Transform t){
     return MatrixMultiply(MatrixMultiply(MatrixScale(t.scale.x,t.scale.y,t.scale.z), QuaternionToMatrix(t.rotation)),
                           MatrixTranslate(t.translation.x,t.translation.y,t.translation.z));
 }
+#define MAX_BONEVBO 1024
+static struct { Mesh *ms; unsigned int idx, wgt; } g_boneVbo[MAX_BONEVBO]; static int g_nBoneVbo=0;
+static void BoneVboNote(Mesh *ms, unsigned int idx, unsigned int wgt){ if (g_nBoneVbo<MAX_BONEVBO){ g_boneVbo[g_nBoneVbo].ms=ms; g_boneVbo[g_nBoneVbo].idx=idx; g_boneVbo[g_nBoneVbo].wgt=wgt; g_nBoneVbo++; } }
 static void EnemyMeshBonesGPU(Mesh *ms){
     rlEnableVertexArray(ms->vaoId);
-    rlLoadVertexBuffer(ms->boneIndices, ms->vertexCount*4*(int)sizeof(unsigned char), false);
+    unsigned int bi=rlLoadVertexBuffer(ms->boneIndices, ms->vertexCount*4*(int)sizeof(unsigned char), false);
     rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES, 4, RL_UNSIGNED_BYTE, false, 0, 0);
     rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES);
-    rlLoadVertexBuffer(ms->boneWeights, ms->vertexCount*4*(int)sizeof(float), false);
+    unsigned int bw=rlLoadVertexBuffer(ms->boneWeights, ms->vertexCount*4*(int)sizeof(float), false);
+    BoneVboNote(ms,bi,bw);                             // (kept: a mesh loaded on the loader thread has its vertex array rebuilt, MeshVaoRebuild)
     rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS, 4, RL_FLOAT, false, 0, 0);
     rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS);
     rlDisableVertexArray();
@@ -1800,7 +1815,7 @@ static int LoadEnemyRig(EnemyRig *rg, const char *path){
     rg->anim=LoadModelAnimations(fp,&rg->animN);
     static const char *roleName[CL_NROLES]={"walk","idle","run","hit","attack","death","cast",
                                             "hit_head","hit_left","hit_right","hit_leg",
-                                            "death_head","death_leg","death_blast","death_riddled","knockdown","limp","stride","jog"};
+                                            "death_head","death_leg","death_blast","death_riddled","knockdown","limp","stride","jog","climb","climb2","climb3"};
     for (int r=0;r<CL_NROLES;r++){ rg->clip[r]=-1; rg->mps[r]=0; }
     rg->found=0;
     for (int ci=0; ci<rg->animN; ci++){
@@ -1816,6 +1831,16 @@ static int LoadEnemyRig(EnemyRig *rg, const char *path){
             if (gf){ char rn[32]; float v;
                 while (fscanf(gf,"%31s %f",rn,&v)==2)
                     for (int r=0;r<CL_NROLES;r++) if (!strcmp(rn,roleName[r]) && v>0.05f && v<12.0f) rg->mps[r]=v;
+                fclose(gf); } }
+    }
+    {   // <enemy>.climb beside the model: clip, frames, rim ahead, rim up, hands planted from..to, half hand spread
+        char gp[200]; snprintf(gp,sizeof gp,"%s",fp); char *dot=strrchr(gp,'.'); rg->climbN=0;
+        if (dot && (size_t)(dot-gp)+7<sizeof gp){ strcpy(dot,".climb");
+            FILE *gf=fopen(gp,"r");
+            if (gf){ char rn[32]; int fr,pa,pb; float hz,hy,sp;
+                while (fscanf(gf,"%31s %d %f %f %d %d %f",rn,&fr,&hz,&hy,&pa,&pb,&sp)==7)
+                    for (int k=0;k<3;k++) if (!strcmp(rn,roleName[CL_CLIMB+k]) && (rg->found&(1u<<(CL_CLIMB+k)))){
+                        rg->climb[k].frames=fr; rg->climb[k].handZ=hz; rg->climb[k].handY=hy; rg->climb[k].plantA=pa; rg->climb[k].plantB=pb; rg->climb[k].spread=sp; if (fr>0) rg->climbN++; }
                 fclose(gf); } }
     }
     for (int r=0;r<CL_NROLES;r++) if (rg->clip[r]<0){
@@ -1883,6 +1908,9 @@ static void EnemyPoseBuild(Enemy *e){
         for (int b=0;b<nb;b++) T[b]=RigSample(d,e->animT,b);
     } else {
         ModelAnimation *L=RigClip(e->type,e->loco);
+        if (e->climbT>0){ ModelAnimation *C=RigClip(e->type,e->clip);       // climbing out: the take, whole, hip travel and all
+            for (int b=0;b<nb;b++) T[b]=RigSample(C,e->animT,b);
+            memcpy(e->pose,T,sizeof(Transform)*nb); e->poseOK=1; return; }
         for (int b=0;b<nb;b++) T[b]=RigSample(L,e->locoT,b);
         if (e->locoBlend>0){                                  // gait change: fade the old gait out
             ModelAnimation *Lp=RigClip(e->type,e->locoPrev); float w=1.0f-e->locoBlend/LOCO_BLEND; w=w*w*(3.0f-2.0f*w);
@@ -1987,6 +2015,7 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
     g_enemies[i].fireT=kEnemy[type].rate*0.5f; g_enemies[i].losT=0; g_enemies[i].los=0; g_enemies[i].burstLeft=0;
     g_enemies[i].raiseC=-1; g_enemies[i].chanT=0;
     g_enemies[i].swing=0; g_enemies[i].blendT=0;
+    g_enemies[i].hole=-1; g_enemies[i].edge=0; g_enemies[i].climbT=g_enemies[i].climbWait=g_enemies[i].dropV=0; g_enemies[i].dropping=g_enemies[i].climbFx=0; g_enemies[i].hitOff=(Vector3){0,0,0};
     g_enemies[i].hitRole=CL_HIT; g_enemies[i].deathRole=CL_DEATH; g_enemies[i].limpT=0; g_enemies[i].knockT=0; g_enemies[i].flameFlinchAt=-100.0;   // a reused slot starts clean
     g_enemies[i].pushV=(Vector3){0,0,0}; g_enemies[i].riseT=0; g_enemies[i].charged=0; g_enemies[i].sc=1.0f; g_enemies[i].sumT=g_enemies[i].boltT=0; g_enemies[i].phase=0;
     g_enemies[i].wN=0; g_enemies[i].wNext=0; g_enemies[i].drawAn=NULL;
@@ -1997,6 +2026,75 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
       e->loco=e->locoPrev=CL_IDLE; e->back=0; e->locoT=(float)GetRandomValue(0,40); e->locoPrevT=0; e->locoBlend=0; e->legW=1;
       e->flank=GetRandomValue(-100,100)/100.0f; e->atkRest=0; e->atkRate=1; e->stagT=0; e->hitAcc=e->hitAccT=0; e->aimT=e->modeT=e->lostT=0;
       e->mode=EM_ADVANCE; e->side=GetRandomValue(0,1)?1:-1; e->shots=0; e->rehit=0; e->poseOK=e->fromOK=e->blendAll=0; }
+}
+// ---- Breaches in the floor ("info_hole"): nothing walks into one, and the enemies come up out of them --------
+static Vector3 HoleTint(const MapHole *h, float k){ float t=h->fx[1]; return (Vector3){(0.22f+0.33f*t)*k,(0.48f+0.38f*t)*k,1.0f*k}; }
+static const float kEdgeNX[4]={-1,1,0,0}, kEdgeNZ[4]={0,0,-1,1};          // a side's outward direction (bit 1 -x, 2 +x, 4 -z, 8 +z)
+static int HoleAt(float x, float z, float pad){
+    for (int h=0;h<g_nMapHoles;h++) if (fabsf(x-g_mapHoles[h].pos.x)<g_mapHoles[h].hx+pad && fabsf(z-g_mapHoles[h].pos.z)<g_mapHoles[h].hz+pad) return h;
+    return -1;
+}
+static Vector3 HolePushOut(Vector3 p, float pad){                         // out over the nearest side (a slide along it, not a snap to a corner)
+    int h=HoleAt(p.x,p.z,pad); if (h<0) return p;
+    const MapHole *H=&g_mapHoles[h]; float dx=p.x-H->pos.x, dz=p.z-H->pos.z, px=H->hx+pad-fabsf(dx), pz=H->hz+pad-fabsf(dz);
+    if (px<pz) p.x=H->pos.x+(dx<0?-1.0f:1.0f)*(H->hx+pad); else p.z=H->pos.z+(dz<0?-1.0f:1.0f)*(H->hz+pad);
+    return p;
+}
+static int g_spawnBoss=0; static float g_spawnSc=1.0f;                    // the spawn in hand is a boss / this much bigger (he needs a breach that fits him)
+static int EdgeBusy(int h, int ed){
+    int b=g_mapHoles[h].busy[ed]; if (b<=0) return 0;
+    const Enemy *o=&g_enemies[b-1];
+    if (o->state==1 && o->climbT>0 && o->hole==h && o->edge==ed) return 1;
+    g_mapHoles[h].busy[ed]=0; return 0;
+}
+static Vector3 EdgeMid(const MapHole *H, int ed){ return (Vector3){H->pos.x+kEdgeNX[ed]*H->hx, H->pos.y, H->pos.z+kEdgeNZ[ed]*H->hz}; }
+// Which breach, which side. Wave spawns: a free side 6..40 m off, ahead of the player (or behind, for the flankers),
+// near 16 m for choice; failing that any free side on the map; failing that the side taken longest ago (he waits his
+// turn). A boss: the biggest breach he fits, unless the player is standing at it.
+static int HolePickEdge(int type, int behind, int *oh, int *oe){
+    if (g_nMapHoles<=0) return 0;
+    float S=ENEMY_SCALE*kEnemy[type].scale*g_spawnSc, ahead=1.5708f-g_yaw+(behind?3.14159f:0.0f), lx=cosf(ahead), lz=sinf(ahead), feet=g_pos.y-EYE_H;
+    int bh=-1, be=-1; float bs=1e9f;
+    for (int pass=(g_spawnBoss?-1:0); pass<3 && bh<0; pass++)
+        for (int h=0;h<g_nMapHoles;h++){ const MapHole *H=&g_mapHoles[h];
+            int fits=(H->depth>=2.3f*S && fminf(H->hx,H->hz)>=0.62f*S);
+            float dc=hypotf(H->pos.x-g_pos.x,H->pos.z-g_pos.z);
+            if (g_holeView>=0 && h!=g_holeView && pass<2) continue;                              // dev (--hole N): they all come out of the one being looked at
+            if (pass<2 && !fits) continue;
+            if (pass==-1 && dc<6.0f+fmaxf(H->hx,H->hz)) continue;
+            for (int ed=0;ed<4;ed++){ if (!(H->edges&(1<<ed))) continue;
+                int busy=EdgeBusy(h,ed); Vector3 m=EdgeMid(H,ed); float dx=m.x-g_pos.x, dz=m.z-g_pos.z, d=sqrtf(dx*dx+dz*dz), sc;
+                if (pass<2 && busy) continue;
+                if (pass==-1) sc=-(H->hx*H->hz)*10.0f - (kEdgeNX[ed]*-dx+kEdgeNZ[ed]*-dz)/fmaxf(d,0.1f);                 // biggest; the side that faces the player
+                else if (pass==0){ if (g_holeView<0 && (d<6.0f || d>40.0f || fabsf(H->pos.y-feet)>6.0f)) continue;
+                    float c=(d>1e-3f)?(dx*lx+dz*lz)/d:1.0f;
+                    sc=(c<0.40f?12.0f+(0.40f-c)*6.0f:0.0f)+fabsf(d-16.0f)*0.25f+GetRandomValue(0,300)/100.0f; }
+                else if (pass==1) sc=(d<6.0f?40.0f:0.0f)+fabsf(d-16.0f)*0.25f+GetRandomValue(0,300)/100.0f;
+                else sc=(float)H->busyT[ed]+(fits?0.0f:1e6f);
+                if (sc<bs){ bs=sc; bh=h; be=ed; } } }
+    if (bh<0) return 0;
+    *oh=bh; *oe=be; return 1;
+}
+static void SpawnImpact(Vector3 p, Vector3 n);
+static void EnemyClimbTick(int i, float dt);
+static void EnemyClimbIn(int i, int h, int ed){
+    Enemy *e=&g_enemies[i]; EnemyRig *rg=RigOf(e->type); MapHole *H=&g_mapHoles[h];
+    float S=ENEMY_SCALE*kEnemy[e->type].scale*g_spawnSc;
+    int heavy=(kEnemy[e->type].scale>1.12f || g_spawnBoss), shooter=(kEnemy[e->type].kind==AK_HITSCAN || kEnemy[e->type].kind==AK_BOLT);
+    int k= heavy ? 2 : shooter ? 0 : (e->type%3==1 ? 1 : e->type%3==2 ? 2 : 0);              // each kind has its way up...
+    if (GetRandomValue(0,99)<30) k=GetRandomValue(0,2);                                    // ...but not always
+    for (int t=0;t<3 && !(rg->found&(1u<<(CL_CLIMB+k)) && rg->climb[k].frames>0);t++) k=(k+1)%3;
+    float L=(kEdgeNX[ed]!=0?H->hz:H->hx), room=fmaxf(0.0f, L-(rg->climb[k].spread+0.22f)*S), a=room*GetRandomValue(-100,100)/100.0f;
+    Vector3 m=EdgeMid(H,ed); float nx=kEdgeNX[ed], nz=kEdgeNZ[ed], out=fmaxf(0.30f, -rg->climb[k].handZ*S-0.06f);   // his wrists just inside the lip
+    e->pos=(Vector3){m.x+nx*out+(nz!=0?a:0.0f), H->pos.y, m.z+nz*out+(nx!=0?a:0.0f)}; e->drawY=e->pos.y; e->fallV=0;
+    e->yaw=atan2f(nx,nz)*RAD2DEG+ENEMY_YAW_OFFSET; e->yawRate=e->twist=e->headTw=e->lean=e->pitch=0; e->vel=e->mv=(Vector3){0,0,0};
+    e->hole=h; e->edge=ed; e->clip=CL_CLIMB+k; e->animT=0; e->legW=0; e->climbFx=0;
+    e->climbRate=(k==1?0.78f:0.92f)+GetRandomValue(0,22)/100.0f;
+    e->climbT=rg->climb[k].frames/60.0f/e->climbRate;
+    e->climbWait=EdgeBusy(h,ed)?1.2f:0.0f;                                                 // someone is still on this side: he hangs below a moment
+    H->busy[ed]=i+1; H->busyT[ed]=GetTime(); e->poseOK=e->fromOK=0; e->blendT=0;
+    DebugLog("climb","\"i\":%d,\"hole\":%d,\"edge\":%d,\"clip\":%d,\"wait\":%.1f,\"t\":%.2f", i, h, ed, k, e->climbWait, e->climbT);
+    if (e->climbT>0) EnemyClimbTick(i,0.0f);            // pose him and place his hit box NOW: he is spawned after this frame's enemy update, and would stand on the lip for a frame
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
 // walkable nav region (not sealed off behind a wall), AND has body clearance so the
@@ -2014,10 +2112,19 @@ static float SpawnProbeTop(float x, float z){
     if (up>0.0f) top=o.y+up-0.05f;
     return top;
 }
+// He comes up off the floor lying on his back, so the floor has to be FLAT for his length all round: on a
+// stair or a platform edge he lay through the steps. Eight probes at 1.1 m must find the same floor.
+static int SpawnFloorFlat(float x, float fy, float z){
+    for (int a=0;a<8;a++){ float px=x+cosf(a*0.7854f)*1.1f, pz=z+sinf(a*0.7854f)*1.1f;
+        float fd=MapRayNearest((Vector3){px,fy+1.0f,pz},(Vector3){0,-1,0},3.0f);
+        if (!(fd>0.0f) || fabsf(fd-1.0f)>0.10f) return 0; }
+    return 1;
+}
 static int EnemySpawnOK(float x, float fy, float z){
     return fabsf(fy-(g_pos.y-EYE_H))<6.0f
         && MapNavReachable((Vector3){x,fy,z})
-        && !MapSphereHitsWall((Vector3){x,fy+0.9f,z},ENEMY_MOVE_R);   // body fits (same radius it moves with)
+        && !MapSphereHitsWall((Vector3){x,fy+0.9f,z},ENEMY_MOVE_R)    // body fits (same radius it moves with)
+        && SpawnFloorFlat(x,fy,z) && HoleAt(x,z,1.2f)<0;
 }
 // Map spawn: a ring around the player, dropped onto the floor under each spot.
 // Biased toward where the player is FACING so enemies appear in front -- unless
@@ -2028,14 +2135,14 @@ static void SpawnEnemyMap(int i, int type, int behind){
     if (behind) ahead += 3.14159f;                       // flank: spawn arc centred BEHIND the player
     for (int t=0;t<40;t++){
         float ang = ahead + GetRandomValue(-115,115)/100.0f; // within ~±66 deg of the arc centre
-        float dist=6.0f+GetRandomValue(0,90)/10.0f;          // 6..15 units out
+        float dist=9.0f+GetRandomValue(0,90)/10.0f;          // 9..18 m out (6 put him at the player's feet)
         float x=g_pos.x+cosf(ang)*dist, z=g_pos.z+sinf(ang)*dist;
         float top=SpawnProbeTop(x,z);
         float fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
         if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z},type); return; } }
     }
     // ring failed: scan outward from the player for any reachable, roomy cell.
-    for (int rad=2; rad<14; rad++) for (int a=0;a<16;a++){
+    for (int rad=5; rad<16; rad++) for (int a=0;a<16;a++){
         float ang=a*0.3927f, x=g_pos.x+cosf(ang)*rad, z=g_pos.z+sinf(ang)*rad;
         float top=SpawnProbeTop(x,z), fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
         if (fd>0){ float fy=top-fd; if (EnemySpawnOK(x,fy,z)){ EnemyArm(i,(Vector3){x,fy,z},type); return; } }
@@ -2048,6 +2155,7 @@ static void SpawnEnemyMap(int i, int type, int behind){
             int cx=GetRandomValue(0,g_navNX-1), cz=GetRandomValue(0,g_navNZ-1), ci=cz*g_navNX+cx;
             if (g_navNL[ci]>0){
                 int l=GetRandomValue(0,g_navNL[ci]-1);   // any storey in this column is a valid, navigable spot
+                if (t<300 && !SpawnFloorFlat(g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[ci*NAV_MAXL+l], g_navMn.z+(cz+0.5f)*g_navCS)) continue;
                 EnemyArm(i,(Vector3){ g_navMn.x+(cx+0.5f)*g_navCS, g_navFloor[ci*NAV_MAXL+l], g_navMn.z+(cz+0.5f)*g_navCS },type);
                 return;
             }
@@ -2068,7 +2176,10 @@ static void EnemyRiseIn(int i){
     DebugLog("rise","\"i\":%d,\"t\":%.2f", i, e->riseT);
 }
 static void SpawnEnemyT(int i, int type, int behind){
-    if (g_hasMap && g_mapCol.ready){ SpawnEnemyMap(i,type,behind); EnemyRiseIn(i); return; }
+    if (g_hasMap && g_mapCol.ready){
+        int h=-1, ed=0;                                                                     // out of a breach, where the map has them and he can climb
+        if (g_nMapHoles>0 && RigOf(type)->climbN>0 && RigOf(type)->layer && HolePickEdge(type,behind,&h,&ed)){ EnemyArm(i,(Vector3){g_mapHoles[h].pos.x,g_mapHoles[h].pos.y,g_mapHoles[h].pos.z},type); EnemyClimbIn(i,h,ed); return; }
+        SpawnEnemyMap(i,type,behind); EnemyRiseIn(i); return; }
     // arena: a random spot near a wall, away from the player
     float ang=(float)GetRandomValue(0,628)/100.0f;
     float dist=ARENA*0.6f + GetRandomValue(0,(int)(ARENA*0.3f));
@@ -2086,6 +2197,15 @@ static void SpawnEnemyT(int i, int type, int behind){
 #define ARCH_MINIONS 5         // he keeps about this many of his dead on their feet (7 in the second phase)
 #define ARCH_BOLT_DMG 14.0f
 static int BossTypeForWave(int w){ return (w==2) ? EN_PRIEST : EN_HEADCHEF; }
+// Borderless fullscreen on a Mac sits UNDER the menu bar: when the bar shows (the game paused, the pointer free) it covers
+// the top strip, and a notch covers part of it always. What is drawn along the top edge starts below that.
+static int HudTop(void){
+#if defined(C2_GLES)
+    return 0;
+#else
+    return g_fullscreen ? 36 : 0;
+#endif
+}
 static const char *BossName(int type){ return type==EN_PRIEST ? "THE ARCHIMANDRITE" : "THE HEAD CHEF"; }
 
 // ---- Wave director (M2): budgeted, trickled, cleared, breathered ------------
@@ -2098,7 +2218,9 @@ static void StartWave(int w){
     g_wave=w; g_waveBudget=WaveBudgetFor(w); g_aliveCap=WaveAliveCapFor(w);
     g_spawnTick=0.0f; g_waveBreather=0.0f; g_bossThisWave=0; g_rosterN=-1;
     { void SeedWavePickups(void); SeedWavePickups(); }
-    if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
+    if (g_audio && w==1 && g_hasWave1Snd){ SetSoundVolume(g_wave1Snd,0.9f); PlaySound(g_wave1Snd); }
+    else if (g_audio && w==2 && g_hasWave2Snd){ SetSoundVolume(g_wave2Snd,0.9f); PlaySound(g_wave2Snd); }
+    else if (g_audio && g_hasWaveSnd) PlaySound(g_waveSnd);
     DebugLog("wave","\"start\":%d,\"budget\":%d,\"cap\":%d", w, g_waveBudget, g_aliveCap);
 }
 // What to spend budget on. Every type but the head chef (the between-waves BOSS) can turn up from
@@ -2107,7 +2229,12 @@ static void StartWave(int w){
 // first wave shows the roster; what budget is left after that goes on the weighted mix. Falls
 // back to a cook when the budget can't afford the pick.
 static int g_forceEnemy = -1;   // --enemy NAME: every spawn is this type (demo / testing a single enemy); -2 = "all"
-static int WavePickType(void){
+static int WavePickTypeAny(void);
+static int LiveOrCook(int t){ return g_rig[t].ok ? t : EN_COOK; }
+static int g_loadUrgentReq=-1;          // (a boss whose model is not in yet: LoadPump is told to fetch him first)
+// Staged loading: a kind whose model has not come in yet is not sent -- a cook goes in his place (or nobody, if even a cook is too dear).
+static int WavePickType(void){ int t=WavePickTypeAny(); if (t>=0 && !g_rig[t].ok){ t=EN_COOK; if (kEnemy[t].cost>g_waveBudget) return -1; } return t; }
+static int WavePickTypeAny(void){
     if (g_forceEnemy==-2){ if (g_waveBudget<=0) return -1; int t; do t=GetRandomValue(0,EN_NTYPES-1); while (t==EN_HEADCHEF && GetRandomValue(0,2)); return t; }   // --enemy all (boss rarer)
     if (g_forceEnemy>=0) return (kEnemy[g_forceEnemy].cost<=g_waveBudget) ? g_forceEnemy : -1;
     if (g_wave==1 && g_rosterN<0){                     // deal wave 1's line-up
@@ -2118,7 +2245,7 @@ static int WavePickType(void){
             while (j>=0 && kEnemy[g_roster[j]].cost*8+4>key){ g_roster[j+1]=g_roster[j]; j--; }
             g_roster[j+1]=v; }
     }
-    if (g_wave==1 && g_rosterN>0){
+    if (g_wave==1 && g_rosterN>0 && g_rig[g_roster[0]].ok){              // (the next in the line-up not loaded yet: he keeps his place, the weights fill in)
         int t=g_roster[0];
         if (kEnemy[t].cost<=g_waveBudget){ for (int i=1;i<g_rosterN;i++) g_roster[i-1]=g_roster[i]; g_rosterN--; return t; }
         g_rosterN=0;
@@ -2152,6 +2279,7 @@ static Sound  g_menuSnd; static int g_hasMenuSnd=0; static int g_menuHover=-1;  
 static void PickupSpawn(Vector3 pos, int type){
     int slot=-1; float oldest=1e9f;
     for (int i=0;i<MAX_PICKUPS;i++){ if (!g_pk[i].active){ slot=i; break; } if (g_pk[i].life<oldest){ oldest=g_pk[i].life; slot=i; } }
+    { int h=HoleAt(pos.x,pos.z,0.6f); if (h>=0){ pos=HolePushOut(pos,0.6f); pos.y=g_mapHoles[h].pos.y; } }   // never down a breach: it lies on the lip
     g_pk[slot]=(Pickup){ (Vector3){pos.x, pos.y, pos.z}, type, 1, 25.0f, (float)GetRandomValue(0,100)/10.0f };
 }
 static void BoltsReset(void);
@@ -2300,7 +2428,10 @@ static void UpdateWaves(float dt){
         int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
         if (slot>=0){
             int bt=BossTypeForWave(g_wave);
+            if (!g_rig[bt].ok){ g_loadUrgentReq=bt; g_bossThisWave=0; return; }     // his model is still coming in: he waits for it (LoadPump fetches him next)
+            g_spawnBoss=1; g_spawnSc=(bt==EN_PRIEST)?ARCH_SCALE:1.0f;        // (he needs a breach big enough to come out of)
             SpawnEnemyT(slot,bt,0);
+            g_spawnBoss=0; g_spawnSc=1.0f;
             g_enemies[slot].boss=1;                     // HUD bar, always drops mega + quad
             if (bt==EN_PRIEST){ Enemy *b=&g_enemies[slot];                    // the Archimandrite: a giant who commands the dead
                 b->sc=ARCH_SCALE; b->maxHp=ARCH_HP*(1.0f+0.12f*(g_wave>1?g_wave-1:0)); b->hp=b->maxHp; b->sumT=3.5f; b->boltT=2.0f; }
@@ -2393,7 +2524,7 @@ static int HitEnemy(Vector3 ro, Vector3 rd, float maxDist, float *outDist, Vecto
     int best=-1; float bd=maxDist; if (outHead) *outHead=0;
     for (int i=0;i<MAX_ENEMIES;i++){
         if (g_enemies[i].state!=1) continue;
-        Vector3 c=g_enemies[i].pos;          // c.y = the enemy's floor (0 in the arena, map height on a map)
+        Vector3 c=Vector3Add(g_enemies[i].pos,g_enemies[i].hitOff);   // c.y = the enemy's floor (0 in the arena, map height on a map); hitOff: still down in a breach
         float sc=kEnemy[g_enemies[i].type].scale*g_enemies[i].sc;    // hitbox tracks the drawn size (head chef looms)
         float er=ENEMY_RADIUS*sc, eh=ENEMY_HEIGHT*sc;
         BoundingBox bb={ (Vector3){c.x-er, c.y, c.z-er},
@@ -2548,6 +2679,8 @@ static int g_hurtCause=HC_BULLET; static Vector3 g_hurtFrom;   // g_hurtFrom: th
 #define STAGGER_TIME   0.55f    // seconds off balance, stepping back
 #define STAGGER_PUSH   3.2f     // m/s shove at mass 1 (a cook is 0.8, the head chef 4)
 #define HIT_SLOW       0.40f    // his pace while flinching from a light hit
+#define BOSS_FLINCH_GAP 3.0     // seconds between a boss's flinches from gunfire
+#define BOSS_HIT_SLOW  0.88f    // ...and his pace through one
 #define ENEMY_ACCEL    14.0f    // m/s^2 getting up to speed...
 #define ENEMY_BRAKE    22.0f    // ...and pulling up
 #define FLANK_DIST     11.0f    // inside this, in sight, chasers fan out to their own side of the player
@@ -2568,7 +2701,7 @@ static float EnemyYawAway(const Enemy *e, Vector3 from){        // a yaw whose "
 // Flatten an alive enemy: the knockdown clip (fall, lie there, get up) gates his AI the way a
 // flinch does (hitT), and he's shoved along `push` (m/s, decays; walls stop it).
 static void EnemyKnock(int ei, Vector3 push){
-    Enemy *e=&g_enemies[ei]; if (e->state!=1 || e->knockT>0) return;
+    Enemy *e=&g_enemies[ei]; if (e->state!=1 || e->knockT>0 || e->climbT>0) return;   // (hanging off the lip of a breach: nothing to knock down)
     EnemyRig *rg=RigOf(e->type); if (rg->animN<=0) return;
     float dur=ANIM_FRAMES(rg->anim[rg->clip[CL_KNOCK]])/60.0f;   // baked at 30 samples/s on a 60 fps timeline
     e->knockT=dur; if (e->hitT<dur) e->hitT=dur;
@@ -2676,6 +2809,11 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
     if (g_enemies[ei].hp<=0){
         g_enemies[ei].prevClip=g_enemies[ei].clip; g_enemies[ei].prevT=g_enemies[ei].animT; g_enemies[ei].blendT=ENEMY_BLEND;
         EnemyPoseSnap(&g_enemies[ei],1);                      // the fall eases out of whatever he was doing
+        if (g_enemies[ei].climbT>0){ Enemy *e=&g_enemies[ei];   // shot off the lip: until a knee is over it, he lets go and goes back down the shaft
+            int nf=ANIM_FRAMES(*RigClip(e->type,e->clip)); float fr=(nf>1)?e->animT/(float)(nf-1):1.0f;
+            if (fr<0.50f && e->hole>=0){ e->pos.x+=e->hitOff.x; e->pos.z+=e->hitOff.z; e->drawY=e->pos.y+e->hitOff.y; e->dropping=1; e->dropV=0; e->fromOK=0; e->blendT=0; }
+            DebugLog(e->dropping?"climb_drop":"climb_kill","\"i\":%d,\"hole\":%d,\"at\":%.2f", ei, e->hole, fr);
+            e->climbT=0; e->hitOff=(Vector3){0,0,0}; }
         g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0; if (!g_noCredit) g_killMark=0.32f;
         { Enemy *e=&g_enemies[ei]; const Weapon *cw=&g_weapons[g_curWeapon];   // how he dies: by cause, then where it hit
           e->deathYaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;   // facing the shooter
@@ -2703,7 +2841,7 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
                 e->state=0;                                    // nothing left to fall over
                 DebugLog("gib","\"i\":%d,\"cause\":%d", ei, g_hurtCause); } }
           DebugLog("edeath","\"i\":%d,\"role\":%d,\"cause\":%d", ei, e->deathRole, g_hurtCause); }
-        g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
+        if (!g_enemies[ei].dropping) g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
         int bossTheme=0;                                                             // the boss's death track stands in for his own cry (both at once was a muddle)
         if (g_enemies[ei].boss && g_audio && g_hasBossDeadSnd){                      // the boss is down
             if (g_hasBossSnd) StopSound(g_bossSnd);
@@ -2718,10 +2856,17 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
         if (g_audio && g_hasSy && !g_noCredit){ SetSoundPitch(g_sy[SY_KILL], 0.92f+GetRandomValue(0,16)/100.0f); SetSoundVolume(g_sy[SY_KILL],0.55f); PlaySound(g_sy[SY_KILL]); }   // the kill, confirmed
         { void PickupOnKillAt(int ei); PickupOnKillAt(ei); }
     } else {
+        if (g_enemies[ei].climbT>0) return;                    // hauling himself out of a breach: it hurts, but he does not let go
         // flame ticks every frame: re-flinching on each one froze a burning enemy in place.
         // Fire flinches him at most once per FLAME_FLINCH_GAP; he keeps coming through it
         if (g_hurtCause==HC_FLAME){
             if (GetTime()-g_enemies[ei].flameFlinchAt < FLAME_FLINCH_GAP) return;
+            g_enemies[ei].flameFlinchAt=GetTime(); }
+        // A boss has poise: a stream of bullets used to hold him in one long flinch -- slowed, shoved back and never
+        // able to finish a swing, so he could not close on a player who kept the trigger down. He now shrugs off
+        // all but one hit every BOSS_FLINCH_GAP (blasts always tell), and that flinch neither stops nor disarms him.
+        else if (g_enemies[ei].boss && g_hurtCause!=HC_BLAST){
+            if (GetTime()-g_enemies[ei].flameFlinchAt < BOSS_FLINCH_GAP) return;
             g_enemies[ei].flameFlinchAt=GetTime(); }
         if (g_enemies[ei].hitT<0.45f) g_enemies[ei].hitT=0.45f;   // non-fatal hit -> flinch (never cuts a knockdown short)
         if (g_hurtCause!=HC_FLAME) EnemyVoice(&g_enemies[ei], EC_HURT, 0.8f, 1.2f);   // his own grunt, if his kind has one
@@ -3005,6 +3150,7 @@ static void Fire(Camera3D cam) {
 #define ENEMY_STEP    0.7f    // max riser an enemy can step up (matches the player's auto-step)
 static int EnemyMoveOK(float x, float z, float curY){
     if (!g_mapCol.ready) return 1;
+    if (HoleAt(x,z,0.30f)>=0) return 0;                 // a breach in the floor: round it, not into it
     float top=curY+ENEMY_STEP, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
     if (fd<=0) return 0;                                // no floor under the spot -> the void
     float ny=top-fd;                                   // destination floor height
@@ -3213,13 +3359,20 @@ static void DrawBolts(void){
 }
 // Priest: find the nearest corpse within range, channel 1.6 s, then raise it at 60% HP.
 // Returns 1 while busy raising (the caller then holds the priest still in its cast clip).
+// He must SEE the body: the green arc ran straight to any corpse in range -- 45 m for the boss -- through whatever walls stood between.
+static int PriestSeesCorpse(const Enemy *e, const Corpse *c){
+    if (!g_hasMap || !g_mapCol.ready) return 1;
+    Vector3 a=EnemyMuzzle(e), b={c->pos.x,c->pos.y+0.45f,c->pos.z}, d=Vector3Subtract(b,a); float L=Vector3Length(d);
+    if (L<0.5f) return 1;
+    float hit=MapRayNearest(a,Vector3Scale(d,1.0f/L),L); return !(hit>0.0f && hit<L-0.5f);
+}
 static int PriestRaise(int idx, float dt){
     Enemy *e=&g_enemies[idx];
     if (e->raiseC>=0){
         Corpse *c=&g_corpses[e->raiseC];
-        if (!c->active){ e->raiseC=-1; e->chanT=0; return 0; }
+        if (!c->active || !PriestSeesCorpse(e,c)){ e->raiseC=-1; e->chanT=0; return 0; }    // gone, or a wall has come between them: the rite breaks
         e->chanT-=dt;
-        for (int i=0;i<MAX_BEAMS;i++) if (g_beams[i].t<=0 || i==MAX_BEAMS-1){ g_beams[i]=(Beam){EnemyMuzzle(e),(Vector3){c->pos.x,c->pos.y+0.25f,c->pos.z},0.05f}; break; }
+        for (int i=0;i<MAX_BEAMS;i++) if (g_beams[i].t<=0 || i==MAX_BEAMS-1){ g_beams[i]=(Beam){EnemyBoltOrigin(e),(Vector3){c->pos.x,c->pos.y+0.25f,c->pos.z},0.05f}; break; }   // from the hand he holds out, wherever the cast has it (it left from above his head when he bent to it)
         if (e->chanT<=0){
             int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
             if (slot>=0){
@@ -3237,10 +3390,47 @@ static int PriestRaise(int idx, float dt){
     if (e->fireT>0) return 0;
     int best=-1; float bd=e->boss ? 45.0f : kEnemy[e->type].range;
     for (int c=0;c<MAX_CORPSES;c++){ if (!g_corpses[c].active || g_corpses[c].type==EN_HEADCHEF || g_corpses[c].type==EN_PRIEST) continue;
-        float d=Vector3Distance(g_corpses[c].pos,e->pos); if (d<bd){ bd=d; best=c; } }
+        float d=Vector3Distance(g_corpses[c].pos,e->pos); if (d<bd && PriestSeesCorpse(e,&g_corpses[c])){ bd=d; best=c; } }
     if (best<0) return 0;
     e->raiseC=best; e->chanT=e->boss?1.0f:1.6f;
     return 1;
+}
+// Out of a breach. He was put where he will STAND; the take itself starts him hanging down the shaft, hands on the
+// lip, and brings him up and over. Until it ends he does not move, fight, flinch or collide -- but he can be shot
+// (the hit box follows his hips), and what kills him before he is nearly out sends him back down.
+static void EnemyClimbTick(int i, float dt){
+    Enemy *e=&g_enemies[i]; EnemyRig *rg=RigOf(e->type); const MapHole *H=&g_mapHoles[e->hole]; int k=e->clip-CL_CLIMB;
+    int nf=ANIM_FRAMES(*RigClip(e->type,e->clip)); float S=ENEMY_SCALE*kEnemy[e->type].scale*e->sc;
+    if (e->climbWait>0) e->climbWait-=dt;
+    else { e->animT+=dt*60.0f*e->climbRate; e->climbT-=dt; }
+    if (nf>1 && e->animT>(float)(nf-1)) e->animT=(float)(nf-1);
+    e->drawY=e->pos.y; e->vel=e->mv=(Vector3){0,0,0}; e->hitT=0; e->stagT=0; e->knockT=0;
+    EnemyPoseBuild(e);
+    float yr=(e->yaw-ENEMY_YAW_OFFSET)*DEG2RAD, cs=cosf(yr), sn=sinf(yr); Vector3 hipW=e->pos;
+    if (e->poseOK && rg->bHips>=0){                                                       // where his body really is
+        Vector3 hp=e->pose[rg->bHips].translation, he=RigSample(RigClip(e->type,e->clip),(float)(nf-1),rg->bHips).translation;
+        e->hitOff=(Vector3){(hp.x*cs+hp.z*sn)*S, (hp.y-he.y)*S, (-hp.x*sn+hp.z*cs)*S};
+        hipW=(Vector3){e->pos.x+e->hitOff.x, e->pos.y+hp.y*S, e->pos.z+e->hitOff.z}; }
+    float fr=(nf>1)?e->animT/(float)(nf-1):1.0f, left=fmaxf(0.0f,1.0f-fr);
+    { Vector3 c=HoleTint(H,(0.22f+0.33f*H->fx[0])*fminf(1.0f,left*2.2f));                    // lit from below; it leaves him as he stands
+      if (left>0.02f) DynLightAdd((Vector3){hipW.x,hipW.y-0.9f,hipW.z}, c, 5.0f, 0.05f, 1); }
+    Vector3 lip={e->pos.x, H->pos.y, e->pos.z};                                            // the lip under his hands: back along his facing by the rim distance
+    lip.x=e->pos.x+sn*rg->climb[k].handZ*S; lip.z=e->pos.z+cs*rg->climb[k].handZ*S;
+    int stage=(e->animT>2.0f)+(fr>0.45f)+(fr>0.8f);                                        // hands slap the lip / a knee comes over / he stands
+    if (stage>e->climbFx && e->climbWait<=0){ e->climbFx=stage;
+        for (int q=0;q<(stage==1?6:4);q++) SpawnSmoke((Vector3){lip.x+cs*GetRandomValue(-45,45)/100.0f*S, lip.y+0.08f, lip.z-sn*GetRandomValue(-45,45)/100.0f*S}, 0);
+        if (stage<3){ SpawnImpact((Vector3){lip.x+cs*rg->climb[k].spread*S,lip.y+0.03f,lip.z-sn*rg->climb[k].spread*S},(Vector3){0,1,0});
+                      SpawnImpact((Vector3){lip.x-cs*rg->climb[k].spread*S,lip.y+0.03f,lip.z+sn*rg->climb[k].spread*S},(Vector3){0,1,0}); }
+        if (stage==1 && g_audio && g_hasWallSnd){ SetSoundPitch(g_wallSnd,0.55f+GetRandomValue(0,15)/100.0f); SfxAt(g_wallSnd, lip, 0.45f); } }
+    if (GetRandomValue(0,999)<(int)(2200*dt)) SpawnSmoke((Vector3){hipW.x+GetRandomValue(-30,30)/100.0f, fminf(hipW.y,H->pos.y+0.2f), hipW.z+GetRandomValue(-30,30)/100.0f}, 0);   // the shaft's smoke dragged up with him
+    { static int killAt=-1; if (killAt<0){ const char *v=getenv("CHERNOBYL_CLIMB_KILL"); killAt=v?atoi(v):0; }   // dev: kill every climber N% of the way up (tests the drop back down the shaft)
+      if (killAt>0 && fr*100.0f>=(float)killAt){ HurtEnemy(i, 99999.0f, 0, (Vector3){0,-1,0}, hipW, 1); return; } }
+    if (e->climbT<=0 || fr>=0.999f){                                                       // up
+        e->climbT=0; e->hitOff=(Vector3){0,0,0}; if (H->busy[e->edge]==i+1) ((MapHole*)H)->busy[e->edge]=0;
+        EnemyPoseSnap(e,1); e->prevClip=e->clip; e->prevT=e->animT; e->clip=g_eRun; e->animT=0; e->legW=0; e->loco=e->locoPrev=CL_IDLE; e->locoBlend=0;
+        float dx=e->pos.x-g_pos.x, dz=e->pos.z-g_pos.z, d=sqrtf(dx*dx+dz*dz);
+        if (d<1.0f && d>1e-3f && fabsf((g_pos.y-EYE_H)-e->pos.y)<ENEMY_HEIGHT) EnemyNudge(i, dx/d*(1.0f-d), dz/d*(1.0f-d));   // the player stood where he came up: he gives, the player is not shoved
+        DebugLog("climb_done","\"i\":%d,\"hole\":%d", i, e->hole); }
 }
 static void UpdateEnemies(float dt){
     if (!g_hasEnemy) return;
@@ -3260,6 +3450,7 @@ static void UpdateEnemies(float dt){
             if (e->stagT>0) e->stagT-=dt;
             if (e->hitAccT>0) e->hitAccT-=dt;
             if (d<1e-3f) d=1e-3f;
+            if (e->climbT>0){ EnemyClimbTick(i,dt); continue; }     // hauling himself out of a breach: nothing else until he is up
             if (e->riseT>0){                                        // coming up out of the floor: the glow dies as he stands
                 float k=fminf(1.0f, e->riseT/1.2f);
                 DynLightAdd((Vector3){e->pos.x,e->pos.y+0.35f,e->pos.z}, (Vector3){0.25f*k,1.5f*k,0.35f*k}, 6.5f, 0.05f, 1);
@@ -3284,7 +3475,7 @@ static void UpdateEnemies(float dt){
                         for (int tr=0;tr<12;tr++){ float a=GetRandomValue(0,628)/100.0f, rr=2.5f+GetRandomValue(0,35)/10.0f;
                             float x=e->pos.x+cosf(a)*rr, z=e->pos.z+sinf(a)*rr, top=SpawnProbeTop(x,z), fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
                             if (fd>0 && EnemySpawnOK(x,top-fd,z)){
-                                EnemyArm(slot,(Vector3){x,top-fd,z},kDead[GetRandomValue(0,e->phase?3:2)]); g_enemies[slot].hp=g_enemies[slot].maxHp*0.7f; EnemyRiseIn(slot);
+                                EnemyArm(slot,(Vector3){x,top-fd,z},LiveOrCook(kDead[GetRandomValue(0,e->phase?3:2)])); g_enemies[slot].hp=g_enemies[slot].maxHp*0.7f; EnemyRiseIn(slot);
                                 g_sfxAt=e->pos; EnemySfx(g_eRaiseSnd,g_hasERaise,d);
                                 DebugLog("summon","\"type\":\"%s\",\"up\":%d", kEnemy[g_enemies[slot].type].name, up+1); break; } } }
                     e->sumT=e->phase?2.4f:4.2f;
@@ -3327,7 +3518,7 @@ static void UpdateEnemies(float dt){
             int sees=(ranged ? d<=rng*1.3f : d<=FLANK_DIST) ? EnemySeesPlayer(e,dt) : 0;
             int casting=(kind==AK_RAISE && e->hitT<=0 && PriestRaise(i,dt));
             int down=(e->knockT>0), hurt=(e->hitT>0), stag=(e->stagT>0);
-            if (hurt) e->swing=0;                              // a flinch cuts a swing / a throw short
+            if (hurt && !(e->boss && !down && !stag)) e->swing=0;   // a flinch cuts a swing / a throw short (not a boss's: only a stagger or a knockdown does)
             float top=(e->limpT>0) ? fminf(e->spd,LIMP_SPEED) : e->spd;
             Vector3 wish={0,0,0}, navDir={0,0,0}; float wspd=0; int focus=0, wantAtk=0, chase=0, nav=0;
             if (down || stag || casting){ focus=casting; }
@@ -3400,7 +3591,7 @@ static void UpdateEnemies(float dt){
                 wspd=top;
                 if (!ranged) wspd*=Clamp((d-reach*0.55f)/0.9f,0.0f,1.0f);
             }
-            if (hurt && !down && !stag) wspd*=HIT_SLOW;       // a light hit slows him; it doesn't root him
+            if (hurt && !down && !stag) wspd*=(e->boss?BOSS_HIT_SLOW:HIT_SLOW);       // a light hit slows him; it doesn't root him
             // ---- Momentum: his velocity chases the wish at a limited acceleration (hit shoves live in it too)
             { Vector3 dd=Vector3Subtract(Vector3Scale(wish,wspd),e->vel); dd.y=0;
               float vl0=Vector3Length(e->vel), acc=stag ? 5.0f : (wspd>vl0 ? ENEMY_ACCEL : ENEMY_BRAKE);
@@ -3486,7 +3677,7 @@ static void UpdateEnemies(float dt){
               if (down) e->legW=0; else e->legW+=(lt-e->legW)*(1.0f-expf(-9.0f*dt));
             }
             // ---- The action clip. Priority: knockdown > flinch > cast > attack > none (g_eRun = just locomotion)
-            int want = down ? CL_KNOCK : hurt ? (e->hitRole>=CL_HIT_HEAD ? e->hitRole : g_eHit) : casting ? CL_CAST : wantAtk ? g_eAttack : g_eRun;
+            int want = down ? CL_KNOCK : (hurt && !(e->boss && wantAtk && !stag)) ? (e->hitRole>=CL_HIT_HEAD ? e->hitRole : g_eHit) : casting ? CL_CAST : wantAtk ? g_eAttack : g_eRun;
             if (want!=e->clip || (e->rehit && hurt && !down && e->clip!=CL_KNOCK && e->animT>5.0f)){
                 if (want==g_eAttack && e->clip!=g_eAttack && g_audio){                       // lunging into an attack: his own swing, else the shared roar
                     if (EnemyVoice(e, EC_ATTACK, 0.9f, 0.35f)) e->roarT=1.0f;
@@ -3573,6 +3764,14 @@ static void UpdateEnemies(float dt){
                 }
             }
             EnemyPoseBuild(e);
+        } else if (e->state==2 && e->dropping){               // shot off the lip of a breach: back down the shaft, and gone (no body for the priest)
+            const MapHole *H=&g_mapHoles[e->hole]; float k=1.0f-expf(-3.5f*dt);
+            e->pos.x+=(H->pos.x-e->pos.x)*k*0.6f; e->pos.z+=(H->pos.z-e->pos.z)*k*0.6f;
+            e->dropV-=20.0f*dt; e->drawY+=e->dropV*dt;
+            int nf=(RigOf(e->type)->animN>0) ? RigOf(e->type)->settle[e->deathRole?e->deathRole:CL_DEATH] : 0;
+            if (nf>0){ e->animT+=dt*60.0f; if (e->animT>(float)nf) e->animT=(float)nf; }
+            if (e->drawY<H->pos.y-H->depth-2.2f){ e->state=0; e->dropping=0; }
+            else EnemyPoseBuild(e);
         } else if (e->state==2){                              // dying: play the death anim to its settle frame, then leave a corpse
             if (e->blendT>0) e->blendT-=dt;
             { float dy=AngDiff(e->deathYaw,e->yaw), st=Clamp(dy*8.0f*dt,-540.0f*dt,540.0f*dt);   // turned by the shot as he goes down
@@ -3599,9 +3798,9 @@ static void UpdateEnemies(float dt){
         }
     }
     for (int a=0;a<MAX_ENEMIES;a++){            // keep enemies from overlapping each other
-        if (g_enemies[a].state!=1) continue;
+        if (g_enemies[a].state!=1 || g_enemies[a].climbT>0) continue;
         for (int b=a+1;b<MAX_ENEMIES;b++){
-            if (g_enemies[b].state!=1) continue;
+            if (g_enemies[b].state!=1 || g_enemies[b].climbT>0) continue;
             float dx=g_enemies[b].pos.x-g_enemies[a].pos.x;
             float dz=g_enemies[b].pos.z-g_enemies[a].pos.z;
             float d=sqrtf(dx*dx+dz*dz), mind=ENEMY_RADIUS*2.0f;
@@ -3618,7 +3817,7 @@ static void UpdateEnemies(float dt){
 #define PLAYER_BODY_R 0.42f
 static int PlayerIntoEnemy(float nx, float nz){
     for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i];
-        if (e->state!=1 || e->riseT>0 || e->knockT>0) continue;                     // on the floor: step over him
+        if (e->state!=1 || e->riseT>0 || e->knockT>0 || e->climbT>0) continue;      // on the floor (or still in the breach): step over him
         if (fabsf((g_pos.y-EYE_H)-e->pos.y) > ENEMY_HEIGHT) continue;               // another storey
         float mind=PLAYER_BODY_R+ENEMY_RADIUS*(kEnemy[e->type].scale*e->sc);
         float dx=nx-e->pos.x, dz=nz-e->pos.z, d2=dx*dx+dz*dz;
@@ -3632,7 +3831,7 @@ static void Collide(void) {
     float r=0.4f;
     if (g_hasMap){          // map: walls/floor are handled in Update(); here just push out of enemies
         for (int e=0;e<MAX_ENEMIES;e++){
-            if (g_enemies[e].state!=1) continue;
+            if (g_enemies[e].state!=1 || g_enemies[e].climbT>0) continue;             // (still down a breach: nobody stands where he WILL stand yet)
             if (fabsf((g_pos.y-EYE_H)-g_enemies[e].pos.y) > ENEMY_HEIGHT) continue;   // different floor -> ignore
             float dx=g_pos.x-g_enemies[e].pos.x, dz=g_pos.z-g_enemies[e].pos.z;
             float d=sqrtf(dx*dx+dz*dz), mind=r+ENEMY_RADIUS;
@@ -3715,7 +3914,13 @@ static void ShellFeed(Weapon *w, float pvT){
 static void TryReload(void){
     Weapon *w=&g_weapons[g_curWeapon];
     if (g_reloading || w->magSize<=0 || w->mag>=w->magSize || w->reserve<=0) return;
-    if (w->grenade){ g_reloading=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=(float)GL_OPEN_FROM; g_glPhase=1; g_glCut=0; g_glFire=0; g_glSlot=w->mag;
+    if (w->grenade){
+        // Breaking it open works the release, and the release clears ALL SIX chambers (that is what the clip shows: every case
+        // comes out). So the drum really is emptied: the rounds that were still live go back to the reserve and every chamber
+        // is loaded again from the first. (It used to keep the live ones in the count while showing them thrown out -- load
+        // one, fire it, open it again and four grenades were back in a drum that had been seen to empty.)
+        w->reserve+=w->mag; w->mag=0;
+        g_reloading=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=(float)GL_OPEN_FROM; g_glPhase=1; g_glCut=0; g_glFire=0; g_glSlot=0;
         if (g_audio && g_hasGlSnd[0]) PlaySound(g_glSnd[0]);                      // the drum swings open
         return; }
     if (w->crTo>w->crFrom && w->animN>0){               // the reload its own clip holds (minigun: lid up, box out, box in; flamethrower: its pump)
@@ -3812,7 +4017,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     Weapon *cw=&g_weapons[g_curWeapon];
     int firingNow=0;                                       // looped fire sound active this frame?
 
-    { static int uf=0; if (g_reloadAt>0 && ++uf==g_reloadAt){ if (cw->grenade){ cw->mag=0; TryReload(); } else if (getenv("CHERNOBYL_RELOAD_REAL")){ const char *rr=getenv("CHERNOBYL_RELOAD_REAL"); if (!strcmp(rr,"empty")) cw->mag=0; else if (rr[0]=='m') cw->mag=atoi(rr+1); TryReload(); }   /* "m3" = start from 3 in the gun */ else StartReload(); } }   // (the launcher reloads by scrubbing: empty it and take the real path)
+    { static int uf=0; if (g_reloadAt>0 && ++uf==g_reloadAt){ if (cw->grenade){ const char *rr=getenv("CHERNOBYL_RELOAD_REAL"); cw->mag=(rr && rr[0]=='m')?atoi(rr+1):0; TryReload(); } else if (getenv("CHERNOBYL_RELOAD_REAL")){ const char *rr=getenv("CHERNOBYL_RELOAD_REAL"); if (!strcmp(rr,"empty")) cw->mag=0; else if (rr[0]=='m') cw->mag=atoi(rr+1); TryReload(); }   /* "m3" = start from 3 in the gun */ else StartReload(); } }   // (the launcher reloads by scrubbing: empty it and take the real path)
     // shell-fed reload + a round in the tube: the trigger stops loading and fires
     if (g_reloading && cw->grenade && cw->mag>0 && lmbP && !g_glCut){     // launcher: shut the drum on what's in it, then fire
         g_glCut=1; if (g_glPhase!=3){ g_glPhase=3; g_animT=(float)GL_SHUT_FROM; }
@@ -4157,7 +4362,7 @@ static void Update(void) {
     // otherwise open the options menu). Stays captured so play resumes seamlessly.
     if (g_paused){
         if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
-            g_paused=0; DebugLog("pause","\"paused\":false");
+            g_paused=0; g_swallowClick=IsMouseButtonDown(MOUSE_BUTTON_LEFT); DebugLog("pause","\"paused\":false");   // (the click that resumes is not a shot)
         }
         return;
     }
@@ -4286,6 +4491,10 @@ static void Update(void) {
     if (IsKeyDown(KEY_S)){wish=Vector3Subtract(wish,flat);moving=1;}
     if (IsKeyDown(KEY_D)){wish=Vector3Add(wish,right);moving=1;}
     if (IsKeyDown(KEY_A)){wish=Vector3Subtract(wish,right);moving=1;}
+    { static int init=0; static float wx=0, wz=0, jz=1e9f;                 // dev: CHERNOBYL_WALK="dx dz [jumpZ]" -- walk that way every frame, jump once on crossing z=jumpZ (tests the breaches)
+      if (!init){ init=1; const char *v=getenv("CHERNOBYL_WALK"); if (v) sscanf(v,"%f %f %f",&wx,&wz,&jz); }
+      if (wx!=0 || wz!=0){ wish=(Vector3){wx,0,wz}; moving=1;
+          if (jz<1e8f && ((wz<0 && g_pos.z<=jz) || (wz>0 && g_pos.z>=jz))){ g_devJump=1; jz=1e9f; } } }
     if (g_kite){                                        // dev autopilot: face the nearest enemy, back away
         float bd=1e9f; int bi=-1;
         for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1){ float dd=Vector3Distance(g_enemies[k].pos,g_pos); if (dd<bd){ bd=dd; bi=k; } }
@@ -4314,15 +4523,38 @@ static void Update(void) {
         if (g_pos.x<g_mapHall[0]+m) g_pos.x=g_mapHall[0]+m; if (g_pos.x>g_mapHall[2]-m) g_pos.x=g_mapHall[2]-m;
         if (g_pos.z<g_mapHall[1]+m) g_pos.z=g_mapHall[1]+m; if (g_pos.z>g_mapHall[3]-m) g_pos.z=g_mapHall[3]-m;
     }
+    // The breaches in the floor. Walking, he is stopped at the mouth -- a rounded mouth set inside the opening, so its
+    // corners are crossed without a check (the floor is held solid under him there). In the air nothing stops him: a jump
+    // carries him over. Come down short and he catches the lip if it is within reach, else he goes down the shaft; at the
+    // bottom the core burns him and he is thrown back out onto the lip.
+    int inHole=-1; float holeR2=0.0f;
+    if (g_hasMap && !g_noclip && g_nMapHoles>0 && (inHole=HoleAt(g_pos.x,g_pos.z,0.0f))>=0){
+        const MapHole *H=&g_mapHoles[inHole]; float ax=fmaxf(0.3f,H->hx-0.10f), az=fmaxf(0.3f,H->hz-0.10f), lipEye=H->pos.y+EYE_H;
+        float ex=(g_pos.x-H->pos.x)/ax, ez=(g_pos.z-H->pos.z)/az; holeR2=ex*ex+ez*ez;
+        int reach=(holeR2>(1.0f-0.55f/fminf(ax,az))*(1.0f-0.55f/fminf(ax,az)));                               // within about half a metre of the lip
+        int stop=(holeR2<1.0f && holeR2>1e-4f && ((g_grounded && g_pos.y>lipEye-0.25f)                     // walking into the mouth
+                                               || (!g_grounded && g_vy<=0.0f && reach && g_pos.y<lipEye+0.05f && g_pos.y>lipEye-0.75f)));   // falling short, but only just
+        if (stop){ float k=1.0f/sqrtf(holeR2); g_pos.x=H->pos.x+ex*k*ax; g_pos.z=H->pos.z+ez*k*az; holeR2=1.0f;
+            if (!g_grounded){ g_eyeSmooth+=lipEye-g_pos.y; g_pos.y=lipEye; g_vy=0.0f; g_grounded=1; } }
+        else if (g_grounded && g_pos.y<lipEye-1.5f){                                                        // on the bottom, in the light
+            if (!g_godMode) g_playerHp-=25.0f;
+            float dx=g_pos.x-H->pos.x, dz=g_pos.z-H->pos.z; int e=(fabsf(dx)/H->hx>fabsf(dz)/H->hz)?(dx<0?0:1):(dz<0?2:3);
+            g_pos.x=H->pos.x+kEdgeNX[e]*(H->hx+0.6f)+(kEdgeNX[e]==0?dx*0.5f:0.0f); g_pos.z=H->pos.z+kEdgeNZ[e]*(H->hz+0.6f)+(kEdgeNZ[e]==0?dz*0.5f:0.0f);
+            g_pos.y=lipEye; g_vy=0.0f; g_eyeSmooth=0.0f; inHole=-1;
+            DynLightAdd((Vector3){H->pos.x,H->pos.y+0.5f,H->pos.z}, HoleTint(H,3.0f), 12.0f, 0.5f, 0);
+            DebugLog("holefall","\"hole\":%d,\"hp\":%.0f", (int)(H-g_mapHoles), g_playerHp); }
+    }
     if (g_hasMap && g_noclip){                         // F: free-fly / noclip (inspect or escape)
         if (IsKeyDown(KEY_SPACE))        g_pos.y += speed*dt;
         if (IsKeyDown(KEY_LEFT_CONTROL)) g_pos.y -= speed*dt;
         g_vy=0; g_grounded=1;
     } else if (g_hasMap){                               // FPS collision against the loaded map mesh
-        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=6.0f; g_grounded=0;
+        if (g_grounded && (IsKeyPressed(KEY_SPACE) || g_devJump)){ g_vy=6.0f; g_grounded=0; g_devJump=0;
             if (g_audio && g_hasSy){ SetSoundPitch(g_sy[SY_JUMP],0.95f+GetRandomValue(0,12)/100.0f); SetSoundVolume(g_sy[SY_JUMP],0.30f); PlaySound(g_sy[SY_JUMP]); } }
         float dn=MapRayNearest(g_pos,(Vector3){0,-1,0},80.0f);  // eye -> floor distance
         float floorEye = (dn>0) ? g_pos.y-dn+EYE_H : -1e30f;    // eye height standing on that floor
+        if (inHole>=0 && holeR2>=1.0f){ float lipEye=g_mapHoles[inHole].pos.y+EYE_H;                        // over a corner of a breach (or stopped at its mouth): the floor holds
+            if (floorEye<lipEye && g_pos.y>lipEye-0.75f){ floorEye=lipEye; dn=g_pos.y-g_mapHoles[inHole].pos.y; } }
         const float STEP=0.7f;                                  // auto climb/descend up to this height
         if (g_vy<=0.0f && dn>0 && (g_pos.y-floorEye)<=STEP){
             // grounded (or within a step of the floor): glue the feet to it,
@@ -4372,7 +4604,8 @@ static void Update(void) {
     }
 
     // shooting / reload
-    WeaponTrigger(dt, fwd, IsMouseButtonDown(MOUSE_BUTTON_LEFT), IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+    if (g_swallowClick && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_swallowClick=0;                // the button that un-paused has come up: the trigger is live again
+    WeaponTrigger(dt, fwd, !g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT), !g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
 
     UpdateEnemies(dt);
     UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
@@ -4521,6 +4754,45 @@ static void Update(void) {
     if (g_appearCd>0) g_appearCd-=dt;                          // nobody in sight, then somebody: the sting (as ../Chernobyl)
     if (g_seenNow>0 && g_seenPrev==0 && g_appearCd<=0.0f && g_audio && g_hasAppearSnd && !g_dead){
         SetSoundVolume(g_appearSnd,0.55f); PlaySound(g_appearSnd); g_appearCd=6.0f; DebugLog("appear","\"n\":%d", g_seenNow); }
+    {   // ---- Moments, voiced (each a recording in assets/, each only SOMETIMES: a roll when its moment comes, then a long rest) ----
+        static float unseenT=0, calmT=0, fleeT=0, sightCd=0, fleeCd=10, tenseCd=10, prevHp=100; static int lastKills=0;
+        if (g_seenNow>0) unseenT=0; else unseenT+=dt;
+        if (g_seenNow>0 || g_playerHp<prevHp-0.5f || g_kills!=lastKills) calmT=0; else calmT+=dt;       // an "engagement": one in sight, a hit taken, a kill
+        prevHp=g_playerHp; lastKills=g_kills;
+        if (sightCd>0) sightCd-=dt; if (fleeCd>0) fleeCd-=dt; if (tenseCd>0) tenseCd-=dt;
+        int live=(!g_dead && !g_paused && !g_menu && g_wave>0);
+        // nobody in sight for a good while, then somebody: the fright
+        if (live && g_hasCueSight && g_seenNow>0 && g_seenPrev==0 && g_cueUnseen>8.0f && sightCd<=0.0f){
+            int go=GetRandomValue(0,99)<45; if (go && g_audio){ SetSoundVolume(g_cueSight,0.6f); PlaySound(g_cueSight); }
+            sightCd=go?40.0f:10.0f; DebugLog("cue","\"what\":\"sight\",\"play\":%d",go); }
+        g_cueUnseen=unseenT;
+        // running from a pack: moving, three or more inside 14 m and every one of them behind him
+        { Vector3 fw={sinf(g_yaw),0,cosf(g_yaw)}; int back=0, front=0;
+          for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i]; if (e->state!=1 || e->climbT>0 || e->riseT>0) continue;
+              float dx=e->pos.x-g_pos.x, dz=e->pos.z-g_pos.z, d=sqrtf(dx*dx+dz*dz); if (d>14.0f) continue;
+              if (dx*fw.x+dz*fw.z<-0.25f*d) back++; else front++; }
+          fleeT=(back>=3 && front==0 && g_playerMoveAmt>0.7f) ? fleeT+dt : 0.0f;
+          if (live && g_hasCueFlee && fleeT>1.2f && fleeCd<=0.0f){
+              int go=GetRandomValue(0,99)<40; if (go && g_audio){ SetSoundVolume(g_cueFlee,0.7f); PlaySound(g_cueFlee); }
+              fleeCd=go?50.0f:12.0f; fleeT=0; DebugLog("cue","\"what\":\"flee\",\"play\":%d,\"back\":%d",go,back); } }
+        // on the move through an empty plant: nothing seen, nothing fought, for eight seconds
+        if (live && g_hasCueTense && calmT>8.0f && unseenT>8.0f && g_playerMoveAmt>0.7f && tenseCd<=0.0f){
+            int go=GetRandomValue(0,99)<35; if (go && g_audio){ SetSoundVolume(g_cueTense,0.6f); PlaySound(g_cueTense); }
+            tenseCd=go?90.0f:8.0f; DebugLog("cue","\"what\":\"tension\",\"play\":%d",go); }
+        // the boss's own music: from the moment he is first SEEN (in the view, nothing between) until he is dead
+        { static int on=-1; static float vol=0; int bi=-1;
+          for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==1 && g_enemies[i].boss){ bi=i; break; }
+          if (bi<0 || g_dead) g_bossSeen=0;
+          else if (!g_bossSeen){ const Enemy *e=&g_enemies[bi]; Vector3 eye=g_cam.position, to={e->pos.x+e->hitOff.x-eye.x, e->pos.y+e->hitOff.y+1.2f-eye.y, e->pos.z+e->hitOff.z-eye.z};
+              float L=Vector3Length(to); Vector3 fw=Vector3Normalize(Vector3Subtract(g_cam.target,g_cam.position));
+              if (L>0.1f && Vector3DotProduct(to,fw)/L>0.72f){ float hit=(g_hasMap && g_mapCol.ready)?MapRayNearest(eye,Vector3Scale(to,1.0f/L),L):0.0f;
+                  if (!(hit>0.0f && hit<L-0.6f)){ g_bossSeen=1; DebugLog("cue","\"what\":\"bosstheme\",\"wave\":%d",g_wave); } } }
+          int want=(g_bossSeen && g_nBossTheme>0 && g_audio && !g_paused && !g_menu) ? ((g_wave>0?g_wave-1:0)%g_nBossTheme) : -1;
+          if (on>=0 && want!=on){ vol-=dt*0.5f; if (vol<=0.0f){ StopSound(g_bossTheme[on]); on=-1; vol=0; } else SetSoundVolume(g_bossTheme[on],vol); }
+          else if (want>=0){ if (on<0){ on=want; vol=0.0f; PlaySound(g_bossTheme[on]); }
+              else if (!IsSoundPlaying(g_bossTheme[on])) PlaySound(g_bossTheme[on]);                      // it goes round for as long as he lives
+              vol+=(0.55f-vol)*fminf(1.0f,dt*1.5f); SetSoundVolume(g_bossTheme[on],vol); } }
+    }
     g_seenPrev=g_seenNow;
     for (int t=0;t<EN_NTYPES;t++) for (int c=0;c<EC_N;c++) if (g_eCueCd[t][c]>0) g_eCueCd[t][c]-=dt;
     if (g_audio && g_hasRunSnd){                               // running feet: the nearest hostile actually running at him
@@ -4546,6 +4818,17 @@ static void Update(void) {
             n++; if (dx*fw.x+dz*fw.z>=0) ahead++; else behind++; }
         if (n>=SURR_N && ahead>0 && behind>0){ SetSoundVolume(g_surrSnd,0.85f); PlaySound(g_surrSnd); g_surrCd=25.0f; DebugLog("surrounded","\"n\":%d", n); }
     }
+    // ...and now and then, as a pack really bears down on him -- five or more on their feet inside 14 m and RUNNING AT him --
+    // the horn (assets/mob_horn.mp3). Not every time: two chances in five when it could, then quiet for over a minute.
+    { static float hornCd=8.0f; if (hornCd>0) hornCd-=dt;
+      if (hornCd<=0.0f && g_hasHornSnd && !g_dead && !IsSoundPlaying(g_hornSnd)){
+          int n=0; for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i];
+              if (e->state!=1 || e->riseT>0 || e->knockT>0 || e->climbT>0) continue;
+              float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z, d=sqrtf(dx*dx+dz*dz); if (d>14.0f || d<1e-3f) continue;
+              if ((e->mv.x*dx+e->mv.z*dz)/d>1.2f) n++; }                                  // closing at better than a walk
+          if (n>=5){ int go=GetRandomValue(0,99)<40;
+              if (go && g_audio){ SetSoundVolume(g_hornSnd,0.6f); PlaySound(g_hornSnd); }
+              hornCd=go?75.0f:10.0f; DebugLog("horn","\"n\":%d,\"play\":%d", n, go); } } }
     if (g_mobCd>0) g_mobCd-=dt;                                // a pack charging: MOB_N or more up and closing inside MOB_RANGE
     if (g_mobCd<=0.0f && g_audio && g_hasMobSnd && !g_dead && !IsSoundPlaying(g_mobSnd)){
         int n=0; for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i];
@@ -4765,7 +5048,7 @@ static void DrawEnemies(void){
                     (Vector3){esc,esc,esc}, kEnemy[e->type].tint);
         {   // a tight dark core at the feet inside a wide soft penumbra; it spreads as the body goes down
             float sk=(kEnemy[e->type].scale*e->sc)*(e->state==2?1.45f:1.0f);
-            GroundBlob(dpos, 0.95f*sk, 0.42f); GroundBlob(dpos, 0.50f*sk, e->state==2?0.30f:0.50f);
+            if (!e->dropping && !(e->climbT>0 && e->hitOff.y<-0.5f)){ GroundBlob(dpos, 0.95f*sk, 0.42f); GroundBlob(dpos, 0.50f*sk, e->state==2?0.30f:0.50f); }   // (no shadow on the floor from a man still down the shaft)
         }
         if (e->burnN>0) DrawBurnMarks(dpos, 1.0f, e->burnY, e->burnR, e->burnN);   // localised char where the flame touched
         if (rg->animN>0){                                     // remember the pose shown (new wounds go on it), draw the old ones
@@ -5286,11 +5569,12 @@ static void DrawMinimap(int W, int H){
         float wx=e->pos.x-g_pos.x, wz=e->pos.z-g_pos.z, sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp;
         if (sy<0 && wx*wx+wz*wz<12.0f*12.0f) rear=1;
         float d2=sx*sx+sy*sy, lim=(float)((R-4)*(R-4));
-        if (d2>=lim){ if (!e->boss) continue; float k=sqrtf(lim/d2); sx*=k; sy*=k; }   // the boss is always on the dial, pinned to its rim
+        int far=(d2>=lim); if (far){ float k=sqrtf(lim/d2); sx*=k; sy*=k; }   // beyond the dial's reach: pinned to its rim, in his direction -- every hostile left can be found
         static const Color kDot[EN_NTYPES]={ {235,230,220,255},{235,230,220,255},{200,120,110,255},{200,200,150,255},{255,200,80,255},
                                              {120,175,85,255},{120,175,85,255},{150,235,90,255},{175,95,210,255},{255,135,45,255},{225,60,95,255} };
         Color col=kDot[e->type]; int px=cx+(int)sx, py=cy-(int)sy;
         if (e->boss){ DrawCircle(px,py,7,(Color){255,200,80,255}); DrawCircleLines(px,py,10,(Color){255,90,70,255}); }
+        else if (far){ DrawCircle(px,py,3,Fade(col,0.85f)); DrawCircleLines(px,py,5,Fade(col,0.45f)); }      // (smaller, ringed: a bearing, not a position)
         else DrawCircle(px,py,e->riseT>0?3:4,e->riseT>0?Fade(col,0.55f):col);
     }
     if (rear){ float pu=0.5f+0.5f*sinf((float)GetTime()*6.0f); unsigned char a=(unsigned char)(40+60*pu);   // something close behind: the rear half glows
@@ -5311,7 +5595,7 @@ static void DrawHUD(void) {
     // boss bar (../chernobyl interlude): wide, top-centre, names the boss
     for (int i=0;i<MAX_ENEMIES;i++){ Enemy *e=&g_enemies[i];
         if (!e->boss || e->state!=1) continue;
-        int bw=W/2, bx=W/4, by=46; float f=fmaxf(0.0f,e->hp/e->maxHp);
+        int bw=W/2, bx=W/4, by=46+HudTop(); float f=fmaxf(0.0f,e->hp/e->maxHp);
         DrawRectangle(bx-3,by-3,bw+6,24,(Color){0,0,0,180});
         DrawRectangle(bx,by,(int)(bw*f),18,(Color){200,30,30,255});
         DrawRectangleLines(bx-3,by-3,bw+6,24,(Color){255,200,80,220});
@@ -5387,8 +5671,8 @@ static void DrawHUD(void) {
             snprintf(wb,sizeof wb, g_waveBudget>0 ? "WAVE %d  -  %d hostiles +" : "WAVE %d  -  %d hostiles", g_wave, alive);
         }
         int wfs=24, ww=MeasureText(wb,wfs);
-        DrawText(wb, W/2-ww/2+2, 14+2, wfs, (Color){0,0,0,180});
-        DrawText(wb, W/2-ww/2,   14,   wfs, (Color){255,210,60,255});
+        DrawText(wb, W/2-ww/2+2, 14+HudTop()+2, wfs, (Color){0,0,0,180});
+        DrawText(wb, W/2-ww/2,   14+HudTop(),   wfs, (Color){255,210,60,255});
     }
     if (g_dead){                                                   // run results: death ends the run
         const char *t="YOU DIED"; int fs=72, tw=MeasureText(t,fs);
@@ -5790,15 +6074,146 @@ static void DrawReactorFX(void){
     EndBlendMode();
     rlEnableDepthMask();
 }
+// ---- The breaches in the floor: the same light, come up through the plant from below ---------
+// Each "info_hole" has its own strength, tint and mix of smoke / motes / shafts (the map says), and breathes on its
+// own clock, so no two read alike. Far ones, and ones behind a wall, are only their glow.
+static float HoleBreath(const MapHole *h, float t){ return 0.80f+0.20f*RxNoise(t+h->seed*7.3f,0.45f+0.02f*(h->seed%9)); }
+// Radiation, heard: near a breach one of the radiation recordings plays (assets/radiation_1.mp3 .. _8.mp3 -- drop more in and
+// they join the pool), louder the closer the lip, another picked each time one ends. Away from every breach it fades out.
+#define MAX_RADSND 8
+static Sound g_radSnd[MAX_RADSND]; static int g_nRadSnd=0, g_radCur=-1; static float g_radVol=0.0f;
+static void HoleAudio(void){
+    if (g_nRadSnd<=0) return;
+    float want=0.0f;
+    if (g_audio && g_hasMap && !g_paused && !g_dead && !g_menu) for (int i=0;i<g_nMapHoles;i++){ const MapHole *h=&g_mapHoles[i];
+        float dx=fmaxf(0.0f,fabsf(g_pos.x-h->pos.x)-h->hx), dz=fmaxf(0.0f,fabsf(g_pos.z-h->pos.z)-h->hz), dy=(g_pos.y-EYE_H)-h->pos.y;
+        float d=sqrtf(dx*dx+dz*dz+dy*dy*0.25f), v=1.0f-d/12.0f; if (v>0.0f){ v=(0.04f+0.96f*powf(v,2.4f))*(0.6f+0.4f*h->fx[0]); if (v>want) want=v; } }   // from the LIP: a murmur at twelve metres, climbing steeply, full at the edge
+    g_radVol+=(want-g_radVol)*fminf(1.0f,GetFrameTime()*(want>g_radVol?5.0f:2.5f));
+    if (g_radVol<0.01f){ if (g_radCur>=0){ StopSound(g_radSnd[g_radCur]); g_radCur=-1; } return; }
+    if (g_radCur<0 || !IsSoundPlaying(g_radSnd[g_radCur])){
+        int nx=GetRandomValue(0,g_nRadSnd-1); if (g_nRadSnd>1 && nx==g_radCur) nx=(nx+1)%g_nRadSnd;
+        g_radCur=nx; SetSoundPitch(g_radSnd[nx],0.96f+GetRandomValue(0,8)/100.0f); PlaySound(g_radSnd[nx]); }
+    SetSoundVolume(g_radSnd[g_radCur], g_radVol);
+}
+// A boss in your face: a drone comes up under everything once he is within arm's length and a bit, holds while he stays
+// close, and sinks away when he is driven off or dies (assets/boss_close.mp3; it starts over each time he closes in).
+static Sound g_bossCloseSnd; static int g_hasBossClose=0; static float g_bossCloseVol=0.0f; static int g_bossCloseOn=0;
+static void BossCloseAudio(void){
+    if (!g_hasBossClose) return;
+    float bd=1e9f;
+    if (!g_paused && !g_dead && !g_menu) for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i];
+        if (e->state!=1 || !e->boss || e->climbT>0) continue;
+        float d=hypotf(e->pos.x-g_pos.x,e->pos.z-g_pos.z)-ENEMY_RADIUS*kEnemy[e->type].scale*e->sc; if (d<bd) bd=d; }
+    if (!g_bossCloseOn && bd<4.0f){ g_bossCloseOn=1; DebugLog("bossclose","\"d\":%.1f",bd); }   // in: inside four metres of his body
+    if (g_bossCloseOn && bd>9.0f) g_bossCloseOn=0;                        // out: only once he is well off again (no flutter at the edge)
+    float want=(g_bossCloseOn && g_audio)?0.85f:0.0f;
+    g_bossCloseVol+=(want-g_bossCloseVol)*fminf(1.0f,GetFrameTime()*(want>g_bossCloseVol?3.0f:1.2f));
+    if (g_bossCloseVol<0.01f){ if (IsSoundPlaying(g_bossCloseSnd)) StopSound(g_bossCloseSnd); return; }
+    if (!IsSoundPlaying(g_bossCloseSnd)) PlaySound(g_bossCloseSnd);
+    SetSoundVolume(g_bossCloseSnd, g_bossCloseVol);
+}
+// Somewhere in the plant, and beyond it, alarms still sound: now and then (every minute and a half to four minutes of a run,
+// never on a schedule) a few seconds cut at a random place from one of the distant recordings (assets/distant_1.mp3 .. _6.mp3:
+// the nuclear alarm, the air-raid siren -- drop more in and they join), faded in and out, well back in the mix.
+#define MAX_DISTANT 6
+static Wave g_alarmWave[MAX_DISTANT]; static int g_nAlarmWave=0; static Sound g_alarmSnd; static int g_alarmLive=0, g_alarmLast=-1; static float g_alarmIn=-1.0f;
+static void AlarmAudio(void){
+    if (g_nAlarmWave<=0) return;
+    if (g_alarmIn<0.0f) g_alarmIn=getenv("CHERNOBYL_ALARM_TEST")?2.0f:45.0f+GetRandomValue(0,60);   // (dev: CHERNOBYL_ALARM_TEST=1 -> the first one two seconds in)
+    if (g_paused || g_dead || g_menu || g_wave<=0) return;
+    g_alarmIn-=GetFrameTime(); if (g_alarmIn>0.0f) return;
+    g_alarmIn=90.0f+GetRandomValue(0,150);
+    if (g_alarmLive){ if (IsSoundPlaying(g_alarmSnd)) return; UnloadSound(g_alarmSnd); g_alarmLive=0; }
+    int k=GetRandomValue(0,g_nAlarmWave-1); if (g_nAlarmWave>1 && k==g_alarmLast) k=(k+1)%g_nAlarmWave;       // not the same one twice running
+    g_alarmLast=k; const Wave *src=&g_alarmWave[k];
+    int sr=(int)src->sampleRate, total=(int)src->frameCount, len=(int)(sr*(4.5f+GetRandomValue(0,45)/10.0f)); if (len>total) len=total;
+    int a=GetRandomValue(0,total-len); Wave w=WaveCopy(*src); WaveCrop(&w,a,a+len);
+    short *d=(short*)w.data; int ch=(int)w.channels, fade=sr*7/10; if (fade*2>len) fade=len/2;
+    for (int i=0;i<fade;i++){ float f=(float)i/(float)fade; for (int c=0;c<ch;c++){ d[i*ch+c]=(short)(d[i*ch+c]*f); d[(len-1-i)*ch+c]=(short)(d[(len-1-i)*ch+c]*f); } }
+    g_alarmSnd=LoadSoundFromWave(w); UnloadWave(w); g_alarmLive=(g_alarmSnd.frameCount>0);
+    if (g_alarmLive && g_audio){ SetSoundVolume(g_alarmSnd,0.42f); SetSoundPan(g_alarmSnd,0.25f+GetRandomValue(0,50)/100.0f); PlaySound(g_alarmSnd); }
+    DebugLog("alarm","\"which\":%d,\"from\":%.1f,\"len\":%.1f,\"next\":%.0f",k,(float)a/sr,(float)len/sr,g_alarmIn);
+}
+// The control posts round the plant are still live: come up to one and it sounds (assets/panel_1.mp3 .. _12.mp3 -- drop more
+// in and they join the pool; each post keeps its own, by its place in the map). Faint from eight metres off, loud standing at it.
+#define MAX_PANELSND 12
+static Sound g_panelSnd[MAX_PANELSND]; static int g_nPanelSnd=0, g_panelCur=-1; static float g_panelVol=0.0f;
+static void PanelAudio(void){
+    if (g_nPanelSnd<=0 || g_nMapPanels<=0) return;
+    float want=0.0f; int near=-1;
+    if (g_audio && g_hasMap && !g_paused && !g_dead && !g_menu) for (int i=0;i<g_nMapPanels;i++){
+        float d=Vector3Distance(g_mapPanels[i],(Vector3){g_pos.x,g_pos.y-0.4f,g_pos.z}), v=1.0f-(d-1.2f)/7.0f; if (v>1.0f) v=1.0f;                                     // a murmur at eight metres, climbing steeply, full standing at it
+        if (v>0.0f){ v=0.04f+0.96f*powf(v,2.4f); if (v>want){ want=v; near=i; } } }
+    want*=0.8f;
+    int snd=(near>=0)?(near*7+3)%g_nPanelSnd:g_panelCur;
+    if (g_panelCur>=0 && snd!=g_panelCur && g_panelVol>0.02f) want=0.0f;                 // walked from one post to the next: let the first die away before the other starts
+    g_panelVol+=(want-g_panelVol)*fminf(1.0f,GetFrameTime()*(want>g_panelVol?4.0f:3.0f));
+    if (g_panelVol<0.01f){ if (g_panelCur>=0){ StopSound(g_panelSnd[g_panelCur]); g_panelCur=-1; } if (near<0 || want<=0.0f) return; }
+    if (g_panelCur<0){ g_panelCur=snd; PlaySound(g_panelSnd[snd]); }
+    else if (!IsSoundPlaying(g_panelSnd[g_panelCur])) PlaySound(g_panelSnd[g_panelCur]);       // still standing at it: it goes round again
+    SetSoundVolume(g_panelSnd[g_panelCur], g_panelVol);
+}
+static void HoleLights(void){
+    HoleAudio(); BossCloseAudio(); AlarmAudio(); PanelAudio();
+    if (!g_hasMap || g_nMapHoles<=0) return;
+    float t=(float)GetTime(); int pick[3]; float pd[3]; int n=0;
+    for (int i=0;i<g_nMapHoles;i++){ float d=Vector3Distance(g_mapHoles[i].pos,g_cam.position); if (d>25.0f) continue;
+        int k=n; while (k>0 && pd[k-1]>d) k--;
+        if (k>=3) continue;
+        int last=(n<3)?n:2; for (int j=last;j>k;j--){ pick[j]=pick[j-1]; pd[j]=pd[j-1]; }
+        pick[k]=i; pd[k]=d; if (n<3) n++; }
+    for (int j=0;j<n;j++){ const MapHole *h=&g_mapHoles[pick[j]]; float f=HoleBreath(h,t)*(0.55f+0.45f*h->fx[0]);
+        DynLightAdd((Vector3){h->pos.x,h->pos.y-0.45f,h->pos.z}, HoleTint(h,f), 6.5f+4.5f*h->fx[0], 0.25f, 1); }
+}
+static void DrawHoleFX(void){
+    if (!g_hasMap || g_nMapHoles<=0 || !g_hasSmokeTex) return;
+    float t=(float)GetTime(); Vector3 cam=g_cam.position;
+    rlDisableDepthMask();
+    for (int i=0;i<g_nMapHoles;i++){ const MapHole *h=&g_mapHoles[i]; Vector3 p=h->pos;
+        float d=Vector3Distance(p,cam); if (d>45.0f) continue;
+        float w=2.0f*fminf(h->hx,h->hz), W=2.0f*fmaxf(h->hx,h->hz), f=HoleBreath(h,t)*(0.5f+0.5f*h->fx[0]), far=1.0f-fminf(1.0f,fmaxf(0.0f,(d-35.0f)/10.0f));
+        int full=(d<22.0f);
+        if (full && g_mapCol.ready){ Vector3 q={p.x,p.y+1.0f,p.z}, dl=Vector3Subtract(q,cam); float dd=Vector3Length(dl);
+            if (dd>0.8f){ float hit=MapRayNearest(cam,Vector3Scale(dl,1.0f/dd),dd-0.2f); if (hit>0.0f && hit<dd-0.4f) full=0; } }
+        Vector3 c=HoleTint(h,150.0f*f*far);
+        if (full){ int ns=(int)(h->fx[2]*4.0f+0.5f);                                   // smoke: slow dark rolls out of the mouth
+            for (int k=0;k<ns;k++){ float ph=fmodf(t*0.07f+k/(float)ns+h->seed*0.37f,1.0f), a=k*2.4f+h->seed+t*0.06f;
+                Vector3 q={p.x+cosf(a)*h->hx*0.45f, p.y-0.6f+ph*4.2f, p.z+sinf(a)*h->hz*0.45f};
+                DrawBillboard(g_cam, g_smokeTex, q, w*(0.55f+ph*0.75f), (Color){16,18,24,(unsigned char)(62.0f*sinf(ph*PI))}); } }
+        BeginBlendMode(BLEND_ADDITIVE);
+        for (int k=0;k<3;k++){ float g=1.0f-k*0.28f;                                    // the glow in the shaft, brightest at the bottom
+            DrawBillboard(g_cam, g_smokeTex, (Vector3){p.x,p.y-h->depth*(0.85f-0.4f*k),p.z}, W*(1.25f-0.15f*k), (Color){(unsigned char)(c.x*g),(unsigned char)(c.y*g),(unsigned char)(c.z*g),255}); }
+        DrawBillboard(g_cam, g_smokeTex, (Vector3){p.x,p.y+0.15f,p.z}, W*1.25f*(1.0f+0.05f*sinf(t*0.8f+h->seed)), (Color){(unsigned char)(c.x*0.42f),(unsigned char)(c.y*0.42f),(unsigned char)(c.z*0.42f),255});   // spilling over the lip
+        DrawBillboard(g_cam, g_smokeTex, (Vector3){p.x,p.y+1.3f,p.z}, W*1.7f, (Color){(unsigned char)(c.x*0.16f),(unsigned char)(c.y*0.16f),(unsigned char)(c.z*0.16f),255});                               // and hanging in the air above
+        if (full){ int nsh=(int)(h->fx[4]*3.0f+0.5f), nm=(int)(h->fx[3]*14.0f+0.5f);
+            for (int k=0;k<nsh;k++){                                                 // shafts standing in the dust
+                float a=k*2.1f+h->seed, sway=0.12f*sinf(t*0.23f+k*1.9f+h->seed), sw=(0.20f+0.12f*RxNoise(t+k*3.1f+h->seed,0.6f));
+                Vector3 q={p.x+cosf(a)*h->hx*0.5f+sway, p.y+2.1f, p.z+sinf(a)*h->hz*0.5f};
+                DrawBillboardPro(g_cam, g_smokeTex, (Rectangle){0,0,(float)g_smokeTex.width,(float)g_smokeTex.height}, q, (Vector3){0.07f*sinf(k*1.3f+h->seed),1.0f,0.06f*cosf(k*2.1f)},
+                                 (Vector2){0.55f+0.2f*(k%2),5.2f}, (Vector2){0.3f,2.6f}, 0.0f, (Color){(unsigned char)(c.x*sw),(unsigned char)(c.y*sw),(unsigned char)(c.z*sw),255}); }
+            for (int k=0;k<nm;k++){                                                  // motes carried up on the heat
+                float s1=sinf((k+h->seed*17)*12.9898f)*43758.547f, r1=s1-floorf(s1), s2=sinf((k+h->seed*17)*78.233f)*12543.123f, r2=s2-floorf(s2), s3=sinf((k+h->seed*17)*39.425f)*9631.71f, r3=s3-floorf(s3);
+                float ph=fmodf(t*(0.06f+0.08f*r1)+r2,1.0f), a=r3*6.2832f+t*0.2f*(r1-0.5f);
+                Vector3 q={p.x+cosf(a)*h->hx*r2*(0.7f+0.5f*ph)+0.12f*sinf(t*0.9f+k), p.y-1.2f+ph*5.0f, p.z+sinf(a)*h->hz*r2*(0.7f+0.5f*ph)+0.12f*cosf(t*0.7f+k*1.7f)};
+                float fade=sinf(ph*PI)*(0.6f+0.4f*sinf(t*(3.0f+5.0f*r1)+k)); int hot=((k+h->seed)%6==0);
+                Color mc= hot ? (Color){(unsigned char)(255*fade),(unsigned char)(150*fade),(unsigned char)(50*fade),255}
+                              : (Color){(unsigned char)fminf(255.0f,c.x*1.6f*fade),(unsigned char)fminf(255.0f,c.y*1.4f*fade),(unsigned char)(255*fade),255};
+                DrawBillboard(g_cam, g_smokeTex, q, 0.05f+0.08f*r3, mc); } }
+        EndBlendMode();
+    }
+    rlEnableDepthMask();
+}
 static void DrawScene(void){
     ClearBackground((Color){70,90,110,255});
     if (g_hasMap) DrawSky();                  // gradient sky shows through the map's sky openings
     rlSetClipPlanes(0.08, 400.0);             // the world: a tight depth range (the default 0.05..4000 spends its precision on nothing; the hall is 150 m)
     ReactorLight();                           // (before the world is drawn: it is one of this frame's lights)
+    HoleLights();
     AtmosUpdate(GetFrameTime());              // which lamps stand in the fog this frame (after the lights above are in)
     BeginMode3D(g_cam);
         DrawWorld();
         DrawReactorFX();
+        DrawHoleFX();
         DrawDust();
         DrawEnemies();
         DrawPickups();
@@ -5808,10 +6223,12 @@ static void DrawScene(void){
     if (g_inspect && !g_noEnemies) DrawInspect();
     DrawViewmodel();
 }
+static void LoadPump(void);
 static void Frame(void) {
     static int frameNo=0;
     if (g_debug && frameNo>30 && g_perfN<4096) g_perfDt[g_perfN++]=GetFrameTime();
     AudioBedUpdate(GetFrameTime());
+    LoadPump();                                   // (staged loading: an enemy that has finished loading joins the game)
     Update();
     g_fogOn=g_hasMap;
     int post=!g_postOff;
@@ -6038,10 +6455,28 @@ static float PickOpenYaw(Vector3 eye){
 static void RunResetExtras(void){                     // in-flight things and pickups from the last run
     memset(g_gren,0,sizeof g_gren); memset(g_sparks,0,sizeof g_sparks); PickupsReset();
 }
+// The first map is loaded BEFORE the title intro (main), under the loading card, so the game starts the moment
+// the intro is left: loading it after left seconds of black between the two. StartSelectedMap takes it from here.
+static Model g_preMap; static int g_preMapOK=0; static char g_prePath[300];
+static float LoadProgress(void); static void LoadBar(float y);
+static void LoadingFrame(void){                        // the title, dimmed, and the bar: shown while the models and the map load
+#if !defined(__EMSCRIPTEN__) && !defined(C2_IOS)
+    static Texture2D t; static int tried=0;
+    if (!tried){ tried=1; if (FileExists("assets/intro_title.png")){ t=LoadTexture("assets/intro_title.png"); if (t.id) SetTextureFilter(t,TEXTURE_FILTER_BILINEAR); } }
+    for (int pass=0;pass<2;pass++){                    // (both buffers)
+        BeginDrawing(); ClearBackground(BLACK);
+        float sw=(float)GetScreenWidth(), sh=(float)GetScreenHeight();
+        if (t.id){ float k=fminf(sw/t.width,sh/t.height), w=t.width*k, h=t.height*k;
+            DrawTexturePro(t,(Rectangle){0,0,(float)t.width,(float)t.height},(Rectangle){(sw-w)*0.5f,(sh-h)*0.5f,w,h},(Vector2){0,0},0,(Color){70,70,70,255}); }
+        LoadBar(0.90f);
+        EndDrawing(); }
+#endif
+}
 static void StartSelectedMap(void){
     StopAllSfx();                                      // a fresh run starts quiet
     if (g_mapPath){
-        g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
+        if (g_preMapOK && !strcmp(g_prePath,g_mapPath)){ g_map=g_preMap; g_hasMap=1; g_preMapOK=0; }
+        else g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
         int tt=0; for(int mi=0;mi<g_map.meshCount;mi++) tt+=g_map.meshes[mi].triangleCount;
         DebugLog("map","\"path\":\"%s\",\"ok\":%s,\"textures\":%d,\"tris\":%d,\"lights\":%d,\"bake_sec\":%.2f",
                  JStr(g_mapPath), g_hasMap?"true":"false", g_map.meshCount, tt, g_nMapLights, g_mapAOsec);
@@ -6117,7 +6552,16 @@ static void StartSelectedMap(void){
         MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
         { const char *at=getenv("CHERNOBYL_AT"); float ax=0, az=0;                                     // dev: stand here instead (metres, map x z) -- map stills
           if (at && sscanf(at,"%f %f",&ax,&az)==2){ g_pos.x=ax; g_pos.z=az; g_devOverlay=0; g_noEnemies=1; } }
-        DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d", g_navNX, g_navNZ, g_navCount, g_navOK);
+        if (g_holeView>=0 && g_holeView<g_nMapHoles){                                                 // dev: stand off a side they do NOT climb over, looking in
+            const MapHole *h=&g_mapHoles[g_holeView]; static const float nx[4]={-1,1,0,0}, nz[4]={0,0,-1,1}; int best=-1; float bestD=0;
+            for (int e=0;e<4;e++){
+                Vector3 o={h->pos.x,h->pos.y+1.5f,h->pos.z}; float hit=MapRayNearest(o,(Vector3){nx[e],0,nz[e]},9.0f), dd=(hit>0.0f)?hit:9.0f;
+                if (dd+((h->edges&(1<<e))?0.0f:1.5f)>bestD){ bestD=dd+((h->edges&(1<<e))?0.0f:1.5f); best=e; } }
+            bestD=MapRayNearest((Vector3){h->pos.x,h->pos.y+1.5f,h->pos.z},(Vector3){nx[best],0,nz[best]},9.0f); if (!(bestD>0.0f)) bestD=9.0f;
+            float dist=fminf(bestD-0.8f, (nx[best]!=0?h->hx:h->hz)+4.6f);
+            g_pos.x=h->pos.x+nx[best]*dist; g_pos.z=h->pos.z+nz[best]*dist;
+            g_yaw=atan2f(-nx[best],-nz[best]); g_pitch=-0.42f; g_devOverlay=0; }
+        DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d,\"holes\":%d", g_navNX, g_navNZ, g_navCount, g_navOK, g_nMapHoles);
         g_spawnResetPos=g_pos; g_voidY=-12.0f;        // below the lowest floor (normalised to y=0) -> fell off
     } else { g_pos=(Vector3){0,EYE_H,6}; g_voidY=-1e9f; }
 
@@ -6188,129 +6632,33 @@ static void WebFrame(void){
     if (g_returnToMenu){ g_returnToMenu=0; EndCurrentMap(); g_mapPath=DEFAULT_MAP; StartSelectedMap(); }
 }
 #endif
-#include "intro.h"                      // title intro (archival montage + Hell March)
-#include "viewer.h"                     // --viewer: side-by-side enemy model comparison
-#include "soundboard.h"                 // --sounds: every sound, grouped, playable, with the gaps marked
-
-#if defined(C2_IOS)
-static int C2Main(int argc, char **argv) {       // the bridge is main() there; this runs once, up to the first frame
-#else
-int main(int argc, char **argv) {
-#endif
-    int vmWeapon=-1; float vmOv[7]={0}; int vmHas=0;          // dev: --weapon / --vm framing overrides
-    unsigned int seedArg=0; int seedSet=0;                    // --seed N : deterministic runs
-    int fpsOv=-1;                                             // --fps N : target-fps override (perf gate)
-    for (int i=1;i<argc;i++){
-        if (!strcmp(argv[i],"--debug")) g_debug=1;
-        else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--seed") && i+1<argc){ seedArg=(unsigned int)strtoul(argv[++i],NULL,10); seedSet=1; }
-        else if (!strcmp(argv[i],"--autofire")) g_autoFire=1;
-        else if (!strcmp(argv[i],"--sounds")) g_soundboard=1;        // dev: the sound board (soundboard.h)
-        else if (!strcmp(argv[i],"--mute")) g_mute=1;
-        else if (!strcmp(argv[i],"--no-post")) g_postOff=1;          // draw straight to the screen: no bloom / grade / grain
-        else if (!strcmp(argv[i],"--boss-wave") && i+1<argc){ g_devBoss=atoi(argv[++i]); if (g_devBoss<1) g_devBoss=1; }   // dev: straight to wave N's boss
-        else if (!strcmp(argv[i],"--boss")) g_devBoss=1;                // dev: straight to the boss interlude
-        else if (!strcmp(argv[i],"--corpses") && i+1<argc) g_devCorpses=atoi(argv[++i]);   // dev: pre-placed corpses
-        else if (!strcmp(argv[i],"--enemy") && i+1<argc){                   // only spawn this enemy type (cook/linecook/butcher/liquidator/headchef)
-            const char *nm=argv[++i];
-            for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) g_forceEnemy=t;
-            if (!strcmp(nm,"all")) g_forceEnemy=-2;
-            if (g_forceEnemy==-1){ fprintf(stderr,"--enemy: unknown type '%s' (all|cook|linecook|butcher|liquidator|headchef)\n",nm); return 1; }
-        }
-        else if (!strcmp(argv[i],"--vm-hold") && i+1<argc) g_vmHoldDev=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
-        else if (!strcmp(argv[i],"--kite")) g_kite=1;
-        else if (!strcmp(argv[i],"--no-intro")) g_noIntro=1;                // skip the title intro
-        else if (!strcmp(argv[i],"--no-lod")) g_noLod=1;                    // always draw full-detail enemies
-        else if (!strcmp(argv[i],"--viewer") && i+1<argc) g_viewA=argv[++i];        // model viewer (see viewer.h)
-        else if (!strcmp(argv[i],"--viewer-b") && i+1<argc) g_viewB=argv[++i];
-        else if (!strcmp(argv[i],"--viewer-shots") && i+1<argc) g_viewShots=argv[++i];
-        else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
-        else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
-        else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
-        else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
-        else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
-        else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
-        else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
-        else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
-        else if (!strcmp(argv[i],"--map") && i+1<argc) g_mapPath=argv[++i];   // SPIKE: load a .map
-        else if (!strcmp(argv[i],"--look") && i+2<argc){ g_lookYaw=(float)atof(argv[++i]); g_lookPitch=(float)atof(argv[++i]); g_lookSet=1; }   // dev: aim spawn camera (deg)
-        else if (!strcmp(argv[i],"--weapon") && i+1<argc) vmWeapon=atoi(argv[++i]);   // dev: start on weapon N
-        else if (!strcmp(argv[i],"--vm") && i+1<argc) vmHas=(sscanf(argv[++i],"%f %f %f %f %f %f %f",&vmOv[0],&vmOv[1],&vmOv[2],&vmOv[3],&vmOv[4],&vmOv[5],&vmOv[6])==7);   // dev: override viewmodel "x y z scale yaw pitch roll"
-    }
-    // Send the JSON event stream straight to a log file (not stdout/stderr, so
-    // it stays clean of raylib's own warnings). Fresh file each run.
-    if (g_debug){
-        g_dbg=fopen("chernobyl2-debug.log","w");
-        if (!g_dbg) g_dbg=stderr;   // fall back if the file can't be opened
-    }
-
-    SetTraceLogLevel(LOG_WARNING);
-    SetTraceLogCallback(FilteredTraceLog);   // drop raylib's harmless u32->u16 index spam
-    // CHERNOBYL_BACKGROUND=1: automated test runs open a HIDDEN, unfocused window, so they
-    // don't take the keyboard or cover what the person at the machine is doing. (Minimized
-    // doesn't work: macOS stops a minimized window's buffer swaps and the loop stalls.)
-    int bgRun = getenv("CHERNOBYL_BACKGROUND") && *getenv("CHERNOBYL_BACKGROUND") && strcmp(getenv("CHERNOBYL_BACKGROUND"),"0");
-    if (bgRun) SetConfigFlags(FLAG_WINDOW_UNFOCUSED|FLAG_WINDOW_HIDDEN);
-    InitWindow(1280,720,"Chernobyl 2");
-#if defined(C2_IOS)
-    g_uis=(float)C2RealH()/720.0f; if (g_uis<1.0f) g_uis=1.0f;      // the game's screen is 720 high; the phone's is what it is
-#endif
-    SetExitKey(KEY_NULL);              // ESC opens the options menu instead of quitting
-    int ready=IsWindowReady();
-    if (ready){                        // soft radial puff for the minigun smoke billboards
-        Image si=GenImageGradientRadial(64,64,0.25f,(Color){255,255,255,255},(Color){255,255,255,0});
-        g_smokeTex=LoadTextureFromImage(si); UnloadImage(si);
-        SetTextureFilter(g_smokeTex,TEXTURE_FILTER_BILINEAR); g_hasSmokeTex=(g_smokeTex.id!=0);
-    }
-    DebugLog("boot","\"windowReady\":%s,\"raylib\":\"%s\"", ready?"true":"false", RAYLIB_VERSION);
-
-    // InitWindow just seeded raylib's RNG from the clock, so --seed must be
-    // applied after it (and before any GetRandomValue call) to stick.
-    if (seedSet){ SetRandomSeed(seedArg); DebugLog("seed","\"value\":%u", seedArg); }
-
-    if (!ready){   // headless: nothing to render without a GL context
-        DebugLog("shutdown","\"reason\":\"no-gl-context\"");
-        return 0;
-    }
-
-    // Windowed (1280x720) by default. Fullscreen is opt-in via the in-game options
-    // menu (ESC), which uses borderless windowed mode (resizes to the monitor's
-    // resolution) and persists the choice; re-apply it here if it was left on.
-    // Skipped under --shot so headless captures stay a deterministic 1280x720.
-    // Everything renders off GetScreenWidth/Height + the framebuffer aspect, so
-    // the HUD and 3D views adapt to whatever resolution we land on.
-    LoadOptions();
-    if (g_fullscreen && g_shotFrame<=0){
-        ApplyFullscreen(1);
-        DebugLog("window","\"borderless\":true,\"w\":%d,\"h\":%d,\"monitor\":%d",
-                 GetScreenWidth(), GetScreenHeight(), GetCurrentMonitor());
-    }
-
-    SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
-    if (fpsOv>=0) SetTargetFPS(fpsOv);   // --fps: perf-gate override (0 = uncapped, 30 = throttled dt check)
-    DisableCursor();
-
-    // window + Dock/Cmd-Tab icon
-    {
-        const char *ip="assets/icon.png"; if (!FileExists(ip)) ip="../assets/icon.png";
-        if (FileExists(ip)){
-            Image ic=LoadImage(ip);
-            if (ic.data){ ImageFormat(&ic,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8); SetWindowIcon(ic); UnloadImage(ic); }
-#if defined(C2_MAC)
-            MacSetDockIcon(ip);            // SetWindowIcon is ignored on macOS; set the Dock image directly
-#endif
-        }
-    }
-
-    if (g_viewA && strcmp(g_viewA,"all")){ int r=RunViewer(); CloseWindow(); return r; }   // --viewer <glb>: no game, no audio
-    // (--viewer all, the enemy gallery, starts further down: its weapon mode needs the guns + audio)
-    InitAudioDevice();                 // weapon fire sounds; harmless if it fails
-    if (g_mute || getenv("CHERNOBYL_MUTE")){ SetMasterVolume(0.0f); g_userMute=1; }   // silent test runs (M un-mutes)
-    if (getenv("CHERNOBYL_NO_LOD")) g_noLod=1;
-    g_audio = IsAudioDeviceReady();
-    DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
-
+// ---- Loading ------------------------------------------------------------------------------
+// LoadGameAssets is the one-time setup: every sound, the guns, the enemy rigs, the first map. It runs either on
+// the main thread (LoadTick then redraws the loading card) or on the loader thread, in a second GL context that
+// SHARES the window's: textures, buffers and shaders made there are the game's. Vertex array objects are the one
+// thing contexts do not share, so the main thread rebuilds each mesh's afterwards (MeshVaoRebuild).
+static int vmWeapon=-1; static float vmOv[7]={0}; static int vmHas=0;          // dev: --weapon / --vm framing overrides
+static volatile int g_loadStep=0, g_loadFinished=0; static int g_loadOnThread=0, g_loadMap=0, g_introPlayed=0;
+// STAGED loading (g_stageLoad): the game only waits for what the first seconds need -- sounds, guns, the map, the cook.
+// The other ten enemies come in behind the fight: on the loader thread (desktop: each handed over finished, one at a time,
+// through g_rigStage), or -- where there is no thread (browser, iPhone) -- on the main thread in the quiet moments, once the
+// browser has fetched their files. Until a kind is in, the wave director does not pick it. Dev modes that need every model
+// at once (--enemy, --boss, the viewers) load the old way, all up front.
+static int g_stageLoad=0;
+static volatile int g_stageReady=0, g_stageType=-1, g_loadAbort=0, g_loadAllDone=0;
+static EnemyRig g_rigStage;
+static int g_defer[EN_NTYPES], g_nDefer=0, g_deferGot[EN_NTYPES];       // main-thread queue (no loader thread); g_deferGot: 1 = its files are here
+#define LOAD_STEPS (1+4+(g_stageLoad?1:EN_NTYPES)+3)   // sounds, four guns, the rigs (staged: just the cook), the map (counted as three)
+static float LoadProgress(void){ float k=(float)g_loadStep/(float)LOAD_STEPS; return k>1.0f?1.0f:k; }
+static void LoadBar(float y){                         // the bar, centred at y (a fraction of the screen's height)
+    float sw=(float)GetScreenWidth(), sh=(float)GetScreenHeight(), w=sw*0.30f, h=fmaxf(6.0f,sh*0.012f), x=(sw-w)*0.5f; y*=sh;
+    DrawRectangle((int)x-3,(int)y-3,(int)w+6,(int)h+6,(Color){0,0,0,170}); DrawRectangleLines((int)x-3,(int)y-3,(int)w+6,(int)h+6,(Color){225,205,150,255});
+    DrawRectangle((int)x,(int)y,(int)(w*LoadProgress()),(int)h,(Color){196,38,30,255});
+    const char *m="LOADING"; int fs=(int)fmaxf(18.0f,sh*0.030f); DrawText(m,(int)(sw-MeasureText(m,fs))/2,(int)(y-fs-10),fs,(Color){225,205,150,255});
+}
+static void LoadingFrame(void);
+static void LoadTick(void){ g_loadStep++; if (!g_loadOnThread) LoadingFrame(); }
+static void LoadGameAssets(void){
     if (g_audio){                      // a random one of these plays on every enemy kill
         const char *deaths[]={ "enemy_death1.mp3","enemy_death2.mp3","enemy_death3.mp3","enemy_death4.mp3","enemy_death5.mp3" };
         for (int d=0; d<(int)(sizeof deaths/sizeof deaths[0]); d++){
@@ -6357,14 +6705,30 @@ int main(int argc, char **argv) {
           if (FileExists(p)){ g_grenSnd=LoadSound(p);  g_hasGrenSnd =(g_grenSnd.frameCount>0); } }
         { const char *p="assets/player_hurt.wav"; if (!FileExists(p)) p="../assets/player_hurt.wav";
           if (FileExists(p)){ g_hurtSnd=LoadSound(p);  g_hasHurtSnd =(g_hurtSnd.frameCount>0); } }
-        { const char *p="assets/heartbeat.wav";   if (!FileExists(p)) p="../assets/heartbeat.wav";
+        { const char *p="assets/heartbeat_low.mp3"; if (!FileExists(p)) p="assets/heartbeat.wav";   if (!FileExists(p)) p="../assets/heartbeat.wav";
           if (FileExists(p)){ g_heartSnd=LoadSound(p); g_hasHeartSnd=(g_heartSnd.frameCount>0); SetSoundVolume(g_heartSnd,0.65f); } }
+        for (int k=1;k<=MAX_RADSND;k++){ const char *p=TextFormat("assets/radiation_%d.mp3",k); if (!FileExists(p)) continue;
+            Sound sd=LoadSound(p); if (sd.frameCount>0) g_radSnd[g_nRadSnd++]=sd; }
+        for (int k=1;k<=MAX_PANELSND;k++){ const char *p=TextFormat("assets/panel_%d.mp3",k); if (!FileExists(p)) continue;
+            Sound sd=LoadSound(p); if (sd.frameCount>0) g_panelSnd[g_nPanelSnd++]=sd; }
+        for (int k=1;k<=MAX_DISTANT;k++){ const char *p=TextFormat("assets/distant_%d.mp3",k); if (!FileExists(p)) continue;
+            Wave wv=LoadWave(p); if (wv.frameCount>0){ WaveFormat(&wv,(int)wv.sampleRate,16,(int)wv.channels); g_alarmWave[g_nAlarmWave++]=wv; } }
+        { const char *p="assets/cue_sight.mp3";   if (FileExists(p)){ g_cueSight=LoadSound(p); g_hasCueSight=(g_cueSight.frameCount>0); } }
+        { const char *p="assets/cue_flee.mp3";    if (FileExists(p)){ g_cueFlee=LoadSound(p);  g_hasCueFlee=(g_cueFlee.frameCount>0); } }
+        { const char *p="assets/cue_tension.mp3"; if (FileExists(p)){ g_cueTense=LoadSound(p); g_hasCueTense=(g_cueTense.frameCount>0); } }
+        for (int k=1;k<=4;k++){ const char *p=TextFormat("assets/boss%d_theme.mp3",k); if (!FileExists(p)) break;
+            Sound sd=LoadSound(p); if (sd.frameCount<=0) break; g_bossTheme[g_nBossTheme++]=sd; }
+        { const char *p="assets/mob_horn.mp3"; if (FileExists(p)){ g_hornSnd=LoadSound(p); g_hasHornSnd=(g_hornSnd.frameCount>0); } }
+        { const char *p="assets/boss_close.mp3"; if (FileExists(p)){ g_bossCloseSnd=LoadSound(p); g_hasBossClose=(g_bossCloseSnd.frameCount>0); } }
+        { const char *p="assets/wave2_voice.mp3"; if (FileExists(p)){ g_wave2Snd=LoadSound(p); g_hasWave2Snd=(g_wave2Snd.frameCount>0); } }
+        { const char *p="assets/wave1_dialogue.mp3"; if (FileExists(p)){ g_wave1Snd=LoadSound(p); g_hasWave1Snd=(g_wave1Snd.frameCount>0); } }
         { const char *p="assets/wave_start.wav";  if (!FileExists(p)) p="../assets/wave_start.wav";
           if (FileExists(p)){ g_waveSnd=LoadSound(p);  g_hasWaveSnd =(g_waveSnd.frameCount>0); } }
         { const char *p="assets/wave_clear.wav";  if (!FileExists(p)) p="../assets/wave_clear.wav";
           if (FileExists(p)){ g_clearSnd=LoadSound(p); g_hasClearSnd=(g_clearSnd.frameCount>0); SetSoundVolume(g_clearSnd,0.7f); } }
         { const char *p="assets/ak74_fire_single.mp3"; if (FileExists(p)){ g_eShotSnd=LoadSound(p); g_hasEShot=(g_eShotSnd.frameCount>0); } }
-        { const char *p="assets/flame_fire.mp3";  if (FileExists(p)){ g_eBoltSnd=LoadSound(p); g_hasEBolt=(g_eBoltSnd.frameCount>0); } }
+        if (g_hasSy){ g_eBoltSnd=LoadSoundAlias(g_sy[SY_BOLT]); g_hasEBolt=1; }                        // his own sound (it was the flamethrower's recording: a flamethrower heard with none in hand)
+        else { const char *p="assets/flame_fire.mp3";  if (FileExists(p)){ g_eBoltSnd=LoadSound(p); g_hasEBolt=(g_eBoltSnd.frameCount>0); } }
         { const char *p="assets/wave_start.wav";  if (FileExists(p)){ g_eRaiseSnd=LoadSound(p); g_hasERaise=(g_eRaiseSnd.frameCount>0); } }
         { const char *p="assets/pickup.wav";      if (!FileExists(p)) p="../assets/pickup.wav";
           if (FileExists(p)){ g_pkSnd=LoadSound(p);    g_hasPkSnd   =(g_pkSnd.frameCount>0);  SetSoundVolume(g_pkSnd,0.6f); } }
@@ -6374,6 +6738,7 @@ int main(int argc, char **argv) {
     // RunMapSelect() + StartSelectedMap(), so the ESC "Select Map" button can
     // return here without redoing the one-time setup.)
 
+    LoadTick();                        // (the sounds are in)
     g_floorTex=MakeChecker(512,(Color){60,64,70,255},(Color){44,48,54,255},16);
     g_wallTex =MakeChecker(256,(Color){80,72,64,255},(Color){64,58,52,255},8);
     g_crateTex=MakeChecker(128,(Color){120,90,55,255},(Color){95,70,42,255},4);
@@ -6395,8 +6760,10 @@ int main(int argc, char **argv) {
 
     g_posedBasis[0]=1;   // grenade launcher: animated rig -> frame from the posed idle, not the bind pose
     LoadWeapon(0, "assets/grenadelauncher.glb", "../assets/grenadelauncher.glb", "Grenade Launcher", "vm_tune_grenade.txt", VM_RIFLE);
+    LoadTick();
     g_posedBasis[1]=1;   // remington: animated FPS rig
     LoadWeapon(1, "assets/remington.glb", "../assets/remington.glb", "Remington", "vm_tune_remington.txt", VM_RIFLE);
+    LoadTick();
     LoadWeapon(2, "assets/minigun.glb", "../assets/minigun.glb", "Minigun", "vm_tune_minigun.txt", VM_HEAVY);
     // (slots 3 and 4 were the LMG and the AK-74M: cut from the roster. The slots stay empty --
     // has=0, so nothing can select them -- and the flamethrower keeps slot 5.)
@@ -6408,6 +6775,7 @@ int main(int argc, char **argv) {
     // never reach the gun in any clip, the knife is IK-driven, which raylib can't
     // evaluate. assets/mp5.glb + knife.glb kept as spares.)
     LoadWeapon(5, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt", VM_HEAVY);
+    LoadTick();
     g_numWeapons=6;
     ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // boot on slot 0 / grenade launcher (or --weapon N for tuning)
     if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
@@ -6491,12 +6859,286 @@ int main(int argc, char **argv) {
 
     // Load one rig per enemy type: assets/<name>.glb. The cook is required (it stands in
     // for any type whose model is missing); the rest are optional.
-    for (int t=0;t<EN_NTYPES;t++){
+    int order[EN_NTYPES], no=0; order[no++]=EN_COOK; order[no++]=EN_HEADCHEF;          // the cook first (he stands in for any other), then the first boss
+    for (int t=0;t<EN_NTYPES;t++) if (t!=EN_COOK && t!=EN_HEADCHEF) order[no++]=t;
+    int upfront=g_stageLoad?1:EN_NTYPES;
+    for (int k=0;k<upfront;k++){ int t=order[k];
         char path[96]; snprintf(path,sizeof path,"assets/%s.glb",kEnemy[t].name);
         int ok=LoadEnemyRig(&g_rig[t], path);
+        LoadTick();
         if (t==EN_COOK) g_hasEnemy=ok;
     }
     // (the starting wave of enemies is spawned per-map in StartSelectedMap)
+    if (g_loadMap){ g_preMap=LoadQ3MapModel(g_mapPath,&g_preMapOK); snprintf(g_prePath,sizeof g_prePath,"%s",g_mapPath); }
+    DebugLog("load","\"done\":true,\"thread\":%d,\"staged\":%d,\"t\":%.2f", g_loadOnThread, g_stageLoad, GetTime());
+    if (g_loadOnThread) glFinish();                   // what the game is about to draw with is all in the shared objects
+    g_loadStep=LOAD_STEPS; g_loadFinished=1;          // ---- the game can start ----
+    if (g_stageLoad && g_loadOnThread){               // the rest, behind the fight: each built in g_rigStage, taken by the main thread (LoadPump)
+        for (int k=upfront;k<EN_NTYPES && !g_loadAbort;k++){ int t=order[k];
+            char path[96]; snprintf(path,sizeof path,"assets/%s.glb",kEnemy[t].name);
+            memset(&g_rigStage,0,sizeof g_rigStage); LoadEnemyRig(&g_rigStage, path); glFinish();
+            g_stageType=t; g_stageReady=1;
+            while (g_stageReady && !g_loadAbort) WaitTime(0.002); }
+    } else if (g_stageLoad){ for (int k=upfront;k<EN_NTYPES;k++) g_defer[g_nDefer++]=order[k]; }
+    g_loadAllDone=1;
+}
+#if !defined(__EMSCRIPTEN__) && !defined(C2_IOS)
+#include <pthread.h>
+typedef struct GLFWwindow GLFWwindow;                 // (GLFW is inside libraylib; these are its own declarations)
+GLFWwindow *glfwGetCurrentContext(void); GLFWwindow *glfwCreateWindow(int,int,const char*,void*,GLFWwindow*);
+void glfwMakeContextCurrent(GLFWwindow*); void glfwWindowHint(int,int); void glfwDestroyWindow(GLFWwindow*);
+static GLFWwindow *g_loadCtx=NULL; static pthread_t g_loadTh; static int g_loadThOn=0;
+static void *LoadThreadMain(void *arg){ (void)arg;
+    glfwMakeContextCurrent(g_loadCtx); glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+    LoadGameAssets();
+    glFinish(); glfwMakeContextCurrent(NULL);         // everything it made is in the shared objects before the game draws with them
+    return NULL;
+}
+static int LoadThreadStart(void){
+    GLFWwindow *mainW=glfwGetCurrentContext(); if (!mainW || getenv("CHERNOBYL_NO_LOADTHREAD")) return 0;
+    glfwWindowHint(0x00020004,0); glfwWindowHint(0x00020001,0); glfwWindowHint(0x0002000C,0);      // GLFW_VISIBLE, GLFW_FOCUSED, GLFW_FOCUS_ON_SHOW: off
+    g_loadCtx=glfwCreateWindow(16,16,"c2 loader",NULL,mainW);
+    if (!g_loadCtx) return 0;
+    glfwMakeContextCurrent(mainW);
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at,(size_t)64<<20);       // (the loaders keep big tables on the stack)
+    g_loadOnThread=1; g_loadFinished=0;
+    if (pthread_create(&g_loadTh,&at,LoadThreadMain,NULL)!=0){ g_loadOnThread=0; glfwDestroyWindow(g_loadCtx); g_loadCtx=NULL; return 0; }
+    g_loadThOn=1; DebugLog("load","\"thread\":true");
+    return 1;
+}
+// One mesh's vertex array, rebuilt in THIS context from the buffers it already has (as raylib's UploadMesh lays
+// them out: a buffer's slot is its attribute's location), plus the bone attributes EnemyMeshBonesGPU added.
+static void MeshVaoRebuild(Mesh *ms){
+    if (!ms->vboId || ms->vertexCount<=0) return;
+    static const struct { int loc, n, type, norm; float def[4]; int dt; } A[6]={
+        {RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION,3,RL_FLOAT,0,{0,0,0,1},SHADER_ATTRIB_VEC3}, {RL_DEFAULT_SHADER_ATTRIB_LOCATION_TEXCOORD,2,RL_FLOAT,0,{0,0,0,0},SHADER_ATTRIB_VEC2},
+        {RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL,3,RL_FLOAT,0,{0,0,1,0},SHADER_ATTRIB_VEC3},   {RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR,4,RL_UNSIGNED_BYTE,1,{1,1,1,1},SHADER_ATTRIB_VEC4},
+        {RL_DEFAULT_SHADER_ATTRIB_LOCATION_TANGENT,4,RL_FLOAT,0,{1,0,0,1},SHADER_ATTRIB_VEC4},  {RL_DEFAULT_SHADER_ATTRIB_LOCATION_TEXCOORD2,2,RL_FLOAT,0,{0,0,0,0},SHADER_ATTRIB_VEC2} };
+    ms->vaoId=rlLoadVertexArray(); rlEnableVertexArray(ms->vaoId);
+    for (int k=0;k<6;k++){
+        if (ms->vboId[A[k].loc]){ rlEnableVertexBuffer(ms->vboId[A[k].loc]); rlSetVertexAttribute(A[k].loc,A[k].n,A[k].type,A[k].norm,0,0); rlEnableVertexAttribute(A[k].loc); }
+        else if (k>0){ rlSetVertexAttributeDefault(A[k].loc,A[k].def,A[k].dt,A[k].n); rlDisableVertexAttribute(A[k].loc); } }
+    if (ms->vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]) rlEnableVertexBufferElement(ms->vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES]);
+    for (int k=0;k<g_nBoneVbo;k++) if (g_boneVbo[k].ms==ms){
+        rlEnableVertexBuffer(g_boneVbo[k].idx); rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES,4,RL_UNSIGNED_BYTE,false,0,0); rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEINDICES);
+        rlEnableVertexBuffer(g_boneVbo[k].wgt); rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS,4,RL_FLOAT,false,0,0); rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS); }
+    rlDisableVertexArray();
+}
+static void ModelVaoRebuild(Model *m){ for (int i=0;i<m->meshCount;i++) MeshVaoRebuild(&m->meshes[i]); }
+static void LoadThreadJoin(void){                     // the loader is done (or told to stop): gone
+    if (!g_loadThOn) return;
+    g_loadAbort=1; pthread_join(g_loadTh,NULL); g_loadThOn=0; g_loadOnThread=0; g_loadAbort=0;
+    glfwDestroyWindow(g_loadCtx); g_loadCtx=NULL;
+}
+static void LoadThreadFinish(void){                   // the game's first needs are in: make those meshes drawable here. (Staged: the loader goes on with the rest.)
+    if (!g_loadThOn) return;
+    if (!g_stageLoad) LoadThreadJoin();
+    for (int i=0;i<6;i++) if (g_weapons[i].model.meshCount>0) ModelVaoRebuild(&g_weapons[i].model);
+    for (int t=0;t<EN_NTYPES;t++){ if (g_rig[t].model.meshCount>0) ModelVaoRebuild(&g_rig[t].model); if (g_rig[t].hasLod) ModelVaoRebuild(&g_rig[t].lod); }
+    ModelVaoRebuild(&g_floor); ModelVaoRebuild(&g_wall); ModelVaoRebuild(&g_crate);
+    if (g_preMapOK) ModelVaoRebuild(&g_preMap);
+    if (g_stainTried && g_stainMesh.vboId) MeshVaoRebuild(&g_stainMesh);
+    ActivateWeapon(g_curWeapon);                      // (g_gun is a copy of the live weapon's Model: take the rebuilt one)
+    DebugLog("load","\"joined\":true,\"t\":%.2f", GetTime());
+}
+#else
+static int LoadThreadStart(void){ return 0; }
+static void LoadThreadFinish(void){}
+static void LoadThreadJoin(void){}
+#endif
+#if defined(__EMSCRIPTEN__)
+// Browser: the later enemies are not in the page's data file. Each is fetched on its own once the game is up
+// (assets/<name>.glb, _lod.glb, .gait, .climb -- the optional ones may be missing) and loaded when all of his have landed.
+static int g_webPend[EN_NTYPES], g_webFail[EN_NTYPES];
+static int WebTypeOf(const char *f){ const char *b=strrchr(f,'/'); b=b?b+1:f; int best=-1; size_t bl=0;
+    for (int t=0;t<EN_NTYPES;t++){ size_t l=strlen(kEnemy[t].name); if (!strncmp(b,kEnemy[t].name,l) && (b[l]=='.'||b[l]=='_') && l>bl){ best=t; bl=l; } }
+    return best; }
+static void WebGot(const char *f){ int t=WebTypeOf(f); if (t>=0 && --g_webPend[t]<=0 && !g_webFail[t]) g_deferGot[t]=1; }
+static void WebMiss(const char *f){ int t=WebTypeOf(f); if (t<0) return;
+    size_t l=strlen(f); if (l>4 && !strcmp(f+l-4,".glb") && !(l>8 && !strcmp(f+l-8,"_lod.glb"))) g_webFail[t]=1;      // the model itself: he never arrives (the cook stands in)
+    if (--g_webPend[t]<=0 && !g_webFail[t]) g_deferGot[t]=1; }
+static void WebFetchLater(void){
+    static const char *suf[4]={".glb","_lod.glb",".gait",".climb"};
+    for (int k=0;k<g_nDefer;k++){ int t=g_defer[k]; g_webPend[t]=4;
+        for (int q=0;q<4;q++){ char p[96]; snprintf(p,sizeof p,"assets/%s%s",kEnemy[t].name,suf[q]); emscripten_async_wget(p,p,WebGot,WebMiss); } }
+}
+#endif
+// Once a frame: take in whatever enemy has finished loading. Threaded: the loader's finished rig is copied into place and its
+// vertex arrays made here. Otherwise the next one in the queue is loaded on this thread -- a hitch of the better part of a
+// second -- so only when it will not be felt: between waves, before the first, or with nobody within 14 m; never two close together.
+static void LoadPump(void){
+    if (!g_stageLoad) return;
+#if !defined(__EMSCRIPTEN__) && !defined(C2_IOS)
+    if (g_loadThOn){
+        if (g_stageReady){ int t=g_stageType;
+            g_rig[t]=g_rigStage; if (g_rig[t].model.meshCount>0) ModelVaoRebuild(&g_rig[t].model); if (g_rig[t].hasLod) ModelVaoRebuild(&g_rig[t].lod);
+            DebugLog("rigin","\"type\":\"%s\",\"ok\":%d,\"t\":%.2f", kEnemy[t].name, g_rig[t].ok, GetTime());
+            g_stageReady=0; }
+        else if (g_loadAllDone){ LoadThreadJoin(); DebugLog("load","\"all\":true,\"t\":%.2f", GetTime()); }
+        return; }
+#endif
+    if (g_nDefer<=0) return;
+#if defined(__EMSCRIPTEN__)
+    { static int asked=0; if (!asked){ asked=1; WebFetchLater(); } }
+#else
+    for (int k=0;k<g_nDefer;k++) g_deferGot[g_defer[k]]=1;
+#endif
+    static float gap=0.0f; if (gap>0.0f) gap-=GetFrameTime();
+    int pick=-1; for (int k=0;k<g_nDefer && pick<0;k++) if (g_defer[k]==g_loadUrgentReq && g_deferGot[g_defer[k]]) pick=k;
+    for (int k=0;k<g_nDefer && pick<0;k++) if (g_deferGot[g_defer[k]]) pick=k;
+    if (pick<0) return;
+    int urgent=(g_defer[pick]==g_loadUrgentReq), quiet=(g_wave<=0 || g_waveBreather>0.0f || g_dead || g_menu || g_paused);
+    if (!quiet){ quiet=1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==1 && Vector3Distance(g_enemies[i].pos,g_pos)<14.0f){ quiet=0; break; } }
+    if (!urgent && (!quiet || gap>0.0f)) return;
+    int t=g_defer[pick]; char path[96]; snprintf(path,sizeof path,"assets/%s.glb",kEnemy[t].name);
+    LoadEnemyRig(&g_rig[t], path);
+    for (int k=pick;k<g_nDefer-1;k++) g_defer[k]=g_defer[k+1]; g_nDefer--; gap=2.0f; if (urgent) g_loadUrgentReq=-1;
+    DebugLog("rigin","\"type\":\"%s\",\"ok\":%d,\"main\":true,\"left\":%d,\"t\":%.2f", kEnemy[t].name, g_rig[t].ok, g_nDefer, GetTime());
+#if defined(__EMSCRIPTEN__)
+    printf("enemy in: %s ok=%d left=%d t=%.1f\n", kEnemy[t].name, g_rig[t].ok, g_nDefer, GetTime());
+#endif
+}
+#include "intro.h"                      // title intro (archival montage + Hell March)
+
+#include "viewer.h"                     // --viewer: side-by-side enemy model comparison
+#include "soundboard.h"                 // --sounds: every sound, grouped, playable, with the gaps marked
+
+#if defined(C2_IOS)
+static int C2Main(int argc, char **argv) {       // the bridge is main() there; this runs once, up to the first frame
+#else
+int main(int argc, char **argv) {
+#endif
+
+    unsigned int seedArg=0; int seedSet=0;                    // --seed N : deterministic runs
+    int fpsOv=-1;                                             // --fps N : target-fps override (perf gate)
+    for (int i=1;i<argc;i++){
+        if (!strcmp(argv[i],"--debug")) g_debug=1;
+        else if (!strcmp(argv[i],"--frames") && i+1<argc) g_maxFrames=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--seed") && i+1<argc){ seedArg=(unsigned int)strtoul(argv[++i],NULL,10); seedSet=1; }
+        else if (!strcmp(argv[i],"--autofire")) g_autoFire=1;
+        else if (!strcmp(argv[i],"--sounds")) g_soundboard=1;        // dev: the sound board (soundboard.h)
+        else if (!strcmp(argv[i],"--mute")) g_mute=1;
+        else if (!strcmp(argv[i],"--no-post")) g_postOff=1;          // draw straight to the screen: no bloom / grade / grain
+        else if (!strcmp(argv[i],"--boss-wave") && i+1<argc){ g_devBoss=atoi(argv[++i]); if (g_devBoss<1) g_devBoss=1; }   // dev: straight to wave N's boss
+        else if (!strcmp(argv[i],"--boss")) g_devBoss=1;                // dev: straight to the boss interlude
+        else if (!strcmp(argv[i],"--corpses") && i+1<argc) g_devCorpses=atoi(argv[++i]);   // dev: pre-placed corpses
+        else if (!strcmp(argv[i],"--enemy") && i+1<argc){                   // only spawn this enemy type (cook/linecook/butcher/liquidator/headchef)
+            const char *nm=argv[++i];
+            for (int t=0;t<EN_NTYPES;t++) if (!strcmp(nm,kEnemy[t].name)) g_forceEnemy=t;
+            if (!strcmp(nm,"all")) g_forceEnemy=-2;
+            if (g_forceEnemy==-1){ fprintf(stderr,"--enemy: unknown type '%s' (all|cook|linecook|butcher|liquidator|headchef)\n",nm); return 1; }
+        }
+        else if (!strcmp(argv[i],"--vm-hold") && i+1<argc) g_vmHoldDev=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
+        else if (!strcmp(argv[i],"--kite")) g_kite=1;
+        else if (!strcmp(argv[i],"--no-intro")) g_noIntro=1;                // skip the title intro
+        else if (!strcmp(argv[i],"--no-lod")) g_noLod=1;                    // always draw full-detail enemies
+        else if (!strcmp(argv[i],"--viewer") && i+1<argc) g_viewA=argv[++i];        // model viewer (see viewer.h)
+        else if (!strcmp(argv[i],"--viewer-b") && i+1<argc) g_viewB=argv[++i];
+        else if (!strcmp(argv[i],"--viewer-shots") && i+1<argc) g_viewShots=argv[++i];
+        else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
+        else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
+        else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
+        else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
+        else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
+        else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
+        else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
+        else if (!strcmp(argv[i],"--map") && i+1<argc) g_mapPath=argv[++i];   // SPIKE: load a .map
+        else if (!strcmp(argv[i],"--hole") && i+1<argc) g_holeView=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--look") && i+2<argc){ g_lookYaw=(float)atof(argv[++i]); g_lookPitch=(float)atof(argv[++i]); g_lookSet=1; }   // dev: aim spawn camera (deg)
+        else if (!strcmp(argv[i],"--weapon") && i+1<argc) vmWeapon=atoi(argv[++i]);   // dev: start on weapon N
+        else if (!strcmp(argv[i],"--vm") && i+1<argc) vmHas=(sscanf(argv[++i],"%f %f %f %f %f %f %f",&vmOv[0],&vmOv[1],&vmOv[2],&vmOv[3],&vmOv[4],&vmOv[5],&vmOv[6])==7);   // dev: override viewmodel "x y z scale yaw pitch roll"
+    }
+    // Send the JSON event stream straight to a log file (not stdout/stderr, so
+    // it stays clean of raylib's own warnings). Fresh file each run.
+    if (g_debug){
+        g_dbg=fopen("chernobyl2-debug.log","w");
+        if (!g_dbg) g_dbg=stderr;   // fall back if the file can't be opened
+    }
+
+    SetTraceLogLevel(LOG_WARNING);
+    SetTraceLogCallback(FilteredTraceLog);   // drop raylib's harmless u32->u16 index spam
+    // CHERNOBYL_BACKGROUND=1: automated test runs open a HIDDEN, unfocused window, so they
+    // don't take the keyboard or cover what the person at the machine is doing. (Minimized
+    // doesn't work: macOS stops a minimized window's buffer swaps and the loop stalls.)
+    int bgRun = getenv("CHERNOBYL_BACKGROUND") && *getenv("CHERNOBYL_BACKGROUND") && strcmp(getenv("CHERNOBYL_BACKGROUND"),"0");
+    if (bgRun) SetConfigFlags(FLAG_WINDOW_UNFOCUSED|FLAG_WINDOW_HIDDEN);
+    InitWindow(1280,720,"Chernobyl 2");
+#if defined(C2_IOS)
+    g_uis=(float)C2RealH()/720.0f; if (g_uis<1.0f) g_uis=1.0f;      // the game's screen is 720 high; the phone's is what it is
+#endif
+    SetExitKey(KEY_NULL);              // ESC opens the options menu instead of quitting
+    int ready=IsWindowReady();
+    if (ready && !IntroWillPlay()) LoadingFrame();
+    if (ready){                        // soft radial puff for the minigun smoke billboards
+        Image si=GenImageGradientRadial(64,64,0.25f,(Color){255,255,255,255},(Color){255,255,255,0});
+        g_smokeTex=LoadTextureFromImage(si); UnloadImage(si);
+        SetTextureFilter(g_smokeTex,TEXTURE_FILTER_BILINEAR); g_hasSmokeTex=(g_smokeTex.id!=0);
+    }
+    DebugLog("boot","\"windowReady\":%s,\"raylib\":\"%s\"", ready?"true":"false", RAYLIB_VERSION);
+
+    // InitWindow just seeded raylib's RNG from the clock, so --seed must be
+    // applied after it (and before any GetRandomValue call) to stick.
+    if (seedSet){ SetRandomSeed(seedArg); DebugLog("seed","\"value\":%u", seedArg); }
+
+    if (!ready){   // headless: nothing to render without a GL context
+        DebugLog("shutdown","\"reason\":\"no-gl-context\"");
+        return 0;
+    }
+
+    // Windowed (1280x720) by default. Fullscreen is opt-in via the in-game options
+    // menu (ESC), which uses borderless windowed mode (resizes to the monitor's
+    // resolution) and persists the choice; re-apply it here if it was left on.
+    // Skipped under --shot so headless captures stay a deterministic 1280x720.
+    // Everything renders off GetScreenWidth/Height + the framebuffer aspect, so
+    // the HUD and 3D views adapt to whatever resolution we land on.
+    LoadOptions();
+    if (g_fullscreen && g_shotFrame<=0){
+        ApplyFullscreen(1);
+        DebugLog("window","\"borderless\":true,\"w\":%d,\"h\":%d,\"monitor\":%d",
+                 GetScreenWidth(), GetScreenHeight(), GetCurrentMonitor());
+    }
+
+    SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
+    if (fpsOv>=0) SetTargetFPS(fpsOv);   // --fps: perf-gate override (0 = uncapped, 30 = throttled dt check)
+    DisableCursor();
+
+    // window + Dock/Cmd-Tab icon
+    {
+        const char *ip="assets/icon.png"; if (!FileExists(ip)) ip="../assets/icon.png";
+        if (FileExists(ip)){
+            Image ic=LoadImage(ip);
+            if (ic.data){ ImageFormat(&ic,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8); SetWindowIcon(ic); UnloadImage(ic); }
+#if defined(C2_MAC)
+            MacSetDockIcon(ip);            // SetWindowIcon is ignored on macOS; set the Dock image directly
+#endif
+        }
+    }
+
+    if (g_viewA && strcmp(g_viewA,"all")){ int r=RunViewer(); CloseWindow(); return r; }   // --viewer <glb>: no game, no audio
+    // (--viewer all, the enemy gallery, starts further down: its weapon mode needs the guns + audio)
+    InitAudioDevice();                 // weapon fire sounds; harmless if it fails
+    if (g_mute || getenv("CHERNOBYL_MUTE")){ SetMasterVolume(0.0f); g_userMute=1; }   // silent test runs (M un-mutes)
+    if (getenv("CHERNOBYL_NO_LOD")) g_noLod=1;
+    g_audio = IsAudioDeviceReady();
+    DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
+
+    // Everything the game needs -- sounds, guns, the eleven enemies, the map -- is loaded by LoadGameAssets. With the
+    // title intro about to play it loads on a thread of its own WHILE the intro runs (the intro shows a bar instead of
+    // "press any key" if it is skipped before the loading is done); otherwise here, under the loading card.
+    if (!g_mapPath && !g_soundboard && !g_viewA && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
+    g_loadMap = (g_mapPath && !g_soundboard && !g_viewA);
+    int introQuit=0;
+    g_stageLoad = (!g_soundboard && !g_viewA && g_forceEnemy==-1 && !g_devBoss && !g_stress && !getenv("CHERNOBYL_LOAD_ALL"));
+    if (!g_soundboard && !g_viewA && LoadThreadStart()){
+        int intro=IntroWillPlay();
+        if (intro && !RunIntro()){ if (!g_loadFinished) exit(0); introQuit=1; }      // (window closed mid-load: nothing to save, and the loader is mid-flight)
+        while (!g_loadFinished && !WindowShouldClose()) LoadingFrame();      // (no intro, or one that could not play: the loading card)
+        LoadThreadFinish();
+        g_introPlayed=intro;
+    } else LoadGameAssets();
+    if (introQuit){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
 
     if (g_soundboard){                  // --sounds: the sound board, no map, no game
         int r=RunSoundboard();
@@ -6520,7 +7162,7 @@ int main(int argc, char **argv) {
     StartSelectedMap();
     return 0;                                   // the display link calls ChernobylGameStep from here on
 #else
-    if (!RunIntro()){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
+    if (!g_introPlayed && !RunIntro()){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
     // Per-run outer loop: the game IS the Chernobyl arena (maps/chernobyl.map, rebuilt
     // from ../chernobyl level 0 by tools/grid2map.py), so with no --map it loads that
     // straight away; the picker is only a fallback if the arena file is missing. "Restart
@@ -6556,6 +7198,7 @@ int main(int argc, char **argv) {
         if (g_weapons[i].anim) UnloadModelAnimations(g_weapons[i].anim,g_weapons[i].animN);
         UnloadModel(g_weapons[i].model);
     }
+    LoadThreadJoin();                      // (still bringing enemies in: stop it first)
     for (int ri=0;ri<EN_NTYPES;ri++) if (g_rig[ri].ok){ if (g_rig[ri].anim) UnloadModelAnimations(g_rig[ri].anim,g_rig[ri].animN); UnloadModel(g_rig[ri].model); }
     UnloadModel(g_floor); UnloadModel(g_wall); UnloadModel(g_crate);
     if (g_hasScrollShader) UnloadShader(g_scrollShader);

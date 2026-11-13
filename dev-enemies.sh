@@ -5,7 +5,7 @@
 #   ./dev-enemies.sh priest 7        start on the priest's cast (clip numbers below)
 #   ./dev-enemies.sh --help          list enemies and keys
 # Keys:
-#   TAB / ]  next enemy     [  previous      1 idle 2 walk 3 pursue 4 attack 5 hit 6 die 7 cast (priest)
+#   TAB / ]  next enemy     [  previous      1 idle 2 walk 3 pursue 4 attack 5 hit 6 die 7 cast (priest) 8 climb out of a breach (8 again: the next of his three climbs)
 #   A auto-cycle   SPACE pause   drag/arrows turn   wheel zoom   F face close-up   ESC quit
 #   S sounds on/off: each state plays that enemy's voice for it; the VOICE panel (left) plays any slot on a click
 #   W or the WEAPON button: weapon mode -- pick a gun on the bottom bar and shoot the enemy
@@ -20,8 +20,8 @@ fi
 if [[ -n $1 && " $ENEMIES " != *" $1 "* ]]; then
     echo "unknown enemy '$1' -- one of: $ENEMIES" >&2; exit 1
 fi
-if [[ -n $2 && ! $2 =~ ^[1-7]$ ]]; then
-    echo "clip must be 1-7 (1 idle 2 walk 3 pursue 4 attack 5 hit 6 die 7 cast)" >&2; exit 1
+if [[ -n $2 && ! $2 =~ ^[1-8]$ ]]; then
+    echo "clip must be 1-8 (1 idle 2 walk 3 pursue 4 attack 5 hit 6 die 7 cast 8 climb)" >&2; exit 1
 fi
 make -s all >/dev/null || { echo "build failed: run 'make' to see why" >&2; exit 1; }
 [[ -n $1 ]] && export CHERNOBYL_GALLERY_START="$1${2:+:$2}"
