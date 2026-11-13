@@ -5846,15 +5846,20 @@ static void WebFrame(void){
     // The page plays the title intro (and shows its "press any key") while this downloads and
     // loads; the run must not begin under it. So nothing updates -- no wave clock, no enemies, no
     // sound -- until the page says go (window.__c2_go). Before, the game ran on behind the gate.
-    static int n=0, go=0; static float vol=1.0f;
+    // (Only for a page that asks for it -- window.__c2_hold. A browser can pair this build with a
+    // cached copy of the OLD page, which never says go: held for that, the game sat on black forever.)
+    static int n=0, go=0, hold=-1; static float vol=1.0f;
+    if (hold<0) hold=EM_ASM_INT({ return window.__c2_hold ? 1 : 0; });
     if (!go){
-        if (n==0){ vol=GetMasterVolume(); SetMasterVolume(0.0f); }               // (streams that are not being fed would stutter)
-        go=EM_ASM_INT({ return window.__c2_go ? 1 : 0; });
+        if (!hold) go=1;
+        else { if (n==0){ vol=GetMasterVolume(); SetMasterVolume(0.0f); }        // (streams that are not being fed would stutter)
+               go=EM_ASM_INT({ return window.__c2_go ? 1 : 0; }); }
         if (++n==3 || (go && n<3)){ n=3; EM_ASM({ if (window.__c2_ready) window.__c2_ready(); }); }   // loaded: the page can offer the start
-        BeginDrawing(); ClearBackground(BLACK); EndDrawing();
-        if (!go) return;
-        SetMasterVolume(vol); while (GetKeyPressed()!=0) {}                      // the start key is not a game key
-        return;
+        if (hold){
+            BeginDrawing(); ClearBackground(BLACK); EndDrawing();
+            if (go){ SetMasterVolume(vol); while (GetKeyPressed()!=0) {} }       // the start key is not a game key
+            return;
+        }
     }
     Frame();
     if (g_returnToMenu){ g_returnToMenu=0; EndCurrentMap(); g_mapPath=DEFAULT_MAP; StartSelectedMap(); }

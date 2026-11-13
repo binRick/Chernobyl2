@@ -150,6 +150,7 @@
       gate.style.display='none'; go();
       try { canvas.requestPointerLock(); } catch(e){}
     });
+    window.__c2_hold=true;                       // this page starts the game itself (see WebFrame)
     if (autostart) window.__c2_go=true;
     window.__c2_ready=function(){ setReady(); if (autostart) gate.style.display='none'; };
     var argm=qs.match(/[?&]args=([^&]*)/);                         // dev: ?args=--god,--kite passes game flags
