@@ -26,8 +26,22 @@
 #include <math.h>
 #include <dirent.h>      // map-select menu: scan maps/*.map at startup
 
-#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+// Platforms. C2_IOS: the iPhone build (ios/, PLATFORM_IOS from its project). C2_GLES: OpenGL ES 3
+// and a HOSTED frame loop -- the browser and the phone both call the game once a frame; it never
+// owns the loop there. C2_MAC: the desktop Mac.
+#if defined(PLATFORM_IOS)
+  #define C2_IOS 1
+#endif
+#if defined(__EMSCRIPTEN__) || defined(C2_IOS)
+  #define C2_GLES 1
+#endif
+#if defined(__APPLE__) && !defined(C2_GLES)
+  #define C2_MAC 1
+#endif
+#if defined(C2_MAC)
   #include <OpenGL/gl3.h>          // glClear(GL_DEPTH_BUFFER_BIT) for the viewmodel pass
+#elif defined(C2_IOS)
+  #include <OpenGLES/ES3/gl.h>
 #elif defined(__EMSCRIPTEN__)
   #include <GLES3/gl3.h>
 #endif
@@ -48,10 +62,12 @@ EM_JS(void, WebMouseInit, (void), {
 EM_JS(double, WebMouseTakeX, (void), { var v = window.__c2_mx || 0; window.__c2_mx = 0; return v; });
 EM_JS(double, WebMouseTakeY, (void), { var v = window.__c2_my || 0; window.__c2_my = 0; return v; });
 #define MouseCaptured() WebPointerLocked()
+#elif defined(C2_IOS)
+#define MouseCaptured() (g_touchPlaying)        /* the look pad is always "captured" while playing */
 #else
 #define MouseCaptured() IsCursorHidden()
 #endif
-#if defined(__EMSCRIPTEN__)
+#if defined(C2_GLES)
   #define GLSL_HDR "#version 300 es\nprecision highp float;\nprecision highp int;\n"
 #else
   #define GLSL_HDR "#version 330\n"
@@ -59,7 +75,67 @@ EM_JS(double, WebMouseTakeY, (void), { var v = window.__c2_my || 0; window.__c2_
 
 #include "mapload.h"   // SPIKE: --map loads idTech3 (.map) brush geometry as a Model
 
-#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#if defined(C2_IOS)
+// ---- The phone: a virtual screen and thumbs for a keyboard ------------------------------------
+// The game was written for a 720-line window, a keyboard and a mouse. On the phone it keeps
+// thinking that: the screen it is told about is the real one divided by g_uis (so it is 720 high
+// whatever the phone), everything 2D is drawn through that scale, and the scene is rendered at
+// that size too (a 2.5K panel at full resolution would cost four times the fill for nothing).
+// The keys and the mouse it asks about are answered from the touch overlay (src/touch.h, from
+// ../Chernobyl): the stick is W A S D (and SHIFT at full throw), the right half of the screen is
+// the mouse, FIRE the left button, and so on. On the menus and the death screen there are no
+// controls up, and a tap is a click where it lands.
+static float g_uis=1.0f;                    // real pixels per virtual one
+static int   g_touchPlaying=0;              // the controls are up (not a menu, not the death screen)
+extern float ChernobylRcoreContentScale(void);
+static int     C2RealW(void){ return GetScreenWidth(); }
+static int     C2RealH(void){ return GetScreenHeight(); }
+static Vector2 C2RealTouch(int i){ return GetTouchPosition(i); }
+static int     C2VirtW(void){ return (int)(C2RealW()/g_uis+0.5f); }
+static int     C2VirtH(void){ return (int)(C2RealH()/g_uis+0.5f); }
+static Vector2 C2VirtTouch(int i){ Vector2 p=C2RealTouch(i); return (Vector2){p.x/g_uis,p.y/g_uis}; }
+#define GetScreenWidth   C2VirtW
+#define GetScreenHeight  C2VirtH
+#define GetTouchPosition C2VirtTouch
+#include "touch.h"
+static Vector2 g_tapPos={0,0};              // where the last tap / touch was (virtual pixels): the "mouse" on menus
+static bool C2KeyDown(int k){
+    if (g_touchPlaying) switch (k){
+        case KEY_W: return TouchOverlayIsForward(); case KEY_S: return TouchOverlayIsBack();
+        case KEY_A: return TouchOverlayIsLeft();    case KEY_D: return TouchOverlayIsRight();
+        case KEY_LEFT_SHIFT: { float x=TouchOverlayStickX(), y=TouchOverlayStickY(); return x*x+y*y>0.86f*0.86f; }   // the stick against its rim: run
+        default: break; }
+    return IsKeyDown(k);
+}
+static bool C2KeyPressed(int k){
+    if (g_touchPlaying){
+        if (k==KEY_SPACE) return TouchOverlayJumpPressed();
+        if (k==KEY_R) return TouchOverlayReloadPressed();
+        if (k==KEY_ESCAPE) return TouchOverlayPausePressed();
+        if (k>=KEY_ONE && k<=KEY_FOUR) return TouchOverlayWeaponPressed()==k-KEY_ONE;
+    }
+    return IsKeyPressed(k);
+}
+static bool C2MouseDown(int b){
+    if (b!=MOUSE_BUTTON_LEFT) return false;
+    return g_touchPlaying ? TouchOverlayFireDown() : (GetTouchPointCount()>0);
+}
+static bool C2MousePressed(int b){
+    if (b!=MOUSE_BUTTON_LEFT) return false;
+    return g_touchPlaying ? TouchOverlayFirePressed() : TouchOverlayMenuConfirm();
+}
+static Vector2 C2MousePos(void){ return g_tapPos; }
+#define IsKeyDown            C2KeyDown
+#define IsKeyPressed         C2KeyPressed
+#define IsMouseButtonDown    C2MouseDown
+#define IsMouseButtonPressed C2MousePressed
+#define GetMousePosition     C2MousePos
+// What the bridge (ios/ChernobylBridge.m) and the platform helpers (ios/C2Platform.m) provide.
+const char *C2BundleDir(void); const char *C2DocsDir(void);
+int C2HttpRequest(const char *url, const char *jsonBody, char *out, int outSz);
+#endif
+
+#if defined(C2_MAC)
 void MacSetDockIcon(const char *path);   // macicon.m: Dock / Cmd-Tab icon (SetWindowIcon is a no-op on macOS)
 #endif
 
@@ -116,13 +192,14 @@ static Model g_floor, g_wall, g_crate;
 static Model g_map; static int g_hasMap=0; static const char *g_mapPath=NULL;  // SPIKE: --map <file.map>
 static int g_mapPathOwned=0;   // 1 if g_mapPath was malloc'd by the picker (free on map switch); 0 if it's argv
 static Shader g_scrollShader; static int g_scrollLoc=-1; static int g_hasScrollShader=0;  // the WORLD shader: UV scroll (liquids/warpzones) + dynamic lights + fog
-static int g_wLoc[6]={-1,-1,-1,-1,-1,-1};   // dPos dCol dR dN viewPos fog
+static int g_wLoc[7]={-1,-1,-1,-1,-1,-1,-1};   // dPos dCol dR dN viewPos glowP flickCol
+static int g_wAtm[6]={-1,-1,-1,-1,-1,-1};      // the air (AtmosLocs)
 // ---- Atmosphere: fog + dynamic lights --------------------------------------
 // The arena's lamps are baked into vertex colour; what MOVES is lit here. A dynamic light is a
 // short-lived point light (muzzle flash, explosion) or one re-added every frame by something
 // that glows (flame stream, radiation bolt, the priest's lantern: hold=1, steady while fed).
 // The world shader takes the 8 nearest the camera, each enemy the 3 nearest him.
-static const float kFog[4]={0.060f,0.070f,0.080f,0.010f};   // fog colour + density (per metre)
+static const float kFog[4]={0.060f,0.070f,0.080f,0.0125f};  // fog colour + density at the floor (per metre)
 typedef struct { Vector3 pos, col; float R, life, life0; int hold; } DynLight;
 #define MAX_DYN 24
 static DynLight g_dyn[MAX_DYN];
@@ -151,6 +228,34 @@ static int DynLightsNear(Vector3 at, int maxN, float reach, float *pos, float *c
     return n;
 }
 
+// ---- The air: fog that thins with height, and light standing in it --------------------------
+// One GLSL chunk shared by the world and the enemy shader. Fog is denser at the floor (density
+// falls off exponentially with height; the integral along the eye ray is exact). On top of it
+// every lamp near the camera, and every flash, lights the air between the eye and the surface:
+// the in-scatter of a point light along a ray has a closed form (two arctangents over the ray's
+// distance from the lamp), so each lamp carries a true volumetric halo that a wall or a body in
+// front of it cuts into. aPos/aCol: the lamps (the first aS are the map's own, which also throw
+// a sheen on the floor); AtmosUpdate() picks and fades them each frame.
+#define ATM_MAX 10
+#define GLSL_ATMOS \
+    "uniform vec3 aPos[10]; uniform vec3 aCol[10]; uniform int aN; uniform int aS; uniform vec4 fog; uniform vec4 fogH;\n" \
+    "vec3 atmos(vec3 c, vec3 vp, vec3 fp, float keep){\n" \
+    "  vec3 rd=fp-vp; float L=length(rd); rd/=max(L,1e-4);\n" \
+    "  float bdy=fogH.x*rd.y*L; float od=fog.a*L*exp(-fogH.x*vp.y)*(abs(bdy)<1e-3 ? 1.0 : (1.0-exp(-bdy))/bdy);\n" \
+    "  vec3 air=vec3(0.0);\n" \
+    "  for (int i=0;i<10;i++){ if (i>=aN) break; vec3 q=aPos[i]-vp; float tp=dot(q,rd); float h=sqrt(max(dot(q,q)-tp*tp,0.0))+fogH.z;\n" \
+    "    air+=aCol[i]*((atan((L-tp)/h)+atan(tp/h))/h); }\n" \
+    "  return mix(c, fog.rgb, (1.0-exp(-od))*keep)+air*fogH.y; }\n"
+typedef struct { float pos[ATM_MAX*3], col[ATM_MAX*3]; int n, ns; float fog[4], fogH[4]; float flick; } Atmos;
+static Atmos g_atm;
+static void AtmosSend(Shader sh, const int *loc, int fogOn){     // loc: aPos aCol aN aS fog fogH
+    float fg[4]={g_atm.fog[0],g_atm.fog[1],g_atm.fog[2], fogOn?g_atm.fog[3]:0.0f}; int n=fogOn?g_atm.n:0, ns=fogOn?g_atm.ns:0;
+    if (n>0){ SetShaderValueV(sh,loc[0],g_atm.pos,SHADER_UNIFORM_VEC3,n); SetShaderValueV(sh,loc[1],g_atm.col,SHADER_UNIFORM_VEC3,n); }
+    SetShaderValue(sh,loc[2],&n,SHADER_UNIFORM_INT); SetShaderValue(sh,loc[3],&ns,SHADER_UNIFORM_INT);
+    SetShaderValue(sh,loc[4],fg,SHADER_UNIFORM_VEC4); SetShaderValue(sh,loc[5],g_atm.fogH,SHADER_UNIFORM_VEC4);
+}
+static void AtmosLocs(Shader sh, int *loc){ const char *nm[6]={"aPos","aCol","aN","aS","fog","fogH"}; for (int i=0;i<6;i++) loc[i]=GetShaderLocation(sh,nm[i]); }
+
 // ---- Player -----------------------------------------------------------------
 static Vector3 g_pos   = { 0, EYE_H, 6 };
 static float   g_yaw   = 0.0f;
@@ -159,8 +264,8 @@ static int     g_lookSet = 0;            // --look <yaw> <pitch>: aim the spawn 
 static float   g_lookYaw = 0.0f, g_lookPitch = 0.0f;
 static float   g_vy    = 0.0f;
 static int     g_grounded = 1;
-#if defined(__EMSCRIPTEN__)
-static int     g_devOverlay = 0;   // the public browser build ships without the dev readout
+#if defined(C2_GLES)
+static int     g_devOverlay = 0;   // the public browser and phone builds ship without the dev readout
 #else
 static int     g_devOverlay = 1;
 #endif
@@ -1378,7 +1483,8 @@ static ModelAnimation *RigClip(int type, int role){ EnemyRig *r=RigOf(type); ret
 // verts stay on the GPU untouched and a vertex shader skins them from a per-draw bone
 // matrix array (<= ENEMY_MAX_BONES). raylib's own GPU path is compiled out of this build.
 static Shader g_skinShader; static int g_skinBonesLoc=-1, g_skinReady=-1;   // -1 untried, 0 failed, 1 ok
-static int g_skinLoc[7]={-1,-1,-1,-1,-1,-1,-1};   // lPos lCol lR lN ambient viewPos fog
+static int g_skinLoc[7]={-1,-1,-1,-1,-1,-1,-1};   // lPos lCol lR lN ambient viewPos -
+static int g_skinAtm[6]={-1,-1,-1,-1,-1,-1};      // the air (AtmosLocs)
 static int g_fogOn=0;                          // the arena run fogs enemies; the gallery / menus don't
 static int g_skinEmiLoc=-1;
 static void EnemyGlowDim(float dim){ if (g_skinReady==1 && g_skinEmiLoc>=0) SetShaderValue(g_skinShader,g_skinEmiLoc,&dim,SHADER_UNIFORM_FLOAT); }   // 0 = eyes lit, 1 = out
@@ -1413,8 +1519,9 @@ static int EnemySkinInit(void){
         "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal; in vec4 fragTangent;\n"
         "uniform sampler2D texture0; uniform sampler2D texture2; uniform sampler2D texOrm; uniform sampler2D texEmi; uniform float emiDim; uniform vec4 colDiffuse;\n"
         "uniform vec3 lPos[8]; uniform vec3 lCol[8]; uniform float lR[8]; uniform int lN;\n"
-        "uniform vec3 ambient; uniform vec3 viewPos; uniform vec4 fog;\n"
+        "uniform vec3 ambient; uniform vec3 viewPos;\n"
         "out vec4 finalColor;\n"
+        GLSL_ATMOS
         "void main(){\n"
         "  vec4 t=texture(texture0, fragTexCoord); if (t.a<0.35) discard;\n"
         "  vec3 Ng=normalize(fragNormal); vec3 V=normalize(viewPos-fragPos);\n"
@@ -1438,7 +1545,7 @@ static int EnemySkinInit(void){
         "  spe*=fres;\n"
         "  vec3 c=t.rgb*colDiffuse.rgb*fragColor.rgb*clamp(lit,0.0,1.6) + spe*spi*mix(1.0,ao,0.5);\n"
         "  c+=texture(texEmi,fragTexCoord).rgb*(1.0-emiDim)*1.9;\n"   // self-lit: irradiated irises, mask lenses, embers; emiDim puts it out as he dies
-        "  c=mix(c, fog.rgb, (1.0-exp(-length(viewPos-fragPos)*fog.a))*0.85);\n"   // (emission burns through a little)
+        "  c=atmos(c, viewPos, fragPos, 0.85);\n"   // fog + the lit air in front of him (emission burns through a little)
         "  finalColor=vec4(c, t.a*colDiffuse.a);\n"
         "}\n";
     g_skinShader=LoadShaderFromMemory(vs,fs);
@@ -1447,7 +1554,7 @@ static int EnemySkinInit(void){
         g_skinBonesLoc=GetShaderLocation(g_skinShader,"boneMatrices");
         g_skinLoc[0]=GetShaderLocation(g_skinShader,"lPos");  g_skinLoc[1]=GetShaderLocation(g_skinShader,"lCol");
         g_skinLoc[2]=GetShaderLocation(g_skinShader,"lR");    g_skinLoc[3]=GetShaderLocation(g_skinShader,"lN");
-        g_skinLoc[4]=GetShaderLocation(g_skinShader,"ambient"); g_skinLoc[5]=GetShaderLocation(g_skinShader,"viewPos"); g_skinLoc[6]=GetShaderLocation(g_skinShader,"fog");
+        g_skinLoc[4]=GetShaderLocation(g_skinShader,"ambient"); g_skinLoc[5]=GetShaderLocation(g_skinShader,"viewPos"); AtmosLocs(g_skinShader,g_skinAtm);
         g_skinShader.locs[SHADER_LOC_MAP_NORMAL]=GetShaderLocation(g_skinShader,"texture2");
         g_skinShader.locs[SHADER_LOC_MAP_OCCLUSION]=GetShaderLocation(g_skinShader,"texOrm");
         g_skinShader.locs[SHADER_LOC_MAP_EMISSION]=GetShaderLocation(g_skinShader,"texEmi");
@@ -1562,7 +1669,6 @@ static void EnemyLightUpload(Vector3 at){
     pos[n*3]=g_cam.position.x; pos[n*3+1]=g_cam.position.y+0.6f; pos[n*3+2]=g_cam.position.z;
     col[n*3]=0.42f; col[n*3+1]=0.42f; col[n*3+2]=0.45f; rad[n]=16.0f; n++;
     n+=DynLightsNear(P, 3, 0.0f, pos+n*3, col+n*3, rad+n);     // muzzle flashes, fire, bolts, the lantern
-    { float fg[4]={kFog[0],kFog[1],kFog[2], g_fogOn?kFog[3]:0.0f}; SetShaderValue(g_skinShader,g_skinLoc[6],fg,SHADER_UNIFORM_VEC4); }
     float amb[3]={0.30f,0.29f,0.31f}, vp[3]={g_cam.position.x,g_cam.position.y,g_cam.position.z};
     SetShaderValueV(g_skinShader,g_skinLoc[0],pos,SHADER_UNIFORM_VEC3,n);
     SetShaderValueV(g_skinShader,g_skinLoc[1],col,SHADER_UNIFORM_VEC3,n);
@@ -1578,7 +1684,7 @@ static void EnemyLightUpload(Vector3 at){
 // out torn. raylib does that upload itself, straight before each draw, so there is no getting
 // in after it: the palette is stored already transposed there, and its upload comes out right.
 static void RigUpload(EnemyRig *rg){
-#if defined(__EMSCRIPTEN__)
+#if defined(C2_GLES)                  /* (rlgl does this on every OpenGL ES path, the phone's included) */
     if (!rg->gpu) return;
     int nb=rg->model.skeleton.boneCount;
     for (int b=0;b<nb;b++) rg->model.boneMatrices[b]=MatrixTranspose(rg->model.boneMatrices[b]);
@@ -3630,14 +3736,21 @@ static Rectangle MenuRect(int i){
 // Persist the fullscreen choice across launches (per-machine, gitignored like the
 // tune files). Default is windowed; the menu writes "fullscreen 1" once enabled.
 static char g_lbSaved[4];              // leaderboard initials, remembered between runs (scores.h)
+static const char *OptionsPath(void){          // (the phone's app bundle is read-only: its options live in Documents)
+#if defined(C2_IOS)
+    static char p[512]; if (!p[0]) snprintf(p,sizeof p,"%s/options.txt",C2DocsDir()); return p;
+#else
+    return "options.txt";
+#endif
+}
 static void LoadOptions(void){
-    FILE *f=fopen("options.txt","r"); if(!f) return;
+    FILE *f=fopen(OptionsPath(),"r"); if(!f) return;
     int fs=0; if (fscanf(f,"fullscreen %d",&fs)==1) g_fullscreen=(fs!=0);
     char in[8]={0}; if (fscanf(f," initials %3[A-Z0-9]",in)==1) strcpy(g_lbSaved,in);
     fclose(f);
 }
 static void SaveOptions(void){
-    FILE *f=fopen("options.txt","w"); if(!f) return;
+    FILE *f=fopen(OptionsPath(),"w"); if(!f) return;
     fprintf(f,"fullscreen %d\n", g_fullscreen?1:0);
     if (g_lbSaved[0]) fprintf(f,"initials %s\n", g_lbSaved);
     fclose(f);
@@ -3713,11 +3826,8 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     // empty, with rounds in reserve: reload without being asked -- after the last shot, or the
     // moment an empty gun is drawn again (it used to wait for a dry trigger pull)
     if (!g_reloading && cw->has && cw->magSize>0 && cw->mag<=0 && cw->reserve>0 && g_fireCd<=0.0f && g_vmRaise<=0.0f) TryReload();
-    // just drawn and not full: top it up -- guns that are loaded by hand (the shotgun's tube, the
-    // launcher's drum; firing cuts either short). The belt and the fuel tank are left as they are.
-    if (g_drawTopUp && g_vmRaise<=0.0f){ g_drawTopUp=0;
-        int byHand = cw->grenade || cw->shellCycle>0 || cw->shellReload;
-        if (byHand && !g_reloading && cw->has && cw->magSize>0 && cw->mag<cw->magSize && cw->reserve>0 && !lmb) TryReload(); }
+    // (a gun drawn part-full is left as it is: only an EMPTY one reloads itself, above; R tops it up)
+    if (g_drawTopUp && g_vmRaise<=0.0f) g_drawTopUp=0;
     else if (!g_reloading){
         if (cw->burst>0){                                  // rifle: one 3-round burst per trigger pull
             if (lmbP && g_burstLeft==0) g_burstLeft=cw->burst;
@@ -4035,6 +4145,13 @@ static void EffectsUpdate(float dt){
 
 static void Update(void) {
     float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
+#if defined(C2_IOS)
+    g_touchPlaying = !g_menu && !g_dead && !g_paused;                 // the controls are up only in play
+    TouchOverlayPoll(g_touchPlaying);
+    { float tx,ty; TouchOverlayLastTapPos(&tx,&ty);                   // a tap is a click where it lands; a held finger is the pointer
+      if (tx>=0) g_tapPos=(Vector2){tx,ty}; else if (GetTouchPointCount()>0) g_tapPos=GetTouchPosition(0); }
+    TouchOverlaySetSelectedWeapon(g_curWeapon==2?0:(g_curWeapon==5?1:(g_curWeapon==0?2:3)));
+#endif
 
     // While P-paused, ANY of P / ESC / click resumes (handled here, before ESC would
     // otherwise open the options menu). Stays captured so play resumes seamlessly.
@@ -4077,7 +4194,7 @@ static void Update(void) {
     // The cursor stays hidden and captured in every in-game state -- playing, paused, the
     // death screen -- and only the ESC menu (which needs a pointer) frees it. macOS shows it
     // again whenever the window loses focus, so re-grab the moment we have focus back.
-#if defined(__EMSCRIPTEN__)
+#if defined(C2_GLES)
     // (a browser only grants pointer lock on a user gesture, and refuses for a while if it is asked
     // every frame: re-grab on the click that follows losing it, not continuously)
     if (!g_menu && !MouseCaptured() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) DisableCursor();
@@ -4132,11 +4249,31 @@ static void Update(void) {
     if (IsWindowReady() && MouseCaptured()){
 #if defined(__EMSCRIPTEN__)
         Vector2 md={ (float)WebMouseTakeX(), (float)WebMouseTakeY() };
+#elif defined(C2_IOS)
+        Vector2 md={ TouchOverlayLookDX(), TouchOverlayLookDY() };
 #else
         Vector2 md=GetMouseDelta();
 #endif
         g_vmLook=md;
         g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f;
+#if defined(C2_IOS)
+        // Aim assist (thumbs are not a mouse): the view leans toward the nearest enemy that is already
+        // close to the crosshair and in sight -- gently, a little harder while firing, and not at all
+        // while the thumb is actively steering away. From ../Chernobyl's touch auto-aim.
+        { const float RANGE=26.0f, CY=22.0f*DEG2RAD, CP=12.0f*DEG2RAD, RATE=3.0f;
+          float best=0.0f, bdy=0.0f, bdp=0.0f; Vector3 eye=g_pos;
+          for (int i=0;i<MAX_ENEMIES;i++){ Enemy *e=&g_enemies[i]; if (e->state!=1) continue;
+              Vector3 c={e->pos.x, e->pos.y+1.15f*kEnemy[e->type].scale*e->sc, e->pos.z}, d=Vector3Subtract(c,eye);
+              float dist=Vector3Length(d); if (dist<0.6f || dist>RANGE) continue;
+              float yawTo=atan2f(d.x,d.z), pitTo=asinf(d.y/dist);
+              float dy=yawTo-g_yaw; while (dy>PI) dy-=2*PI; while (dy<-PI) dy+=2*PI; float dp=pitTo-g_pitch;
+              if (fabsf(dy)>CY || fabsf(dp)>CP) continue;
+              if (g_hasMap){ float w=MapRayNearest(eye,Vector3Scale(d,1.0f/dist),dist); if (w>0.0f && w<dist-0.3f) continue; }   // a wall between
+              float sc=(1.0f-fabsf(dy)/CY)*(1.0f-fabsf(dp)/CP)*(1.0f-0.5f*dist/RANGE);
+              if (sc>best){ best=sc; bdy=dy; bdp=dp; } }
+          if (best>0.0f){ float boost=(TouchOverlayFireDown()?1.8f:1.0f)*(TouchOverlayLookActive()?0.35f:1.0f);
+              float k=1.0f-expf(-RATE*boost*best*dt); g_yaw+=bdy*k; g_pitch+=bdp*k; } }
+#endif
         if (g_pitch>1.5f) g_pitch=1.5f;  if (g_pitch<-1.5f) g_pitch=-1.5f;
     }
     Vector3 fwd =Vector3Normalize((Vector3){ sinf(g_yaw)*cosf(g_pitch), sinf(g_pitch), cosf(g_yaw)*cosf(g_pitch) });
@@ -4172,6 +4309,11 @@ static void Update(void) {
         if (!MapSphereHitsWall((Vector3){g_pos.x+mv.x, by, g_pos.z}, 0.42f) && !PlayerIntoEnemy(g_pos.x+mv.x, g_pos.z)) g_pos.x+=mv.x;
         if (!MapSphereHitsWall((Vector3){g_pos.x, by, g_pos.z+mv.z}, 0.42f) && !PlayerIntoEnemy(g_pos.x, g_pos.z+mv.z)) g_pos.z+=mv.z;
     } else { g_pos.x+=mv.x; g_pos.z+=mv.z; }
+    if (g_hasMap && !g_noclip && g_hasHall){            // the playable floor's edge: scenery beyond the walls (the reactor pit) is to look at -- a
+        float m=0.45f;                                  // jump cleared the stump of the breached wall and dropped the player into the shaft
+        if (g_pos.x<g_mapHall[0]+m) g_pos.x=g_mapHall[0]+m; if (g_pos.x>g_mapHall[2]-m) g_pos.x=g_mapHall[2]-m;
+        if (g_pos.z<g_mapHall[1]+m) g_pos.z=g_mapHall[1]+m; if (g_pos.z>g_mapHall[3]-m) g_pos.z=g_mapHall[3]-m;
+    }
     if (g_hasMap && g_noclip){                         // F: free-fly / noclip (inspect or escape)
         if (IsKeyDown(KEY_SPACE))        g_pos.y += speed*dt;
         if (IsKeyDown(KEY_LEFT_CONTROL)) g_pos.y -= speed*dt;
@@ -4240,7 +4382,7 @@ static void Update(void) {
     WeaponAnimate(dt, moving);                             // the gun's idle/shot/reload clips
 
     // overlay + inspect + reset
-#if defined(__EMSCRIPTEN__)
+#if defined(C2_GLES)
     const int devKeys=0;                                   // browser build: no dev overlay, inspect or orient mode (N would also clear the field mid-run)
 #else
     const int devKeys=1;
@@ -4513,16 +4655,17 @@ static void DrawWorld(void) {
                       SetShaderValueV(g_scrollShader,g_wLoc[2],rad,SHADER_UNIFORM_FLOAT,n); }
             SetShaderValue(g_scrollShader,g_wLoc[3],&n,SHADER_UNIFORM_INT);
             SetShaderValue(g_scrollShader,g_wLoc[4],vp,SHADER_UNIFORM_VEC3);
-            SetShaderValue(g_scrollShader,g_wLoc[5],kFog,SHADER_UNIFORM_VEC4);
+            AtmosSend(g_scrollShader,g_wAtm,1);
+            { float fc[3]={0.62f*1.15f,0.78f*1.15f,1.0f*1.15f}; SetShaderValue(g_scrollShader,g_wLoc[6],fc,SHADER_UNIFORM_VEC3); }   // a failing tube's light (baked in vertex alpha)
             SetShaderValue(g_scrollShader,g_scrollLoc,zero,SHADER_UNIFORM_VEC2);
         }
-        if (g_hasScrollShader && g_mapMeshScrollAny){
-            // per-mesh draw so flowing liquids/warpzones can scroll their UVs (tcMod scroll)
-            float t=(float)GetTime();
+        if (g_hasScrollShader){
+            // per mesh: flowing liquids / warpzones scroll their UVs (tcMod scroll); surfaces with lamps of their own switch the glow layers on
+            float t=(float)GetTime(); int lastGlow=-1, scrolled=1;
             for (int i=0;i<g_map.meshCount;i++){
-                float sx=g_mapMeshScroll[i*2], sy=g_mapMeshScroll[i*2+1];
-                Vector2 off={ sx*t, sy*t };
-                SetShaderValue(g_scrollShader,g_scrollLoc,&off,SHADER_UNIFORM_VEC2);
+                float sx=(i<MAP_MAXMESH)?g_mapMeshScroll[i*2]:0, sy=(i<MAP_MAXMESH)?g_mapMeshScroll[i*2+1]:0; int glow=(i<4096)?g_mapMeshGlow[i]:0;
+                if (sx!=0 || sy!=0 || scrolled){ Vector2 off={ sx*t, sy*t }; SetShaderValue(g_scrollShader,g_scrollLoc,&off,SHADER_UNIFORM_VEC2); scrolled=(sx!=0 || sy!=0); }
+                if (glow!=lastGlow){ float gp[4]={glow?(float)MAP_GLOW_K:0.0f, fmodf(t,3600.0f), g_atm.flick, 0}; SetShaderValue(g_scrollShader,g_wLoc[5],gp,SHADER_UNIFORM_VEC4); lastGlow=glow; }
                 DrawMesh(g_map.meshes[i], g_map.materials[g_map.meshMaterial[i]], g_map.transform);
             }
         } else {
@@ -5089,6 +5232,7 @@ static void DrawViewmodel(void){
 #if !defined(_WIN32)
     glClear(GL_DEPTH_BUFFER_BIT);   // weapon always on top
 #endif
+    rlSetClipPlanes(0.05, 4000.0);  // the viewmodel: raylib's own range (the hands come closer to the lens than the world's near plane)
     BeginMode3D(g_vmCam);
         g_gun.transform=M;            // the whole rig transform; draws below pass pos 0 / scale 1
         Vector3 o={0,0,0};
@@ -5426,7 +5570,7 @@ static void LogPerfStats(void){
 // desaturation at low health, a vignette and film grain. The HUD draws after, untouched.
 // --no-post (or a failed target) draws straight to the screen as before.
 static int g_postOff=0;
-static struct { int w,h,ok,hdr; RenderTexture2D scene,a,b; Shader bright,blur,comp; int lDir,lBloom,lP,lTime; } g_pp;
+static struct { int w,h,ok,hdr; RenderTexture2D scene,a,b,c,d; Shader bright,blur,comp; int lDir,lBloom,lBloom2,lP,lTime; } g_pp;   // a,b: quarter res (the glow); c,d: sixteenth (the wide haze round a light)
 static RenderTexture2D PostTargetHDR(int w, int h, int *hdr){
     RenderTexture2D t={0};
     t.id=rlLoadFramebuffer();
@@ -5434,7 +5578,14 @@ static RenderTexture2D PostTargetHDR(int w, int h, int *hdr){
         rlEnableFramebuffer(t.id);
         t.texture.id=rlLoadTexture(NULL,w,h,RL_PIXELFORMAT_UNCOMPRESSED_R16G16B16A16,1);
         t.texture.width=w; t.texture.height=h; t.texture.format=PIXELFORMAT_UNCOMPRESSED_R16G16B16A16; t.texture.mipmaps=1;
+#if defined(__APPLE__) || defined(__EMSCRIPTEN__)   /* (every build with the GL header in: Mac, phone, browser) */
+        // an explicit 24-bit depth buffer: raylib asks for an unsized one and takes what the driver gives, and
+        // at 16 bits a poster a centimetre off its wall flickers against it from across the hall
+        { GLuint rb=0; glGenRenderbuffers(1,&rb); glBindRenderbuffer(GL_RENDERBUFFER,rb);
+          glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,w,h); glBindRenderbuffer(GL_RENDERBUFFER,0); t.depth.id=rb; }
+#else
         t.depth.id=rlLoadTextureDepth(w,h,true);
+#endif
         t.depth.width=w; t.depth.height=h; t.depth.format=19; t.depth.mipmaps=1;
         rlFramebufferAttach(t.id,t.texture.id,RL_ATTACHMENT_COLOR_CHANNEL0,RL_ATTACHMENT_TEXTURE2D,0);
         rlFramebufferAttach(t.id,t.depth.id,RL_ATTACHMENT_DEPTH,RL_ATTACHMENT_RENDERBUFFER,0);
@@ -5457,29 +5608,30 @@ static void PostInit(int w, int h){
         "  c+=(texture(texture0,fragTexCoord+dir*3.231).rgb+texture(texture0,fragTexCoord-dir*3.231).rgb)*0.070;\n"
         "  finalColor=vec4(c,1.0); }\n";
     static const char *fsComp=GLSL_HDR
-        "in vec2 fragTexCoord; uniform sampler2D texture0; uniform sampler2D bloomTex; uniform vec4 P; uniform float time; out vec4 finalColor;\n"   // P = hurt, lowhp, shake, -
+        "in vec2 fragTexCoord; uniform sampler2D texture0; uniform sampler2D bloomTex; uniform sampler2D bloomWide; uniform vec4 P; uniform float time; out vec4 finalColor;\n"   // P = hurt, lowhp, shake, -
         "void main(){ vec2 uv=fragTexCoord, d=uv-0.5; float ca=0.0010+P.x*0.0060+P.z*0.0030;\n"
         "  vec3 c=vec3(texture(texture0,uv+d*ca).r, texture(texture0,uv).g, texture(texture0,uv-d*ca).b);\n"
-        "  c+=texture(bloomTex,uv).rgb*0.70;\n"
+        "  c+=texture(bloomTex,uv).rgb*0.62+texture(bloomWide,uv).rgb*0.55;\n"                       // the glow, and the wide veil round a strong light
         "  vec3 hi=max(c-0.80,0.0); c=min(c,0.80)+hi/(1.0+hi*1.6);\n"                 // highlights roll off instead of clipping
-        "  c=c*1.30+0.012; c=mix(c, c*c*(3.0-2.0*c), 0.12);\n"                                         // a little contrast
+        "  c=c*1.30+0.012; c=mix(c, c*c*(3.0-2.0*c), 0.16);\n"                                         // a little contrast
+        "  { float lg=dot(c,vec3(0.299,0.587,0.114)); c*=mix(vec3(0.93,1.0,1.08), vec3(1.05,1.0,0.94), smoothstep(0.04,0.60,lg)); }\n"   // the grade: shadows lean cold, the lit parts warm
         "  float l=dot(c,vec3(0.299,0.587,0.114)); c=mix(c, vec3(l)*vec3(1.05,0.96,0.94), P.y*0.75);\n"   // near death the colour drains
         "  c*=mix(0.74,1.0, smoothstep(0.88,0.32,length(d*vec2(1.0,0.88))));\n"       // vignette
         "  float n=fract(sin(dot(gl_FragCoord.xy+vec2(time*61.0,time*37.0), vec2(12.9898,78.233)))*43758.5453);\n"
         "  c+=(n-0.5)*0.030*(1.2-l);\n"                                                 // grain, stronger in the dark
         "  finalColor=vec4(c,1.0); }\n";
-    if (g_pp.ok){ UnloadRenderTexture(g_pp.scene); UnloadRenderTexture(g_pp.a); UnloadRenderTexture(g_pp.b); }
+    if (g_pp.ok){ UnloadRenderTexture(g_pp.scene); UnloadRenderTexture(g_pp.a); UnloadRenderTexture(g_pp.b); UnloadRenderTexture(g_pp.c); UnloadRenderTexture(g_pp.d); }
     else if (!g_pp.bright.id){
         g_pp.bright=LoadShaderFromMemory(0,fsBright); g_pp.blur=LoadShaderFromMemory(0,fsBlur); g_pp.comp=LoadShaderFromMemory(0,fsComp);
-        g_pp.lDir=GetShaderLocation(g_pp.blur,"dir"); g_pp.lBloom=GetShaderLocation(g_pp.comp,"bloomTex");
+        g_pp.lDir=GetShaderLocation(g_pp.blur,"dir"); g_pp.lBloom=GetShaderLocation(g_pp.comp,"bloomTex"); g_pp.lBloom2=GetShaderLocation(g_pp.comp,"bloomWide");
         g_pp.lP=GetShaderLocation(g_pp.comp,"P"); g_pp.lTime=GetShaderLocation(g_pp.comp,"time");
     }
     g_pp.scene=PostTargetHDR(w,h,&g_pp.hdr);
-    g_pp.a=LoadRenderTexture(w/4,h/4); g_pp.b=LoadRenderTexture(w/4,h/4);
-    SetTextureFilter(g_pp.scene.texture,TEXTURE_FILTER_BILINEAR); SetTextureFilter(g_pp.a.texture,TEXTURE_FILTER_BILINEAR); SetTextureFilter(g_pp.b.texture,TEXTURE_FILTER_BILINEAR);
-    SetTextureWrap(g_pp.a.texture,TEXTURE_WRAP_CLAMP); SetTextureWrap(g_pp.b.texture,TEXTURE_WRAP_CLAMP); SetTextureWrap(g_pp.scene.texture,TEXTURE_WRAP_CLAMP);
+    g_pp.a=LoadRenderTexture(w/4,h/4); g_pp.b=LoadRenderTexture(w/4,h/4); g_pp.c=LoadRenderTexture(w/16,h/16); g_pp.d=LoadRenderTexture(w/16,h/16);
+    SetTextureFilter(g_pp.scene.texture,TEXTURE_FILTER_BILINEAR); SetTextureWrap(g_pp.scene.texture,TEXTURE_WRAP_CLAMP);
+    { RenderTexture2D *q[4]={&g_pp.a,&g_pp.b,&g_pp.c,&g_pp.d}; for (int i=0;i<4;i++){ SetTextureFilter(q[i]->texture,TEXTURE_FILTER_BILINEAR); SetTextureWrap(q[i]->texture,TEXTURE_WRAP_CLAMP); } }
     g_pp.w=w; g_pp.h=h;
-    g_pp.ok=(g_pp.scene.id>0 && g_pp.a.id>0 && g_pp.b.id>0 && g_pp.bright.id>0 && g_pp.blur.id>0 && g_pp.comp.id>0);
+    g_pp.ok=(g_pp.scene.id>0 && g_pp.a.id>0 && g_pp.b.id>0 && g_pp.c.id>0 && g_pp.d.id>0 && g_pp.bright.id>0 && g_pp.blur.id>0 && g_pp.comp.id>0);
     DebugLog("post","\"ok\":%d,\"hdr\":%d,\"w\":%d,\"h\":%d", g_pp.ok, g_pp.hdr, w, h);
 }
 static void PostBlit(Texture2D src, int dw, int dh){        // a render texture, the right way up, filling dw x dh
@@ -5513,11 +5665,141 @@ static void AudioBedUpdate(float dt){
         }
     }
 }
+// ---- The reactor: live light out of the breach ---------------------------------------------
+// The map marks where the wrecked core lies ("info_reactor", in the pit past the east wall). What
+// the baked lighting cannot do is drawn here: a blue light that breathes and stutters (on the
+// walls, and on anything that walks in front of it -- slowly: it is not a strobe), the glow hanging in the shaft, shafts of it
+// standing up through the dust, slow smoke, and motes of burning graphite climbing out.
+// A failing fluorescent tube: holds, buzzes, drops out, strikes again (0..1). One clock for the lot.
+static float FlickWave(float t){
+    float cyc=fmodf(t,7.3f); int tick=(int)(t*17.0f);
+    float r=sinf(tick*12.9898f)*43758.547f; r-=floorf(r);
+    if (cyc<2.6f) return 0.90f+0.10f*r;                                   // lit, with its buzz
+    if (cyc<3.3f) return r<0.45f?0.10f:1.0f;                              // going
+    if (cyc<5.2f) return r<0.06f?0.85f:0.04f;                             // out, but for a strike now and then
+    if (cyc<5.9f) return r<0.55f?1.0f:0.12f;                              // catching
+    return 0.90f+0.10f*r;
+}
+// This frame's air: which lamps stand in the fog (the map's nearest that the eye has a line to, eased in and
+// out so none pops, then the brightest flashes), and the fog's own colour -- it takes the tint of the lamps round you.
+static void AtmosUpdate(float dt){
+    static float vis[64];
+    Atmos *A=&g_atm; A->n=A->ns=0; A->flick=FlickWave((float)GetTime());
+    A->fog[0]=kFog[0]; A->fog[1]=kFog[1]; A->fog[2]=kFog[2]; A->fog[3]=g_hasMap?kFog[3]:0.0f;
+    A->fogH[0]=0.11f; A->fogH[1]=0.140f; A->fogH[2]=0.9f; A->fogH[3]=0;      // height fall-off (1/m), strength of the lit air, how soft a lamp's core is (m)
+    if (!g_hasMap) return;
+    Vector3 cam=g_cam.position;
+    int nl=g_nMapLights<64?g_nMapLights:0;                                 // (a Xonotic arena's hundreds of lights are left to the bake)
+    int pick[6]; float pw[6]; int np=0;
+    for (int l=0;l<nl;l++){
+        Vector3 lp=g_mapLights[l].pos; float d=Vector3Distance(lp,cam), w=1.0f-fminf(1.0f,fmaxf(0.0f,(d-38.0f)/20.0f)), want=0.0f;
+        if (w>0.0f && g_mapCol.ready){
+            for (int k=0;k<2;k++){ Vector3 q={lp.x,lp.y-0.1f-1.8f*k,lp.z}; Vector3 dl=Vector3Subtract(q,cam); float dd=Vector3Length(dl);
+                if (dd<0.6f){ want+=0.5f; continue; }
+                float hit=MapRayNearest(cam, Vector3Scale(dl,1.0f/dd), dd-0.2f);
+                if (!(hit>0.0f && hit<dd-0.35f)) want+=0.5f; }
+        }
+        vis[l]+=(want-vis[l])*fminf(1.0f,dt*3.5f);
+        float tint=w*(0.35f+0.65f*vis[l])*0.030f;                           // the fog round you takes the lamps' colour
+        A->fog[0]+=g_mapLights[l].color.x*tint; A->fog[1]+=g_mapLights[l].color.y*tint; A->fog[2]+=g_mapLights[l].color.z*tint;
+        float wt=w*vis[l]; if (wt<0.01f) continue;
+        int k=np; while (k>0 && pw[k-1]<wt) k--;
+        if (k>=6) continue;
+        int last=(np<6)?np:5; for (int j=last;j>k;j--){ pick[j]=pick[j-1]; pw[j]=pw[j-1]; }
+        pick[k]=l; pw[k]=wt; if (np<6) np++;
+    }
+    for (int j=0;j<np;j++){ const MapLight *L=&g_mapLights[pick[j]]; int n=A->n++;
+        A->pos[n*3]=L->pos.x; A->pos[n*3+1]=L->pos.y; A->pos[n*3+2]=L->pos.z;
+        A->col[n*3]=L->color.x*pw[j]; A->col[n*3+1]=L->color.y*pw[j]; A->col[n*3+2]=L->color.z*pw[j]; }
+    A->ns=A->n;
+    for (int l=0;l<g_nMapFlick && A->n<ATM_MAX-3;l++){                       // the failing tubes: their halo stutters with them
+        Vector3 lp=g_mapFlick[l].pos; float d=Vector3Distance(lp,cam), w=(1.0f-fminf(1.0f,fmaxf(0.0f,(d-38.0f)/20.0f)))*A->flick; if (w<0.02f) continue;
+        Vector3 dl=Vector3Subtract(lp,cam); float hit=(d>0.6f && g_mapCol.ready)?MapRayNearest(cam, Vector3Scale(dl,1.0f/d), d-0.4f):0.0f;
+        if (hit>0.0f && hit<d-0.6f) continue;
+        int n=A->n++; A->pos[n*3]=lp.x; A->pos[n*3+1]=lp.y; A->pos[n*3+2]=lp.z; A->col[n*3]=0.62f*w; A->col[n*3+1]=0.78f*w; A->col[n*3+2]=1.0f*w; }
+    { float pos[24], col[24], rad[8]; int room=ATM_MAX-A->n; if (room>4) room=4;     // flashes, fire, the core: they light the air too
+      int nd=DynLightsNear(cam, room, 50.0f, pos, col, rad);
+      for (int j=0;j<nd;j++){ int n=A->n++; float k=0.5f*fminf(1.2f, rad[j]/22.0f);
+          A->pos[n*3]=pos[j*3]; A->pos[n*3+1]=pos[j*3+1]; A->pos[n*3+2]=pos[j*3+2]; A->col[n*3]=col[j*3]*k; A->col[n*3+1]=col[j*3+1]*k; A->col[n*3+2]=col[j*3+2]*k; } }
+    if (g_skinShader.id>0) AtmosSend(g_skinShader,g_skinAtm,g_fogOn);
+}
+// Dust: motes hanging in the air round the player, seen only where a lamp catches them. They live in a box that
+// follows the camera (each wraps round it), drift and settle; brightness comes from the lamps AtmosUpdate chose.
+static void DrawDust(void){
+    if (!g_hasMap || !g_hasSmokeTex || g_atm.n<=0) return;
+    const float BX=22.0f, BY=5.2f; float t=(float)GetTime(); Vector3 cam=g_cam.position;
+    rlDisableDepthMask(); BeginBlendMode(BLEND_ADDITIVE);
+    for (int k=0;k<170;k++){
+        float s1=sinf(k*12.9898f)*43758.547f, r1=s1-floorf(s1), s2=sinf(k*78.233f)*12543.123f, r2=s2-floorf(s2), s3=sinf(k*39.425f)*9631.71f, r3=s3-floorf(s3);
+        float x=r1*BX+0.25f*sinf(t*0.31f+k)+t*0.05f*(r2-0.5f), y=r2*BY-t*(0.015f+0.03f*r3), z=r3*BX+0.25f*cosf(t*0.27f+k*1.7f)+t*0.05f*(r1-0.5f);
+        x=cam.x+fmodf(fmodf(x-cam.x,BX)+BX*1.5f,BX)-BX*0.5f; z=cam.z+fmodf(fmodf(z-cam.z,BX)+BX*1.5f,BX)-BX*0.5f; y=0.1f+fmodf(fmodf(y,BY)+BY,BY);
+        Vector3 q={x,y,z}; float dc=Vector3Distance(q,cam); if (dc<0.7f) continue;
+        float edge=fminf(1.0f,(BX*0.5f-fmaxf(fabsf(x-cam.x),fabsf(z-cam.z)))/3.0f);
+        float lr=0,lg=0,lb=0;
+        for (int i=0;i<g_atm.n;i++){ float dx=g_atm.pos[i*3]-x, dy=g_atm.pos[i*3+1]-y, dz=g_atm.pos[i*3+2]-z; float a=1.0f-sqrtf(dx*dx+dy*dy+dz*dz)/13.0f; if (a<=0) continue; a*=a;
+            lr+=g_atm.col[i*3]*a; lg+=g_atm.col[i*3+1]*a; lb+=g_atm.col[i*3+2]*a; }
+        float tw=(0.55f+0.45f*sinf(t*(0.8f+1.7f*r1)+k*2.1f))*edge*fminf(1.0f,(dc-0.7f)/1.5f)*150.0f;      // it turns: catches the light, loses it
+        float cr=lr*tw, cg=lg*tw, cb=lb*tw; if (cr+cg+cb<4.0f) continue;
+        DrawBillboard(g_cam, g_smokeTex, q, 0.035f+0.045f*r3, (Color){(unsigned char)fminf(cr,255),(unsigned char)fminf(cg,255),(unsigned char)fminf(cb,255),255});
+    }
+    EndBlendMode(); rlEnableDepthMask();
+}
+static float RxNoise(float t, float k){ return 0.5f+0.5f*sinf(t*k)*sinf(t*k*0.37f+1.7f); }
+static void ReactorLight(void){
+    if (!g_hasMap || !g_hasReactor) return;
+    float t=(float)GetTime();
+    float f=0.86f+0.14f*RxNoise(t,0.55f);                                        // a slow breathing only: a faster shimmer strobed the walls beside the breach
+    Vector3 p=g_mapReactor;
+    DynLightAdd((Vector3){p.x-6.5f,p.y+8.0f,p.z},(Vector3){0.34f*f,0.62f*f,1.0f*f},30.0f,0.25f,1);   // at the mouth of the breach: reaches into the hall
+    DynLightAdd((Vector3){p.x,p.y+3.0f,p.z},(Vector3){0.40f*f,0.70f*f,1.0f*f},34.0f,0.25f,1);        // down in the shaft
+}
+static void DrawReactorFX(void){
+    if (!g_hasMap || !g_hasReactor || !g_hasSmokeTex) return;
+    float t=(float)GetTime(); Vector3 p=g_mapReactor;
+    float f=0.86f+0.14f*RxNoise(t,0.55f);
+    rlDisableDepthMask();
+    for (int k=0;k<10;k++){                                                      // smoke: slow dark rolls climbing the shaft
+        float ph=fmodf(t*0.045f+k*0.1f,1.0f), a=k*2.4f+t*0.05f;
+        Vector3 q={p.x+cosf(a)*4.5f, p.y+2.0f+ph*26.0f, p.z+sinf(a)*5.5f};
+        unsigned char al=(unsigned char)(70.0f*sinf(ph*PI));
+        DrawBillboard(g_cam, g_smokeTex, q, 9.0f+ph*9.0f, (Color){16,18,24,al});
+    }
+    BeginBlendMode(BLEND_ADDITIVE);
+    for (int k=0;k<6;k++){                                                       // the glow itself, stacked up the shaft, brightest at the core
+        float h=k*2.6f, sz=17.0f-k*1.6f, w=(1.0f-k/7.0f)*f;
+        DrawBillboard(g_cam, g_smokeTex, (Vector3){p.x,p.y+h,p.z}, sz*(1.0f+0.04f*sinf(t*0.7f+k)), (Color){(unsigned char)(40*w),(unsigned char)(110*w),(unsigned char)(235*w),255});
+    }
+    DrawBillboard(g_cam, g_smokeTex, (Vector3){p.x,p.y+0.5f,p.z}, 9.0f, (Color){(unsigned char)(150*f),(unsigned char)(215*f),(unsigned char)(255*f),255});
+    for (int k=0;k<7;k++){                                                       // shafts of it standing in the dust: tall, narrow, drifting
+        float a=k*0.9f+0.3f, r=2.0f+(k%3)*2.2f, sway=0.6f*sinf(t*0.21f+k*1.9f);
+        Vector3 q={p.x+cosf(a)*r+sway, p.y+10.0f, p.z+sinf(a)*r*1.3f};
+        float w=(0.10f+0.08f*RxNoise(t+k*3.1f,0.6f))*f;
+        DrawBillboardPro(g_cam, g_smokeTex, (Rectangle){0,0,(float)g_smokeTex.width,(float)g_smokeTex.height}, q, (Vector3){0.06f*sinf(k*1.3f),1.0f,0.05f*cosf(k*2.1f)},
+                         (Vector2){2.6f+0.5f*(k%2),26.0f}, (Vector2){1.3f,13.0f}, 0.0f, (Color){(unsigned char)(120*w),(unsigned char)(190*w),(unsigned char)(255*w),255});
+    }
+    for (int k=0;k<90;k++){                                                      // motes: burning graphite carried up on the heat
+        float s1=sinf(k*12.9898f)*43758.547f, r1=s1-floorf(s1), s2=sinf(k*78.233f)*12543.123f, r2=s2-floorf(s2), s3=sinf(k*39.425f)*9631.71f, r3=s3-floorf(s3);
+        float ph=fmodf(t*(0.035f+0.05f*r1)+r2,1.0f), a=r3*6.2832f+t*0.15f*(r1-0.5f), rad=1.0f+7.0f*r2*(0.6f+0.4f*ph);
+        Vector3 q={p.x+cosf(a)*rad+0.5f*sinf(t*0.9f+k), p.y-1.0f+ph*24.0f, p.z+sinf(a)*rad*1.2f+0.5f*cosf(t*0.7f+k*1.7f)};
+        float fade=sinf(ph*PI), tw=0.6f+0.4f*sinf(t*(3.0f+5.0f*r1)+k);
+        int hot=(k%5==0);                                                        // most are the blue of the glow; a few still burn orange
+        Color c= hot ? (Color){(unsigned char)(255*fade*tw),(unsigned char)(150*fade*tw),(unsigned char)(50*fade*tw),255}
+                     : (Color){(unsigned char)(120*fade*tw),(unsigned char)(200*fade*tw),(unsigned char)(255*fade*tw),255};
+        DrawBillboard(g_cam, g_smokeTex, q, 0.10f+0.16f*r3, c);
+    }
+    EndBlendMode();
+    rlEnableDepthMask();
+}
 static void DrawScene(void){
     ClearBackground((Color){70,90,110,255});
     if (g_hasMap) DrawSky();                  // gradient sky shows through the map's sky openings
+    rlSetClipPlanes(0.08, 400.0);             // the world: a tight depth range (the default 0.05..4000 spends its precision on nothing; the hall is 150 m)
+    ReactorLight();                           // (before the world is drawn: it is one of this frame's lights)
+    AtmosUpdate(GetFrameTime());              // which lamps stand in the fog this frame (after the lights above are in)
     BeginMode3D(g_cam);
         DrawWorld();
+        DrawReactorFX();
+        DrawDust();
         DrawEnemies();
         DrawPickups();
         DrawBolts();
@@ -5545,15 +5827,26 @@ static void Frame(void) {
             BeginTextureMode(g_pp.a); BeginShaderMode(g_pp.blur); SetShaderValue(g_pp.blur,g_pp.lDir,dy,SHADER_UNIFORM_VEC2);
                 PostBlit(g_pp.b.texture,g_pp.a.texture.width,g_pp.a.texture.height); EndShaderMode(); EndTextureMode();
         }
+        BeginTextureMode(g_pp.c); PostBlit(g_pp.a.texture,g_pp.c.texture.width,g_pp.c.texture.height); EndTextureMode();   // ...and down again, blurred again: the wide veil
+        for (int it=0;it<2;it++){
+            float dx[2]={(1.0f+it)/g_pp.c.texture.width,0}, dy[2]={0,(1.0f+it)/g_pp.c.texture.height};
+            BeginTextureMode(g_pp.d); BeginShaderMode(g_pp.blur); SetShaderValue(g_pp.blur,g_pp.lDir,dx,SHADER_UNIFORM_VEC2);
+                PostBlit(g_pp.c.texture,g_pp.d.texture.width,g_pp.d.texture.height); EndShaderMode(); EndTextureMode();
+            BeginTextureMode(g_pp.c); BeginShaderMode(g_pp.blur); SetShaderValue(g_pp.blur,g_pp.lDir,dy,SHADER_UNIFORM_VEC2);
+                PostBlit(g_pp.d.texture,g_pp.c.texture.width,g_pp.c.texture.height); EndShaderMode(); EndTextureMode();
+        }
     }
     BeginDrawing();
+#if defined(C2_IOS)
+        rlPushMatrix(); rlScalef(g_uis,g_uis,1.0f);                   // everything 2D from here is in virtual pixels
+#endif
         if (post){
             float lowhp=(!g_godMode && !g_dead && g_playerHp>0 && g_playerHp<35.0f) ? (1.0f-g_playerHp/35.0f) : (g_dead?1.0f:0.0f);
             float P[4]={g_hurt,lowhp,g_shake,0}, tm=(float)GetTime();
             ClearBackground(BLACK);
             BeginShaderMode(g_pp.comp);
                 SetShaderValue(g_pp.comp,g_pp.lP,P,SHADER_UNIFORM_VEC4); SetShaderValue(g_pp.comp,g_pp.lTime,&tm,SHADER_UNIFORM_FLOAT);
-                SetShaderValueTexture(g_pp.comp,g_pp.lBloom,g_pp.a.texture);
+                SetShaderValueTexture(g_pp.comp,g_pp.lBloom,g_pp.a.texture); SetShaderValueTexture(g_pp.comp,g_pp.lBloom2,g_pp.c.texture);
                 PostBlit(g_pp.scene.texture,GetScreenWidth(),GetScreenHeight());
             EndShaderMode();
         } else DrawScene();
@@ -5562,6 +5855,10 @@ static void Frame(void) {
         DrawHUD();
         if (g_menu) DrawMenu();
         else if (g_paused) DrawPaused();
+#if defined(C2_IOS)
+        TouchOverlayDraw(g_touchPlaying);
+        rlPopMatrix();
+#endif
     EndDrawing();
     if (g_debug && (frameNo%30==0))
         DebugLog("frame","\"n\":%d,\"fps\":%d,\"anim\":%d,\"pos\":[%.1f,%.1f,%.1f]",
@@ -5763,20 +6060,44 @@ static void StartSelectedMap(void){
                 "  fragNormal=mat3(matModel)*vertexNormal; gl_Position=mvp*vec4(vertexPosition,1.0); }\n";
             const char *fs=GLSL_HDR
                 "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal;\n"
-                "uniform sampler2D texture0; uniform vec4 colDiffuse; uniform vec2 uvOffset;\n"
-                "uniform vec3 dPos[8]; uniform vec3 dCol[8]; uniform float dR[8]; uniform int dN; uniform vec3 viewPos; uniform vec4 fog;\n"
+                "uniform sampler2D texture0; uniform sampler2D glowTex; uniform vec4 colDiffuse; uniform vec2 uvOffset;\n"
+                "uniform vec3 dPos[8]; uniform vec3 dCol[8]; uniform float dR[8]; uniform int dN; uniform vec3 viewPos;\n"
+                "uniform vec4 glowP; uniform vec3 flickCol;\n"      // glowP: layers in glowTex (0 = none), time, the failing lamps' level
                 "out vec4 finalColor;\n"
-                "void main(){ vec4 t=texture(texture0, fragTexCoord+uvOffset); vec4 base=t*colDiffuse; vec3 c=base.rgb*fragColor.rgb;\n"
+                GLSL_ATMOS
+                "void main(){ vec2 uv=fragTexCoord+uvOffset; vec4 t=texture(texture0, uv); vec4 base=t*colDiffuse; vec3 c=base.rgb*fragColor.rgb;\n"
                 "  vec3 N=normalize(fragNormal);\n"
+                "  c+=base.rgb*flickCol*((1.0-fragColor.a)*glowP.z);\n"                                   // the failing tubes: their baked share, stuttering
                 "  for (int i=0;i<8;i++){ if (i>=dN) break; vec3 dl=dPos[i]-fragPos; float d=length(dl);\n"
                 "    if (d<dR[i]){ float att=1.0-d/dR[i]; att*=att; float nl=abs(dot(N,dl/max(d,1e-4)))*0.75+0.25;\n"   // (brush winding flips: either face lights)
                 "      c+=base.rgb*dCol[i]*att*nl; } }\n"
-                "  c=mix(c, fog.rgb, 1.0-exp(-length(viewPos-fragPos)*fog.a));\n"
-                "  finalColor=vec4(c, base.a*fragColor.a); }\n";
+                // a sheen from the map's lamps: worn floors and paint catch them. No shadow rays here, so the baked light stands in for one
+                "  vec3 V=normalize(viewPos-fragPos); vec3 Nv=dot(N,V)<0.0?-N:N; float flr=smoothstep(0.70,0.95,Nv.y);\n"
+                "  float occ=clamp(dot(fragColor.rgb,vec3(0.6)),0.0,1.0), tl=dot(t.rgb,vec3(0.333));\n"
+                "  float gl=mix(0.10,0.60,flr)*(0.25+0.75*smoothstep(0.10,0.55,tl)), shin=mix(22.0,64.0,flr), fres=0.30+0.70*pow(1.0-max(dot(Nv,V),0.0),3.0);\n"
+                "  vec3 sp=vec3(0.0);\n"
+                "  for (int i=0;i<10;i++){ if (i>=aS) break; vec3 dl=aPos[i]-fragPos; float d=length(dl); float att=max(1.0-d/36.0,0.0);\n"
+                "    sp+=aCol[i]*pow(max(dot(Nv,normalize(dl/max(d,1e-4)+V)),0.0),shin)*att*att; }\n"
+                "  c+=sp*(gl*fres*occ);\n"
+                "  vec3 g=vec3(0.0);\n"
+                "  if (glowP.x>0.5){\n"                                                                      // this surface's own lamps: each layer to its waveform
+                "    vec2 dx=dFdx(uv), dy=dFdy(uv); float K=glowP.x, tm=glowP.y, ph=dot(N,fragPos)*2.3; dx.y/=K; dy.y/=K;\n"   // (ph: constant across a flat panel, different on the next one)
+                "    vec2 f=vec2(fract(uv.x), clamp(fract(uv.y),0.004,0.996));\n"
+                "    g =textureGrad(glowTex, vec2(f.x,(f.y+0.0)/K), dx, dy).rgb*(0.93+0.07*sin(tm*9.0+ph*3.0));\n"
+                "    g+=textureGrad(glowTex, vec2(f.x,(f.y+1.0)/K), dx, dy).rgb*smoothstep(-0.25,0.25,sin(tm*5.2+ph));\n"
+                "    g+=textureGrad(glowTex, vec2(f.x,(f.y+2.0)/K), dx, dy).rgb*smoothstep(-0.25,0.25,sin(tm*3.3+ph*1.7+2.0));\n"
+                "    g+=textureGrad(glowTex, vec2(f.x,(f.y+3.0)/K), dx, dy).rgb*smoothstep(0.05,0.45,sin(tm*2.1+ph*0.6+4.0));\n"
+                "    g+=textureGrad(glowTex, vec2(f.x,(f.y+4.0)/K), dx, dy).rgb*smoothstep(-0.35,0.35,sin(tm*14.0+ph));\n"
+                "    g+=textureGrad(glowTex, vec2(f.x,(f.y+5.0)/K), dx, dy).rgb*glowP.z;\n"
+                "    g*=1.7; c+=g; }\n"
+                "  c=atmos(c, viewPos, fragPos, 1.0)+g*0.35;\n"                                             // (a lamp burns through the haze a little)
+                "  finalColor=vec4(c, base.a); }\n";
             g_scrollShader=LoadShaderFromMemory(vs,fs);
             if (g_scrollShader.id>0){ g_scrollLoc=GetShaderLocation(g_scrollShader,"uvOffset"); g_hasScrollShader=1;
-                const char *nm[6]={"dPos","dCol","dR","dN","viewPos","fog"};
-                for (int i=0;i<6;i++) g_wLoc[i]=GetShaderLocation(g_scrollShader,nm[i]); }
+                const char *nm[7]={"dPos","dCol","dR","dN","viewPos","glowP","flickCol"};
+                for (int i=0;i<7;i++) g_wLoc[i]=GetShaderLocation(g_scrollShader,nm[i]);
+                AtmosLocs(g_scrollShader,g_wAtm);
+                g_scrollShader.locs[SHADER_LOC_MAP_EMISSION]=GetShaderLocation(g_scrollShader,"glowTex"); }
         }
         if (g_hasScrollShader){
             for (int i=0;i<g_map.materialCount;i++) g_map.materials[i].shader=g_scrollShader;
@@ -5794,6 +6115,8 @@ static void StartSelectedMap(void){
         else if (!haveCustom){ g_yaw=PickOpenYaw(g_pos);          // face the most open direction, not a wall
             DebugLog("spawnface","\"yaw\":%.1f", g_yaw*57.29578f); }
         MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
+        { const char *at=getenv("CHERNOBYL_AT"); float ax=0, az=0;                                     // dev: stand here instead (metres, map x z) -- map stills
+          if (at && sscanf(at,"%f %f",&ax,&az)==2){ g_pos.x=ax; g_pos.z=az; g_devOverlay=0; g_noEnemies=1; } }
         DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d", g_navNX, g_navNZ, g_navCount, g_navOK);
         g_spawnResetPos=g_pos; g_voidY=-12.0f;        // below the lowest floor (normalised to y=0) -> fell off
     } else { g_pos=(Vector3){0,EYE_H,6}; g_voidY=-1e9f; }
@@ -5869,7 +6192,11 @@ static void WebFrame(void){
 #include "viewer.h"                     // --viewer: side-by-side enemy model comparison
 #include "soundboard.h"                 // --sounds: every sound, grouped, playable, with the gaps marked
 
+#if defined(C2_IOS)
+static int C2Main(int argc, char **argv) {       // the bridge is main() there; this runs once, up to the first frame
+#else
 int main(int argc, char **argv) {
+#endif
     int vmWeapon=-1; float vmOv[7]={0}; int vmHas=0;          // dev: --weapon / --vm framing overrides
     unsigned int seedArg=0; int seedSet=0;                    // --seed N : deterministic runs
     int fpsOv=-1;                                             // --fps N : target-fps override (perf gate)
@@ -5926,6 +6253,9 @@ int main(int argc, char **argv) {
     int bgRun = getenv("CHERNOBYL_BACKGROUND") && *getenv("CHERNOBYL_BACKGROUND") && strcmp(getenv("CHERNOBYL_BACKGROUND"),"0");
     if (bgRun) SetConfigFlags(FLAG_WINDOW_UNFOCUSED|FLAG_WINDOW_HIDDEN);
     InitWindow(1280,720,"Chernobyl 2");
+#if defined(C2_IOS)
+    g_uis=(float)C2RealH()/720.0f; if (g_uis<1.0f) g_uis=1.0f;      // the game's screen is 720 high; the phone's is what it is
+#endif
     SetExitKey(KEY_NULL);              // ESC opens the options menu instead of quitting
     int ready=IsWindowReady();
     if (ready){                        // soft radial puff for the minigun smoke billboards
@@ -5967,7 +6297,7 @@ int main(int argc, char **argv) {
         if (FileExists(ip)){
             Image ic=LoadImage(ip);
             if (ic.data){ ImageFormat(&ic,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8); SetWindowIcon(ic); UnloadImage(ic); }
-#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#if defined(C2_MAC)
             MacSetDockIcon(ip);            // SetWindowIcon is ignored on macOS; set the Dock image directly
 #endif
         }
@@ -6185,6 +6515,10 @@ int main(int argc, char **argv) {
     StartSelectedMap();
     WebMouseInit();
     emscripten_set_main_loop(WebFrame,0,1);
+#elif defined(C2_IOS)
+    if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
+    StartSelectedMap();
+    return 0;                                   // the display link calls ChernobylGameStep from here on
 #else
     if (!RunIntro()){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
     // Per-run outer loop: the game IS the Chernobyl arena (maps/chernobyl.map, rebuilt
@@ -6235,3 +6569,19 @@ int main(int argc, char **argv) {
     CloseWindow();
     return 0;
 }
+
+#if defined(C2_IOS)
+// ---- The phone's entry points (ios/ChernobylBridge.m owns main(), the GL context and the display link) ----
+#include <unistd.h>
+void ChernobylGameSetBundleDir(const char *path){ (void)path; }
+void ChernobylGameInit(void){
+    chdir(C2BundleDir());                       // assets/ and maps/ are read by relative path
+    static char *av[]={ (char*)"chernobyl2", NULL };
+    C2Main(1, av);
+}
+void ChernobylGameStep(void){
+    Frame();
+    if (g_returnToMenu){ g_returnToMenu=0; EndCurrentMap(); g_mapPath=DEFAULT_MAP; StartSelectedMap(); }   // "play again": reload in place, as in the browser
+}
+void ChernobylGameShutdown(void){ if (g_audio) CloseAudioDevice(); CloseWindow(); }
+#endif

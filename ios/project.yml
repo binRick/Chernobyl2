@@ -1,0 +1,70 @@
+name: Chernobyl2
+options:
+  bundleIdPrefix: app.ximg.chernobyl2
+  deploymentTarget:
+    iOS: "16.0"
+  defaultConfig: Release
+  createIntermediateGroups: true
+
+# The iPhone build. Laid out as ../Chernobyl's (its bridge, its prebuilt raylib for iOS, its touch
+# overlay): see ios/README.md. Paths here are relative to ios/.
+settings:
+  base:
+    SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+    TARGETED_DEVICE_FAMILY: "1"          # iPhone only
+    ENABLE_BITCODE: NO
+    ARCHS: arm64
+    EXCLUDED_ARCHS: x86_64
+    ONLY_ACTIVE_ARCH: YES
+    OTHER_CFLAGS: >-
+      -DPLATFORM_IOS
+      -DGRAPHICS_API_OPENGL_ES3
+      -DGL_SILENCE_DEPRECATION
+      -Wno-implicit-function-declaration
+      -Wno-deprecated-declarations
+      -Wno-unused-result
+      -Wno-unused-function
+      -include $(SRCROOT)/raylib_ios_glcompat.h
+    HEADER_SEARCH_PATHS:
+      - $(SRCROOT)/../vendor/raylib-ios/include
+      - $(SRCROOT)/../src
+      - $(SRCROOT)
+    GCC_OPTIMIZATION_LEVEL: "2"
+
+targets:
+  Chernobyl2:
+    type: application
+    platform: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.ximg.chernobyl2
+        INFOPLIST_FILE: $(SRCROOT)/Info.plist
+        CLANG_ENABLE_OBJC_ARC: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../vendor/raylib-ios/lib$(EFFECTIVE_PLATFORM_NAME)
+        OTHER_LDFLAGS:
+          - -lraylib
+    sources:
+      - path: ChernobylBridge.h
+        type: file
+      - path: ChernobylBridge.m
+        type: file
+      - path: C2Platform.m
+        type: file
+      - path: ../src/main.c          # the whole game is one translation unit
+        type: file
+      - path: raylib_ios_glcompat.h
+        type: file
+      - path: Assets.xcassets
+    # The phone ships the browser build's asset set (tools/web/pack_web.py -> build/web/fs): the
+    # same models with their textures re-encoded, 86 MB instead of the desktop's 600.
+    postBuildScripts:
+      - name: Copy game assets into bundle
+        script: |
+          set -eu
+          dst="$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          src="$SRCROOT/../build/web/fs"
+          test -d "$src/assets" || { echo "run: python3 tools/web/pack_web.py"; exit 1; }
+          for d in assets maps; do rsync -a --delete "$src/$d/" "$dst/$d/"; done

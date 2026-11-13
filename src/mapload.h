@@ -35,7 +35,7 @@ typedef struct {                                   // one brush face
 
 // Per-texture triangle soup + its loaded image.
 typedef struct { float *pos,*nrm,*uv; unsigned char *col; int n,cap; } MapBuf;
-typedef struct { char name[96]; Texture2D tex; int hasTex,w,h; int emissive; float scrollX,scrollY; MapBuf buf; } MapTex;
+typedef struct { char name[96]; Texture2D tex, glow; int hasTex,hasGlow,w,h; int emissive; float scrollX,scrollY; MapBuf buf; } MapTex;
 typedef struct { MapTex *t; int n,cap; } MapReg;
 
 // Quake texture-axis basis: 6 face orientations, each {projAxis, uAxis, vAxis}.
@@ -144,6 +144,13 @@ static int MapRegGet(MapReg *R, const char *name){
                 SetTextureWrap(mt->tex,TEXTURE_WRAP_REPEAT); }
         }
     }
+    // "<name>_glow.png": the surface's own lights (panel lamps, lit tubes), MAP_GLOW_K copies of it stacked top to
+    // bottom, each layer blinking to its own waveform in the world shader (tools/map/make_textures.py writes them)
+    snprintf(path,sizeof path,"%s%s_glow.png",MAP_TEXDIR,name);
+    if (mt->hasTex && FileExists(path)){
+        mt->glow=LoadTexture(path);
+        if (mt->glow.id>0){ mt->hasGlow=1; GenTextureMipmaps(&mt->glow); SetTextureFilter(mt->glow,TEXTURE_FILTER_TRILINEAR); SetTextureWrap(mt->glow,TEXTURE_WRAP_CLAMP); }
+    }
     if (!mt->hasTex){ mt->w=mt->h=64; }              // sane divisor for the fallback path
     return R->n++;
 }
@@ -248,9 +255,18 @@ static float  g_mapMeshScroll[MAP_MAXMESH*2] = {0};   // per-mesh UV scroll (x,y
 static int    g_mapMeshScrollAny = 0;                 // any mesh scrolls? (lets the renderer skip the work otherwise)
 static Vector3 g_mapSpawn = {0,0,0};   // a player spawn point (raylib space)
 static int     g_hasSpawn = 0;
+static Vector3 g_mapReactor = {0,0,0}; // "info_reactor": where the wrecked core is (raylib space) -- the game hangs its live glow, light and embers there
+static int     g_hasReactor = 0;
+static float   g_mapHall[4] = {0,0,0,0}; // "_hall": the playable floor (min x, min z, max x, max z, raylib space) -- the player is kept inside it,
+static int     g_hasHall = 0;           //   so scenery built beyond the walls (the reactor pit) can never be walked or jumped into
 typedef struct { Vector3 pos; float R; Vector3 color; } MapLight;   // point light (raylib space, R=reach)
 static MapLight g_mapLights[2048];
 static int      g_nMapLights = 0;
+#define MAP_GLOW_K 6                    // layers in a "_glow" texture
+#define MAP_MAXFLICK 8
+static MapLight g_mapFlick[MAP_MAXFLICK]; // "info_flicker": a failing lamp. Its light is baked apart from the rest (into vertex ALPHA, shadows and
+static int      g_nMapFlick = 0;          //   all) so the world shader can stutter it; they share one colour (the first one's)
+static int      g_mapMeshGlow[4096] = {0};  // per mesh: has a "_glow" texture (in the material's emission map)
 
 // ---- Enemy navigation (flow field over a walkable XZ grid) ------------------
 // The grid is flood-filled along the actual floor from a seed (so it follows
@@ -335,10 +351,10 @@ static float MapVertexAO(AOGrid *g, const float *tri, Vector3 p, Vector3 n, cons
 // Baked direct light at a vertex: each in-range light contributes Lambert *
 // distance-falloff, gated by a shadow ray through the grid (so it casts hard
 // shadows). White lights give a grey result; coloured lights tint.
-static Vector3 MapVertexLight(Vector3 P, Vector3 N, int *stamp, int *rid){
+static Vector3 MapVertexLight(const MapLight *lights, int nLights, Vector3 P, Vector3 N, int *stamp, int *rid){
     Vector3 sum={0,0,0};
-    for (int l=0;l<g_nMapLights;l++){
-        MapLight *L=&g_mapLights[l];
+    for (int l=0;l<nLights;l++){
+        const MapLight *L=&lights[l];
         Vector3 dl=Vector3Subtract(L->pos,P); float R=L->R, d2=Vector3DotProduct(dl,dl);
         if (d2>=R*R) continue;
         float d=sqrtf(d2); if (d<1e-4f) d=1e-4f;
@@ -627,7 +643,7 @@ static int MapNavReachable(Vector3 p){
 // Parse a .map and build a textured, multi-material raylib Model.
 static Model LoadQ3MapModel(const char *path, int *okOut){
     if (okOut) *okOut=0;
-    g_nMapLights=0; g_hasSpawn=0; g_mapMeshScrollAny=0;   // reset accumulating globals so reloads start clean
+    g_nMapLights=0; g_nMapFlick=0; g_hasSpawn=0; g_mapMeshScrollAny=0;   // reset accumulating globals so reloads start clean
     Model empty={0};
     FILE *f=fopen(path,"r"); if(!f) return empty;
     MapReg R={0};
@@ -635,22 +651,28 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     // entity capture: per-entity origin/class/light value, plus the saved spawn
     Vector3 entO={0,0,0}, entCol={1,1,1}, spawnQ={0,0,0};
     int curSpawn=0, curLight=0, haveOrig=0, spawnSet=0; float entLi=300.0f;
+    int curFlick=0, curReactor=0, reactorSet=0, orgSet=0; Vector3 reactorQ={0,0,0}, orgQ={0,0,0};
+    int hallSet=0; float hallQ[4]={0,0,0,0};
     float mpu=0.0f;     // worldspawn "_mpu" = metres per Quake unit: keep real scale (grid2map.py arenas)
     g_mapTessQ=0.0f;
     char line[2048];
     while (fgets(line,sizeof line,f)){
         const char *p=line; while (*p==' '||*p=='\t') p++;
-        if (*p=='{'){ if (sp==0){ curSpawn=curLight=haveOrig=0; entLi=300.0f; entCol=(Vector3){1,1,1}; } if (sp<8) ctxN[sp]=0; sp++; }
+        if (*p=='{'){ if (sp==0){ curSpawn=curLight=curReactor=curFlick=haveOrig=0; entLi=300.0f; entCol=(Vector3){1,1,1}; } if (sp<8) ctxN[sp]=0; sp++; }
         else if (*p=='}'){ sp--; if (sp>=0 && sp<8 && ctxN[sp]>=4) MapEmitBrush(&R,ctx[sp],ctxN[sp]);
             if (sp==0){
                 if (curSpawn && haveOrig && !spawnSet){ spawnQ=entO; spawnSet=1; }
+                if (curReactor && haveOrig){ reactorQ=entO; reactorSet=1; }
+                if (curFlick && haveOrig && g_nMapFlick<MAP_MAXFLICK){ g_mapFlick[g_nMapFlick]=(MapLight){entO,entLi,entCol}; g_nMapFlick++; }
                 if (curLight && haveOrig && g_nMapLights<2048){
                     g_mapLights[g_nMapLights].pos=entO; g_mapLights[g_nMapLights].R=entLi;  // Quake space + raw intensity; transformed below
                     g_mapLights[g_nMapLights].color=entCol; g_nMapLights++;
                 }
             } }
         else if (*p=='"' && sp==1){                                // entity key/value
-            if (!strncmp(p,"\"classname\"",11)){ if (strstr(p,"info_player")) curSpawn=1; else if (strstr(p,"\"light\"")) curLight=1; }
+            if (!strncmp(p,"\"classname\"",11)){ if (strstr(p,"info_player")) curSpawn=1; else if (strstr(p,"\"light\"")) curLight=1; else if (strstr(p,"info_reactor")) curReactor=1; else if (strstr(p,"info_flicker")) curFlick=1; }
+            else if (!strncmp(p,"\"_hall\"",7)){ if (sscanf(p,"\"_hall\" \"%f %f %f %f\"",&hallQ[0],&hallQ[1],&hallQ[2],&hallQ[3])==4) hallSet=1; }   // worldspawn: the playable floor's extent (x0 y0 x1 y1)
+            else if (!strncmp(p,"\"_origin\"",9)){ if (sscanf(p,"\"_origin\" \"%f %f %f\"",&orgQ.x,&orgQ.y,&orgQ.z)==3) orgSet=1; }   // worldspawn: the point that becomes (0, 0, 0) -- else the bounds' centre and lowest point
             else if (!strncmp(p,"\"origin\"",8)){ if (sscanf(p,"\"origin\" \"%f %f %f\"",&entO.x,&entO.y,&entO.z)==3) haveOrig=1; }
             else if (!strncmp(p,"\"light\"",7)) sscanf(p,"\"light\" \"%f\"",&entLi);
             else if (!strncmp(p,"\"_color\"",8)) sscanf(p,"\"_color\" \"%f %f %f\"",&entCol.x,&entCol.y,&entCol.z);
@@ -686,15 +708,20 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     if (total<3){ for(int i=0;i<R.n;i++){ if(R.t[i].hasTex)UnloadTexture(R.t[i].tex);
         free(R.t[i].buf.pos);free(R.t[i].buf.nrm);free(R.t[i].buf.uv);free(R.t[i].buf.col);} free(R.t); return empty; }
     float cx=(Mnx+Mxx)*0.5f, cy=(Mny+Mxy)*0.5f;
+    if (orgSet){ cx=orgQ.x; cy=orgQ.y; Mnz=orgQ.z; }                 // a map that extends past its playable hall (the reactor pit) keeps the hall where it was
     float ext=fmaxf(Mxx-Mnx,fmaxf(Mxy-Mny,Mxz-Mnz)); if(ext<1.0f)ext=1.0f;
     float s=(mpu>0.0f)?mpu:60.0f/ext;   // Xonotic DM arenas: normalised to ~60u across; _mpu maps: true metres
     Vector3 L=Vector3Normalize((Vector3){0.45f,0.85f,0.30f});
+    g_hasHall=0; if (hallSet){ g_mapHall[0]=(hallQ[0]-cx)*s; g_mapHall[1]=(hallQ[1]-cy)*s; g_mapHall[2]=(hallQ[2]-cx)*s; g_mapHall[3]=(hallQ[3]-cy)*s; g_hasHall=1; }
+    g_hasReactor=0; if (reactorSet){ g_mapReactor=(Vector3){(reactorQ.x-cx)*s,(reactorQ.z-Mnz)*s,(reactorQ.y-cy)*s}; g_hasReactor=1; }
     if (spawnSet){ g_mapSpawn=(Vector3){(spawnQ.x-cx)*s,(spawnQ.z-Mnz)*s,(spawnQ.y-cy)*s}; g_hasSpawn=1; }
     for (int l=0;l<g_nMapLights;l++){                  // lights: Quake origin -> raylib, intensity -> reach
         Vector3 q=g_mapLights[l].pos;
         g_mapLights[l].pos=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s};
         g_mapLights[l].R=g_mapLights[l].R*s*2.6f; if (g_mapLights[l].R<1.0f) g_mapLights[l].R=1.0f;
     }
+    for (int l=0;l<g_nMapFlick;l++){ Vector3 q=g_mapFlick[l].pos;
+        g_mapFlick[l].pos=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s}; g_mapFlick[l].R=fmaxf(1.0f,g_mapFlick[l].R*s*2.6f); g_mapFlick[l].color=(Vector3){1,1,1}; }
 
     // 1) transform every vertex into raylib space (positions + normals)
     for (int i=0;i<R.n;i++){ MapBuf *b=&R.t[i].buf;
@@ -722,19 +749,21 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
         int emis=R.t[i].emissive;
         for (int k=0;k<b->n;k++){
             if (emis){                                        // light fixture / lava / glow: full-bright, skip shade+AO
-                b->col[k*4]=255; b->col[k*4+1]=255; b->col[k*4+2]=255; continue;
+                b->col[k*4]=255; b->col[k*4+1]=255; b->col[k*4+2]=255; b->col[k*4+3]=255; continue;
             }
             Vector3 P={b->pos[k*3],b->pos[k*3+1],b->pos[k*3+2]}, N={b->nrm[k*3],b->nrm[k*3+1],b->nrm[k*3+2]};
             float ao=MapVertexAO(&g_mapCol.grid,g_mapCol.tri,P,N,samp,stamp,&rid);
             float sr,sg,sb;
             if (haveLights){                                  // ambient (AO-darkened) + shadowed point lights
                 float amb=0.32f*(1.0f-AO_STRENGTH*ao);
-                Vector3 lit=MapVertexLight(P,N,stamp,&rid);
+                Vector3 lit=MapVertexLight(g_mapLights,g_nMapLights,P,N,stamp,&rid);
                 sr=amb+lit.x; sg=amb+lit.y; sb=amb+lit.z;
             } else {                                          // no lights in the .map: directional fallback
                 float ndl=fabsf(Vector3DotProduct(N,L));
                 sr=sg=sb=(0.50f+0.50f*ndl)*(1.0f-AO_STRENGTH*ao);
             }
+            { float fl=g_nMapFlick? MapVertexLight(g_mapFlick,g_nMapFlick,P,N,stamp,&rid).x : 0.0f;   // the failing lamps' share, kept apart: alpha = 255 - it
+              b->col[k*4+3]=(unsigned char)(255.0f-fminf(fl,1.0f)*255.0f); }
             if(sr<0.03f)sr=0.03f; if(sr>1.4f)sr=1.4f; if(sg<0.03f)sg=0.03f; if(sg>1.4f)sg=1.4f; if(sb<0.03f)sb=0.03f; if(sb>1.4f)sb=1.4f;
             float cr=b->col[k*4]*sr, cg=b->col[k*4+1]*sg, cb=b->col[k*4+2]*sb;
             b->col[k*4]=(unsigned char)(cr>255?255:cr); b->col[k*4+1]=(unsigned char)(cg>255?255:cg); b->col[k*4+2]=(unsigned char)(cb>255?255:cb);
@@ -757,6 +786,8 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
         Material mat=LoadMaterialDefault();
         if (R.t[i].hasTex) mat.maps[MATERIAL_MAP_DIFFUSE].texture=R.t[i].tex;
         mat.maps[MATERIAL_MAP_DIFFUSE].color=WHITE;
+        if (R.t[i].hasGlow) mat.maps[MATERIAL_MAP_EMISSION].texture=R.t[i].glow;
+        if (mi<4096) g_mapMeshGlow[mi]=R.t[i].hasGlow;
         model.meshes[mi]=m; model.materials[mi]=mat; model.meshMaterial[mi]=mi;
         if (mi<MAP_MAXMESH){ g_mapMeshScroll[mi*2]=R.t[i].scrollX; g_mapMeshScroll[mi*2+1]=R.t[i].scrollY;
             if (R.t[i].scrollX||R.t[i].scrollY) g_mapMeshScrollAny=1; }

@@ -75,12 +75,14 @@ static int LbParseTop(const char *js, LbRow *out){
     return n;
 }
 #if !defined(__EMSCRIPTEN__)
+#if !defined(C2_IOS)
 static int LbCurl(const char *args, char *out, int outSz){
     char cmd[900]; snprintf(cmd,sizeof cmd,"/usr/bin/curl -s -m 8 %s 2>/dev/null", args);
     FILE *f=popen(cmd,"r"); if (!f) return 0;
     int n=(int)fread(out,1,outSz-1,f); out[n>0?n:0]=0; pclose(f);
     return n>0;
 }
+#endif
 static void *LbWorker(void *arg){
     int post=(arg!=NULL); static char buf[8192];
     if (post){
@@ -88,12 +90,28 @@ static void *LbWorker(void *arg){
         snprintf(a,sizeof a,"-X POST -H 'Content-Type: application/json' -d '{\"initials\":\"%s\",\"score\":%d,\"kills\":%d,\"headshots\":%d,\"wave\":%d,"
                  "\"weapon\":\"%s\",\"time\":%.1f,\"shots\":%d,\"accuracy\":%d,\"platform\":\"macos\",\"version\":\"dev\"}' %s/api/scores",
                  g_lb.ini, g_lb.score, g_lb.kills, g_lb.headshots, g_lb.wave, g_lb.weapon, g_lb.time, g_lb.shots, g_lb.acc, g_lbUrl);
+#if defined(C2_IOS)                    /* no curl on a phone: the same request through the system (ios/C2Platform.m) */
+        char body[560], url[240];
+        snprintf(body,sizeof body,"{\"initials\":\"%s\",\"score\":%d,\"kills\":%d,\"headshots\":%d,\"wave\":%d,"
+                 "\"weapon\":\"%s\",\"time\":%.1f,\"shots\":%d,\"accuracy\":%d,\"platform\":\"ios\",\"version\":\"dev\"}",
+                 g_lb.ini, g_lb.score, g_lb.kills, g_lb.headshots, g_lb.wave, g_lb.weapon, g_lb.time, g_lb.shots, g_lb.acc);
+        snprintf(url,sizeof url,"%s/api/scores",g_lbUrl); (void)a;
+        int ok=C2HttpRequest(url,body,buf,sizeof buf); const char *v;
+#else
         int ok=LbCurl(a,buf,sizeof buf); const char *v;
+#endif
         if (ok && (v=LbFind(buf,"rank"))){ g_lb.rank=atoi(v); if ((v=LbFind(buf,"total"))) g_lb.total=atoi(v); g_lb.postDone=1; }
         else g_lb.postDone=-1;
     }
-    { char a[240]; snprintf(a,sizeof a,"'%s/api/scores?limit=%d'", g_lbUrl, LB_TOP);
-      if (LbCurl(a,buf,sizeof buf)){ g_lb.topWN=LbParseTop(buf,g_lb.topW); g_lb.topReady=1; } }
+    { char a[240];
+#if defined(C2_IOS)
+      snprintf(a,sizeof a,"%s/api/scores?limit=%d", g_lbUrl, LB_TOP);
+      if (C2HttpRequest(a,NULL,buf,sizeof buf)){
+#else
+      snprintf(a,sizeof a,"'%s/api/scores?limit=%d'", g_lbUrl, LB_TOP);
+      if (LbCurl(a,buf,sizeof buf)){
+#endif
+          g_lb.topWN=LbParseTop(buf,g_lb.topW); g_lb.topReady=1; } }
     g_lb.busy=0;
     return NULL;
 }
@@ -132,6 +150,25 @@ static void LbOnDeath(int score, const char *weapon){
     const char *au=getenv("CHERNOBYL_SCORES_AUTO");
     if (au && *au){ g_lb.n=0; for (const char *c=au; *c && g_lb.n<3; c++) if (isalnum((unsigned char)*c)) g_lb.ini[g_lb.n++]=(char)toupper((unsigned char)*c); g_lb.ini[g_lb.n]=0; }
 }
+#if defined(C2_IOS)
+// The phone has no keys to type initials on: a small board of them along the bottom of the death
+// screen. 26 letters, then DEL, OK (post) and SKIP (play again without posting).
+#define LBK_N 29
+static Rectangle LbKeyRect(int i, int W, int H){
+    int row=i<10?0:(i<20?1:2), col=i-(row==0?0:(row==1?10:20)), n=(row==2)?9:10;
+    float kw=(i>=26)?104.0f:64.0f, kh=54.0f, gap=8.0f;
+    float rowW=(row==2)?(6*64.0f+3*104.0f+8*gap):(10*64.0f+9*gap);
+    float x=W/2.0f-rowW/2.0f; for (int c=0;c<col;c++) x+=((row==2 && c>=6)?104.0f:64.0f)+gap;
+    (void)n; return (Rectangle){x, H-196.0f+row*(kh+gap), kw, kh};
+}
+static const char *LbKeyLabel(int i){ static char b[2]; if (i<26){ b[0]=(char)('A'+i); b[1]=0; return b; } return i==26?"DEL":(i==27?"OK":"SKIP"); }
+static int LbKeyHit(int W, int H){                     // the key under this frame's tap, or -1
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return -1;
+    Vector2 m=GetMousePosition();
+    for (int i=0;i<LBK_N;i++) if (CheckCollisionPointRec(m, LbKeyRect(i,W,H))) return i;
+    return -1;
+}
+#endif
 // One frame of the death screen's input. Returns 1 when the player asks to play again.
 static int LbDeadUpdate(void){
     LbPoll();
@@ -142,6 +179,14 @@ static int LbDeadUpdate(void){
             if (g_lb.prefilled){ g_lb.n=0; g_lb.ini[0]=0; g_lb.prefilled=0; }      // typing over last run's initials starts them afresh
             if (g_lb.n<3){ g_lb.ini[g_lb.n++]=(char)ch; g_lb.ini[g_lb.n]=0; } }
         if (IsKeyPressed(KEY_BACKSPACE) && g_lb.n>0){ g_lb.ini[--g_lb.n]=0; g_lb.prefilled=0; }
+#if defined(C2_IOS)
+        { int k=LbKeyHit(GetScreenWidth(),GetScreenHeight()); click=0;                 // only the board's keys do anything here: a stray tap is not "skip"
+          if (k>=0 && k<26){ if (g_lb.prefilled){ g_lb.n=0; g_lb.ini[0]=0; g_lb.prefilled=0; }
+                             if (g_lb.n<3){ g_lb.ini[g_lb.n++]=(char)('A'+k); g_lb.ini[g_lb.n]=0; } }
+          else if (k==26){ if (g_lb.n>0){ g_lb.ini[--g_lb.n]=0; g_lb.prefilled=0; } }
+          else if (k==27) enter=1;
+          else if (k==28) return 1; }
+#endif
         int autoGo=(getenv("CHERNOBYL_SCORES_AUTO")!=NULL) && g_lb.n>0 && !g_lb.busy;
         if ((enter || autoGo) && g_lb.n>0){
             if (g_lb.busy) return 0;                      // the board fetch is still out: next frame
@@ -164,9 +209,18 @@ static void LbDraw(int W, int H){
     if (g_lb.state==LB_ENTER){
         snprintf(t,sizeof t,"INITIALS  %c %c %c", g_lb.n>0?g_lb.ini[0]:'_', g_lb.n>1?g_lb.ini[1]:'_', g_lb.n>2?g_lb.ini[2]:'_');
         int w=MeasureText(t,30); DrawText(t,W/2-w/2,y,30,hi);
+#if defined(C2_IOS)
+        (void)dim; Vector2 m=GetMousePosition(); int down=IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+        for (int i=0;i<LBK_N;i++){ Rectangle r=LbKeyRect(i,W,H); int on=down && CheckCollisionPointRec(m,r);
+            Color fill = i==27 ? (Color){70,120,60,on?255:215} : (i==28 ? (Color){70,70,80,on?255:215} : (Color){36,34,34,on?255:215});
+            DrawRectangleRounded(r,0.22f,6,on?(Color){150,60,40,255}:fill); DrawRectangleRoundedLines(r,0.22f,6,(Color){255,210,60,i==27?230:110});
+            const char *l=LbKeyLabel(i); int fs=(i<26)?30:22, lw=MeasureText(l,fs);
+            DrawText(l,(int)(r.x+r.width/2-lw/2),(int)(r.y+r.height/2-fs/2),fs,(i==27 && g_lb.n==0)?(Color){150,150,150,255}:RAYWHITE); }
+#else
         const char *p=g_lb.prefilled?"ENTER  -  post score      type to change      click  -  skip"
                      :g_lb.n>0?"ENTER  -  post score      BACKSPACE  -  delete      click  -  skip":"type your initials      click  -  skip";
         int pw=MeasureText(p,18); DrawText(p,W/2-pw/2,y+38,18,dim);
+#endif
     } else if (g_lb.state==LB_POSTING){
         const char *p="posting score..."; int pw=MeasureText(p,22); DrawText(p,W/2-pw/2,y,22,dim);
     } else if (g_lb.state==LB_DONE){

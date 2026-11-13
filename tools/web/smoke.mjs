@@ -7,7 +7,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 const url = process.argv[2] || 'http://127.0.0.1:8642/index.html?autostart=1';
 const runSecs = parseFloat(process.argv[3] || '8');
 const out = process.argv[4] || 'build/web/shot.png';
-const port = 9333, prof = process.cwd() + '/build/web/chrome';
+const port = +(process.env.SMOKE_PORT || 9333), prof = process.cwd() + '/build/web/chrome';
 mkdirSync(prof, { recursive: true });
 const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', '--no-first-run',
   '--disable-extensions', `--user-data-dir=${prof}`, '--window-size=1280,720', `--remote-debugging-port=${port}`, '--mute-audio',

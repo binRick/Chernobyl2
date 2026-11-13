@@ -19,3 +19,5 @@ chernobyl2-shot.png
 tools/FBX2glTF
 tools/node_modules
 spawn*.txt
+vendor/raylib-ios/
+ios/Chernobyl2.xcodeproj/

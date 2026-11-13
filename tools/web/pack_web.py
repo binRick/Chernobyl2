@@ -118,7 +118,7 @@ def main():
         if f.endswith((".mp3", ".wav", ".txt")) or f == "icon.png":
             other += copy("assets/" + f)
     for f in sorted(os.listdir(os.path.join(REPO, "assets", "voice"))): other += copy("assets/voice/" + f)
-    # the default map + only the textures it names (any extension), capped at 512 px
+    # the default map + only the textures it names (any extension), capped at 1024 px
     other += copy("maps/chernobyl.map")
     names = set(re.findall(r"\)\s+([A-Za-z0-9_\-/\.]+)\s+[-\d\.]+\s+[-\d\.]+", open(os.path.join(REPO, "maps", "chernobyl.map")).read()))
     mt = 0
@@ -126,11 +126,13 @@ def main():
         for f in fs:
             rel = os.path.relpath(os.path.join(dp, f), os.path.join(REPO, "maps", "textures"))
             stem = os.path.splitext(rel)[0].replace(os.sep, "/")
+            glow = stem.endswith("_glow") and not any(n.endswith(stem.split("/")[-1]) for n in names)   # a surface's lamp layers go with it (mapload.h: "<name>_glow.png")
+            if glow: stem = stem[:-5]
             if not any(stem == n or stem.endswith("/" + n) or n.endswith("/" + stem) or stem == n.split("/")[-1] for n in names): continue
             dst = os.path.join(OUT, "maps", "textures", rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
             try:
                 img = Image.open(os.path.join(dp, f)); img.load()
-                if max(img.size) > 512: k = 512 / max(img.size); img = img.resize((round(img.size[0]*k), round(img.size[1]*k)), Image.LANCZOS)
+                if max(img.size) > 1024 and not glow: k = 1024 / max(img.size); img = img.resize((round(img.size[0]*k), round(img.size[1]*k)), Image.LANCZOS)   # (the arena's own surfaces are painted at 1024 for a 5 m wall)
                 img.save(dst); mt += os.path.getsize(dst)
             except Exception:
                 shutil.copy2(os.path.join(dp, f), dst); mt += os.path.getsize(dst)
