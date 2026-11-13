@@ -90,6 +90,7 @@ def main():
             if os.path.exists(os.path.join(REPO, "assets", n + suf)): other += copy(f"assets/{n}{suf}")
     for n in WEAPONS:                               # true bind poses (ApplyIbmBindPose): without them the arms skin against the rest pose
         if os.path.exists(os.path.join(REPO, "assets", n + ".glb.ibm")): other += copy(f"assets/{n}.glb.ibm")
+        if os.path.exists(os.path.join(REPO, "assets", n + ".glb.parts")): other += copy(f"assets/{n}.glb.parts")   # authored gun-piece animation (PartsLoad)
     for f in sorted(os.listdir(os.path.join(REPO, "assets"))):
         if f.startswith("intro"): continue          # the title montage (33 MB of video + music) stays desktop-only for now
         if f.endswith((".mp3", ".wav", ".txt")) or f == "icon.png":

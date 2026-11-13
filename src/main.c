@@ -190,6 +190,10 @@ static int             g_loopOn=0, g_loopAlt=0; static float g_loopT=0.0f;   // 
 static int             g_reloading=0;                   // a reload (single or sequence) is in progress
 static int             g_drawTopUp=0;                   // a weapon was just drawn: reload it if it is not full
 static int g_glPhase=0, g_glCut=0, g_glFire=0;   // 1 opening, 2 feeding, 3 shutting; cut = trigger pulled mid-reload; fire = shoot as it shuts
+static int g_glSlot=0;                           // the chamber being filled this pass (= rounds in the drum when the pass began)
+static float g_glShotT=-1.0f;                    // >=0: the launcher's own firing motion is playing (clip frames 0..GL_SHOT_TO: trigger, drum steps round)
+static int g_clipReload=0;                       // a clip reload (Weapon.crFrom..crTo) is playing
+static float g_glLift=0.0f;                      // 0..1: the launcher brought up into view while its drum is open (the clip loads it below the screen edge)
 static int             g_curAnim = 0;           // start in idle (Take, held at end)
 static float           g_animT = 0.0f;          // frame cursor
 static int             g_animOnce = 0;          // current clip is a one-shot (Reload)
@@ -307,6 +311,16 @@ typedef struct {
     Vector3         armsROff;                    // extra nudge applied to RIGHT-arm vertices only (baked into mesh.vertices; B-mode)
     Vector3         armsLOff;                    // same for the LEFT arm -- each hand seats independently
     unsigned long long gunMask;                  // bit k = mesh k is a GUN part (unskinned OR rigid-bound to one bone) vs blended-skinned arms
+    float          *parts;                       // <model>.glb.parts (tools/gen_parts.py): the gun pieces' own authored animation, 12 floats a frame a track
+    int             partsFrames;                 // frames per track (60 a second, the same timeline as the arms' clip)
+    short           partTrack[64], partSeat[64]; // mesh -> its track / its "seated" track (rounds: held in the drum), -1 = none
+    signed char     partSlug[64];                // mesh -> which round it is (0 = first loaded), -1 = not a round
+    float           crSkipA, crSkipB;            // on reaching frame A jump to B (cuts repeats out of the clip); A<=0 = none
+    float           crSlowFrom, crSlowTo, crSlowRate; // a stretch played at its own, slower rate (crSlowTo<=0 = none)
+    float           crDipIn;                     // ...and as it starts, when the clip's reload does not begin on the hold pose
+    float           crDip;                       // how far the gun dips as the reload ends and it returns to the hold (0 = the clip ends on the hold)
+    float           crFrom, crTo, crFill, crRate; // "clip reload": the frames of the weapon's one long clip that ARE its reload (crTo>crFrom = has one),
+                                                 //   the frame the ammo is in, and how fast to play them (frames a second). For guns that otherwise hold one pose.
     int             pinAuthored;                 // 1: raylib's bake reproduces the file's authored gun-in-hands placement -> keep it (no re-seat), just ride the hand
     int             playShoot;                   // 1: play the model's Shot clip on each shot (AK has a good one)
     float           fireCd;                      // per-shot cooldown override (0 -> default)
@@ -320,6 +334,7 @@ typedef struct {
     float           spread;                      // aim cone half-angle per pellet, degrees
     float           recoilKick;                  // camera pitch kick per shot, degrees
     int             shellReload;                 // 1: reload clip inserts ONE shell -> loop it until full (benelli)
+    float           animRate;                    // keyframes a second its one-shot clips (shot, reload) play at; 0 = the default 30
     float           shellPump, shellRackAt;      // the clip's closing pump: where it starts, and the frame the action racks
     float           shellFirst, shellCycle; int shellCount;   // >0: ONE reload clip inserting shellCount shells,
                                                  // the first at frame shellFirst then every shellCycle (remington)
@@ -584,7 +599,7 @@ static void ActivateWeapon(int n){
     g_gun=w->model; g_gunAnim=w->anim; g_gunAnimN=w->animN; g_hasGun=w->has;
     g_aIdle=w->aIdle; g_aShoot=w->aShoot; g_aReload=w->aReload; g_aWalk=w->aWalk;
     g_reloadSeqN=w->reloadSeqN; for(int i=0;i<w->reloadSeqN;i++) g_reloadSeq[i]=w->reloadSeq[i];
-    g_reloadStep=-1; g_reloading=0; g_glPhase=0; g_glCut=0; g_glFire=0;
+    g_reloadStep=-1; g_reloading=0; g_glPhase=0; g_glCut=0; g_glFire=0; g_clipReload=0; g_glShotT=-1.0f;
     g_gunCentroid=w->centroid; g_gunFitScale=w->fitScale;
     g_vmOff=w->off; g_vmScale=w->scale; g_vmYaw=w->yaw; g_vmPitch=w->pitch; g_vmRoll=w->roll;
     g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f; g_recoil=0.0f;
@@ -1321,7 +1336,7 @@ static int EnemyDualWield(int t){ return t==EN_COOK || t==EN_BUTCHER || t==EN_HE
 #define FLAME_FLINCH_GAP 1.5  // seconds between flame-caused flinches (each tick re-flinching froze him)
 typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float deathT; float hitT; float roarT; float drawY; float stuckT; float embedT; float fallV; float atkCd; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; float maxHp; float spd; int boss; float fireT, losT; int los, burstLeft, raiseC; float chanT; int swing, prevClip; float prevT, blendT; int hitRole; double flameFlinchAt;
                  int deathRole; float deathYaw, limpT, knockT, riseT; int charged; float sc, sumT, boltT; int phase; Vector3 pushV;
-                 int wN, wNext; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS];   // bullet wounds, pinned to bones
+                 int wN, wNext; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS]; Vector3 wDir[MAX_WOUNDS]; float wT0[MAX_WOUNDS];   // bullet wounds, pinned to bones; wDir = which way blood runs from it (bone space), wT0 = when it was made (run clock): they bleed
                  struct ModelAnimation *drawAn; float drawFrame, drawYaw;
                  // --- motion (EnemyPose / UpdateEnemies): he has momentum, turns at a rate, and his legs and torso are posed apart
                  Vector3 vel, mv, lastPos;        // vel: commanded ground velocity (accel-limited, takes hit impulses); mv: measured, smoothed
@@ -1332,7 +1347,7 @@ typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float 
 static Enemy           g_enemies[MAX_ENEMIES];
 #define MAX_CORPSES 32
 typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_BURN]; float burnR[MAX_BURN]; int burnN; int role;
-                 int wN; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS]; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
+                 int wN; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS]; Vector3 wDir[MAX_WOUNDS]; float wT0[MAX_WOUNDS]; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
 static Corpse          g_corpses[MAX_CORPSES];
 static int             g_corpseNext = 0;
 // Enemy rigs. Clips are addressed by ROLE (CL_*), each rig maps a role to its own
@@ -2319,11 +2334,6 @@ static float WoundBoneRadius(const char *n){                       // rough body
 static int WoundBoneOK(const char *n){
     return !(strstr(n,"Finger")||strstr(n,"Thumb")||strstr(n,"Toe")||strstr(n,"Tent")||strstr(n,"End")||strstr(n,"Eye")||strstr(n,"jaw")||strstr(n,"Hand")||strstr(n,"Foot"));
 }
-static Vector3 WoundWorld(ModelAnimation *an, float frame, int b, Vector3 L, Vector3 base, float yaw, float esc){
-    Transform t=RigSample(an,frame,b);
-    Vector3 m=Vector3Add(t.translation, Vector3RotateByQuaternion(L,t.rotation));
-    return Vector3Add(base, Vector3RotateByAxisAngle(Vector3Scale(m,esc),(Vector3){0,1,0},yaw*DEG2RAD));
-}
 #define WSAMPLE(b) (ps ? ps[b] : RigSample(an,fr,b))          /* the pose he's drawn in, else the clip */
 static void EnemyAddWound(Enemy *e, Vector3 hitPt, Vector3 dir){
     EnemyRig *rg=RigOf(e->type); if (rg->animN<=0) return;
@@ -2362,20 +2372,45 @@ static void EnemyAddWound(Enemy *e, Vector3 hitPt, Vector3 dir){
     int k=e->wNext; e->wNext=(e->wNext+1)%MAX_WOUNDS; if (e->wN<MAX_WOUNDS) e->wN++;
     e->wBone[k]=best; e->wOff[k]=Vector3RotateByQuaternion(Vector3Subtract(S,tb.translation),QuaternionInvert(tb.rotation));
     e->wSz[k]=0.055f+GetRandomValue(0,30)/1000.0f;
+    // which way it will run: down the body part it is on -- along the bone, toward whichever end is lower right now
+    { Vector3 ax=Vector3Subtract(bC,bJ); float al=Vector3Length(ax);
+      if (al<1e-5f) ax=(Vector3){0,-1,0}; else { ax=Vector3Scale(ax,1.0f/al); if (ax.y>0) ax=Vector3Negate(ax); }
+      if (ax.y>-0.25f) ax=Vector3Normalize((Vector3){ax.x*0.5f,-1.0f,ax.z*0.5f});          // a level limb: it runs off round the side instead
+      e->wDir[k]=Vector3RotateByQuaternion(ax,QuaternionInvert(tb.rotation)); e->wT0[k]=g_runT; }
 }
 static const Transform *g_woundPose=NULL;                      // set around DrawWounds to place them on a stored pose
+// A wound bleeds: the stain soaks outward through the cloth for a few seconds, a trickle creeps
+// down the body from it, and while it is fresh it drips onto the floor under him.
+#define WOUND_SOAK   5.0f      // seconds for the stain to spread to full size
+#define WOUND_RUN    0.20f     // metres the trickle runs, at most
+#define WOUND_DRIP   7.0f      // seconds a wound goes on dripping
 static void DrawWounds(ModelAnimation *an, float frame, Vector3 base, float yaw, float esc,
-                       int n, const int *wb, const Vector3 *wo, const float *ws){
+                       int n, const int *wb, const Vector3 *wo, const float *ws, const Vector3 *wd, const float *wt){
     if (!g_hasSmokeTex || (!an && !g_woundPose)) return;
+    float fdt=g_paused?0.0f:GetFrameTime();
     for (int k=0;k<n;k++){
-        Vector3 p;
-        if (g_woundPose){ Transform t=g_woundPose[wb[k]]; Vector3 m=Vector3Add(t.translation, Vector3RotateByQuaternion(wo[k],t.rotation));
-            p=Vector3Add(base, Vector3RotateByAxisAngle(Vector3Scale(m,esc),(Vector3){0,1,0},yaw*DEG2RAD)); }
-        else p=WoundWorld(an,frame,wb[k],wo[k],base,yaw,esc);
-        Vector3 tc=Vector3Subtract(g_cam.position,p); float L=Vector3Length(tc);
-        if (L>1e-3f) p=Vector3Add(p,Vector3Scale(tc,0.012f/L));   // just proud of the skin
-        DrawBillboard(g_cam, g_smokeTex, p, ws[k]*1.6f, (Color){110,6,6,215});    // the stain
-        DrawBillboard(g_cam, g_smokeTex, p, ws[k]*0.55f, (Color){28,0,0,255});    // the hole
+        Transform t = g_woundPose ? g_woundPose[wb[k]] : RigSample(an,frame,wb[k]);
+        float age=g_runT-wt[k]; if (age<0) age=0;
+        float soak=1.0f-expf(-age/(WOUND_SOAK*0.4f)), run=fminf(WOUND_RUN, 0.045f*age)/esc;      // (model units)
+        Vector3 tc0={0}; float sz=ws[k];
+        for (int j=8;j>=0;j--){                                   // the trickle first (far end to near), the stain and hole over it
+            float f=j/8.0f; if (j>0 && run*f*esc<0.008f) continue;
+            Vector3 L=Vector3Add(wo[k], Vector3Scale(wd[k], run*f));
+            Vector3 m=Vector3Add(t.translation, Vector3RotateByQuaternion(L,t.rotation));
+            Vector3 p=Vector3Add(base, Vector3RotateByAxisAngle(Vector3Scale(m,esc),(Vector3){0,1,0},yaw*DEG2RAD));
+            Vector3 tc=Vector3Subtract(g_cam.position,p); float Ld=Vector3Length(tc);
+            if (Ld>1e-3f) p=Vector3Add(p,Vector3Scale(tc,(0.012f+0.001f*j)/Ld));   // just proud of the skin
+            if (j>0){ DrawBillboard(g_cam, g_smokeTex, p, sz*(0.62f-0.30f*f), (Color){96,4,4,(unsigned char)(215-70*f)}); continue; }
+            DrawBillboard(g_cam, g_smokeTex, p, sz*(1.5f+1.5f*soak), (Color){104,5,5,(unsigned char)(215-45*soak)});   // the stain, spreading
+            DrawBillboard(g_cam, g_smokeTex, p, sz*(0.9f+0.5f*soak), (Color){120,8,8,200});                          // wet at the middle
+            DrawBillboard(g_cam, g_smokeTex, p, sz*0.55f, (Color){28,0,0,255});                                      // the hole
+            tc0=p;
+        }
+        if (fdt>0.0f && age<WOUND_DRIP && GetRandomValue(0,9999)<(int)(fdt*10000.0f*1.5f*(1.0f-age/WOUND_DRIP))){        // a drop falls
+            Spark *sp=SparkAlloc();
+            if (sp){ float lf=1.6f; *sp=(Spark){0}; sp->pos=tc0; sp->vel=(Vector3){GetRandomValue(-10,10)/100.0f,-0.2f,GetRandomValue(-10,10)/100.0f};
+                sp->life=lf; sp->life0=lf; sp->size=0.013f+GetRandomValue(0,6)/1000.0f; sp->rest=base.y; sp->blood=1; sp->lasting=1; }
+        }
     }
 }
 
@@ -2635,13 +2670,17 @@ typedef struct { Vector3 pos, vel; float life; int active; int bounces; } Grenad
 // until the drum is full or the reserve is dry -> shut. Each pass loads ONE round as the hand
 // reaches the drum, so pulling the trigger with a round in can cut it short (it shuts fast,
 // then fires) -- reload one, shoot it, reload again, as the shotgun does.
-#define GL_OPEN_FROM    30
-#define GL_OPEN_TO      90
-#define GL_FEED_FROM    90
-#define GL_FEED_AT      113    // the grenade goes in
-#define GL_FEED_TO      144
-#define GL_SHUT_FROM    395
-#define GL_SHUT_TO      440
+#define GL_OPEN_FROM    28     // the barrel breaks open (28-44), the release throws the spent cases out (50-72)
+#define GL_OPEN_TO      80
+#define GL_FEED_FROM    80     // round k's pass starts here + k*GL_FEED_LEN: the clip loads the six chambers in turn,
+#define GL_FEED_LEN     52     //   so each grenade is fed with ITS pass and the hand goes to the right chamber
+#define GL_FEED_AT      27     // into a pass: the grenade is home
+#define GL_SHUT_FROM    392    // after the sixth pass: the hand comes back and the barrel snaps shut (410-418)...
+#define GL_SHUT_SNAP    409
+#define GL_SHUT_TO      432    // shut. (The clip then twirls the gun down out of view; the game dips it back to the hold instead)
+#define GL_SHOT_TO       26    // the clip opens with one shot: the trigger comes back and the drum turns a chamber
+#define GL_LIFT_Y       0.068f // how far the open launcher comes up / in toward the middle of the view
+#define GL_LIFT_X       0.036f
 
 static Grenade g_gren[MAX_GREN];
 // Viewmodel placement: canonical gun frame (ComputeVmFrame) -> view space, where the
@@ -2657,6 +2696,7 @@ static Matrix VmPlace(const Weapon *w){
     Vector3 P={ cp.x+g_vmOff.x+bobX - g_vmSway.x*0.0022f,
                 cp.y+g_vmOff.y+bobY + g_vmSway.y*0.0022f + r*0.010f - ease*0.30f,
                 cp.z+g_vmOff.z + r*0.045f };
+    if (w->grenade && w->parts){ float l=g_glLift*g_glLift*(3.0f-2.0f*g_glLift); P.y+=GL_LIFT_Y*l; P.x-=GL_LIFT_X*l; }
     // aim the barrel at the crosshair convergence point
     // (aimed a touch right of and below it: a low-right gun aimed dead parallel still reads as
     // pointing up-left in perspective -- VM_AIM_R/VM_AIM_D are that tilt in view units per unit ahead)
@@ -3443,7 +3483,7 @@ static void UpdateEnemies(float dt){
                 float yaw=e->poseOK ? e->yaw : e->deathYaw;                      // the way he fell
                 Corpse *cp=&g_corpses[g_corpseNext]; *cp=(Corpse){0};            // lasting body, posed at the final death frame
                 cp->role=e->deathRole?e->deathRole:CL_DEATH;
-                cp->wN=e->wN; for (int k=0;k<e->wN;k++){ cp->wBone[k]=e->wBone[k]; cp->wOff[k]=e->wOff[k]; cp->wSz[k]=e->wSz[k]; }
+                cp->wN=e->wN; for (int k=0;k<e->wN;k++){ cp->wBone[k]=e->wBone[k]; cp->wOff[k]=e->wOff[k]; cp->wSz[k]=e->wSz[k]; cp->wDir[k]=e->wDir[k]; cp->wT0[k]=e->wT0[k]; }
                 cp->pos=e->pos; cp->yaw=yaw; cp->active=1; cp->type=e->type; cp->burnN=e->burnN;   // keep the soot marks it earned while alive
                 for (int k=0;k<e->burnN;k++){ cp->burnY[k]=e->burnY[k]; cp->burnR[k]=e->burnR[k]; }
                 g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
@@ -3542,13 +3582,13 @@ static void FinishReload(void){
 // full (or the reserve dry) the clip skips to the last insert's follow-through (the pose
 // after every insert matches), and a 5th+ shell replays one insert cycle. The trigger can
 // cut the reload short at any time (WeaponTrigger) -- what's in the tube is what you have.
-#define SHELL_WITHDRAW 16.0f           // frames after an insert before the hand is clear of the gun
+#define SHELL_WITHDRAW 6.0f            // frames after an insert before the hand is clear of the gun
 static float g_rackIn=0.0f;            // >0: the pump sounds when this runs out (after a shot, or closing a shell reload)
 static int   g_rackShot=0;             // that pending pump follows a shot (it sounds even though no reload is running)
 static void ShellFeed(Weapon *w, float pvT){
     if (!g_reloading || w->shellCycle<=0 || w->magSize<=0 || g_curAnim!=g_aReload) return;
     if (g_shellJump>=0.0f && g_animT>=g_shellJump){                // tube full: the hand has come away -> straight to the closing pump
-        g_animT=w->shellPump+(g_animT-g_shellJump); g_shellJump=-1.0f; }
+        g_animT=w->shellPump+(g_animT-g_shellJump); g_shellJump=-1.0f; return; }   // (return: the skipped-over pushes are not pushes)
     float last=w->shellFirst+(w->shellCount-1)*w->shellCycle;
     for (int k=0;k<w->shellCount;k++){
         float fk=w->shellFirst+k*w->shellCycle;
@@ -3557,7 +3597,7 @@ static void ShellFeed(Weapon *w, float pvT){
             if (g_audio && g_hasShellSnd){ SetSoundPitch(g_shellSnd,0.96f+GetRandomValue(0,8)/100.0f); SetSoundVolume(g_shellSnd,0.8f); PlaySound(g_shellSnd); } }   // the shell going in
         DebugLog("reload","\"slot\":%d,\"mag\":%d,\"reserve\":%d,\"shell\":1", g_curWeapon, w->mag, w->reserve);
         if (w->mag>=w->magSize || w->reserve<=0){                  // full (or dry): let the hand withdraw, then skip the clip's spare inserts
-            if (w->shellPump>0.0f){ g_shellJump=fk+SHELL_WITHDRAW; g_rackIn=(SHELL_WITHDRAW+w->shellRackAt-w->shellPump)/30.0f; }
+            if (w->shellPump>0.0f){ g_shellJump=fk+SHELL_WITHDRAW; g_rackIn=(SHELL_WITHDRAW+w->shellRackAt-w->shellPump)/(w->animRate>0.0f?w->animRate:30.0f); }
             else { if (fk<last) g_animT=last+(g_animT-fk); g_rackIn=0.45f; } }
         else if (k==w->shellCount-1) g_animT=fk-w->shellCycle+(g_animT-fk);                   // more to load: one more cycle
         break;
@@ -3569,9 +3609,12 @@ static void ShellFeed(Weapon *w, float pvT){
 static void TryReload(void){
     Weapon *w=&g_weapons[g_curWeapon];
     if (g_reloading || w->magSize<=0 || w->mag>=w->magSize || w->reserve<=0) return;
-    if (w->grenade){ g_reloading=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=(float)GL_OPEN_FROM; g_glPhase=1; g_glCut=0; g_glFire=0;
+    if (w->grenade){ g_reloading=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=(float)GL_OPEN_FROM; g_glPhase=1; g_glCut=0; g_glFire=0; g_glSlot=w->mag;
         if (g_audio && g_hasGlSnd[0]) PlaySound(g_glSnd[0]);                      // the drum swings open
         return; }
+    if (w->crTo>w->crFrom && w->animN>0){               // the reload its own clip holds (minigun: lid up, box out, box in; flamethrower: its pump)
+        g_reloading=1; g_clipReload=1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=w->crFrom; g_burstLeft=0; g_vmRaise=fmaxf(g_vmRaise,w->crDipIn);
+        DebugLog("reload","\"slot\":%d,\"clip\":[%.0f,%.0f]", g_curWeapon, w->crFrom, w->crTo); return; }
     if (w->reloadSeqN<=0 && (w->aReload==w->aIdle || w->aReload>=w->animN)){ g_burstLeft=0; FinishReload(); g_fireCd=1.2f; return; }
     StartReload();
 }
@@ -3656,10 +3699,10 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     Weapon *cw=&g_weapons[g_curWeapon];
     int firingNow=0;                                       // looped fire sound active this frame?
 
-    { static int uf=0; if (g_reloadAt>0 && ++uf==g_reloadAt){ if (cw->grenade){ cw->mag=0; TryReload(); } else if (getenv("CHERNOBYL_RELOAD_REAL")){ if (!strcmp(getenv("CHERNOBYL_RELOAD_REAL"),"empty")) cw->mag=0; TryReload(); } else StartReload(); } }   // (the launcher reloads by scrubbing: empty it and take the real path)
+    { static int uf=0; if (g_reloadAt>0 && ++uf==g_reloadAt){ if (cw->grenade){ cw->mag=0; TryReload(); } else if (getenv("CHERNOBYL_RELOAD_REAL")){ const char *rr=getenv("CHERNOBYL_RELOAD_REAL"); if (!strcmp(rr,"empty")) cw->mag=0; else if (rr[0]=='m') cw->mag=atoi(rr+1); TryReload(); }   /* "m3" = start from 3 in the gun */ else StartReload(); } }   // (the launcher reloads by scrubbing: empty it and take the real path)
     // shell-fed reload + a round in the tube: the trigger stops loading and fires
     if (g_reloading && cw->grenade && cw->mag>0 && lmbP && !g_glCut){     // launcher: shut the drum on what's in it, then fire
-        g_glCut=1; if (g_glPhase!=3){ g_glPhase=3; g_animT=(float)GL_SHUT_FROM; if (g_audio && g_hasGlSnd[2]) PlaySound(g_glSnd[2]); }
+        g_glCut=1; if (g_glPhase!=3){ g_glPhase=3; g_animT=(float)GL_SHUT_FROM; }
         DebugLog("reloadcut","\"slot\":%d,\"mag\":%d", g_curWeapon, cw->mag); }
     if (g_reloading && cw->shellCycle>0 && cw->mag>0 && lmbP){
         g_reloading=0; g_reloadStep=-1; g_curAnim=g_aIdle; g_animOnce=0; g_animT=0.0f;
@@ -3690,7 +3733,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
                     g_fireCd=GL_FIRE_CD; g_recoil=1.0f;   // (not counted in g_shotsFired -- grenades can't score g_shotsHit)
                     if (cw->recoilKick>0.0f){ g_pitch += DEG2RAD*cw->recoilKick; if (g_pitch>1.5f) g_pitch=1.5f; }
                     if (g_audio && cw->hasSnd) PlaySound(cw->fireSnd);
-                    LaunchGrenade(g_cam);
+                    LaunchGrenade(g_cam); g_glShotT=0.0f;                       // ...and the gun's own firing motion
                 }
             }
         } else if (!cw->spinUp && !cw->soundGated && !cw->flame && !cw->melee && !cw->grenade && lmb){ // full-auto / one-shot (shotgun, sawnoff)
@@ -3700,7 +3743,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
             if (willFire && cw->autoReload){               // shotgun: cock between shots (the Shot clip
                 // already animates the action -- playing the shell-Reload clip here
                 // would block firing for its whole length)
-                g_rackIn=0.34f; g_rackShot=1;              // the pump comes AFTER the boom, not under it
+                g_rackIn=(cw->animRate>0.0f)?(23.0f/cw->animRate):0.34f; g_rackShot=1;   // the pump comes AFTER the boom, as the shot clip's slide starts back (frame 24)
             }
         }
     }
@@ -3867,27 +3910,44 @@ static void WeaponAnimate(float dt, int moving){
     // back to the held idle.
     if (g_gunAnimN>0 && g_curAnim<g_gunAnimN){
         int nf=ANIM_FRAMES(g_gunAnim[g_curAnim]);
-        if (cw->grenade){
+        if (g_reloading && g_clipReload){
+            float pv=g_animT; g_animT+=dt*((cw->crSlowTo>0.0f && g_animT>=cw->crSlowFrom && g_animT<cw->crSlowTo)?cw->crSlowRate:cw->crRate);
+            if (cw->crSkipA>0.0f && pv<cw->crSkipA && g_animT>=cw->crSkipA){ g_animT=cw->crSkipB+(g_animT-cw->crSkipA); pv=g_animT; }
+            if (pv<cw->crFill && g_animT>=cw->crFill) FinishReload();
+            if (g_animT>=cw->crTo){ if (pv<cw->crFill) FinishReload();
+                g_reloading=0; g_clipReload=0; g_vmRaise=fmaxf(g_vmRaise,cw->crDip);
+                g_animT=(cw->idleHold>=0)?(float)cw->idleHold:(cw->spinUp?(float)MG_IDLE_FRAME:(nf>0?(float)(nf-1):0.0f)); }
+        } else if (cw->grenade){
             // grenade launcher: one baked 'allanims' clip. HOLD the idle frame between
             // shots; R scrubs the reload sub-range (GL_RELOAD_FROM..TO) then snaps back.
             float hold = (cw->idleHold>=0)?(float)cw->idleHold:(float)GL_IDLE_FRAME;   // Z/X-tuned grip frame
             if (g_vmHoldDev>=0){ hold=(float)g_vmHoldDev; static int once=0; if (!once){ once=1; DebugLog("vmhold","\"frames\":%d",nf); } }   // --vm-hold N (dev)
+            { float want=(g_reloading && g_glPhase>=1)?1.0f:0.0f;
+              g_glLift+=(want-g_glLift)*fminf(1.0f,dt*6.0f); }
             if (g_reloading){
                 float pv=g_animT;
-                g_animT += dt*(g_glPhase==2 ? 52.0f : (g_glCut ? 130.0f : 62.0f));
-                if (g_glPhase==1 && g_animT>=(float)GL_OPEN_TO){ g_glPhase=2; g_animT=(float)GL_FEED_FROM+(g_animT-GL_OPEN_TO); }
+                g_animT += dt*(g_glPhase==2 ? 52.0f : (g_glCut ? 150.0f : 62.0f));
+                if (g_glPhase==1 && g_animT>=(float)GL_OPEN_TO){ g_glPhase=2; g_glSlot=cw->mag; g_animT=(float)(GL_FEED_FROM+GL_FEED_LEN*g_glSlot)+(g_animT-GL_OPEN_TO); }
                 else if (g_glPhase==2){
-                    if (pv<(float)GL_FEED_AT && g_animT>=(float)GL_FEED_AT && cw->mag<cw->magSize && cw->reserve>0){
+                    float base=(float)(GL_FEED_FROM+GL_FEED_LEN*g_glSlot), at=base+(float)GL_FEED_AT;
+                    if (pv<at && g_animT>=at && cw->mag<cw->magSize && cw->reserve>0){
                         cw->mag++; cw->reserve--;
                         if (g_audio && g_hasGlSnd[1]){ SetSoundPitch(g_glSnd[1],0.95f+GetRandomValue(0,10)/100.0f); PlaySound(g_glSnd[1]); }   // a grenade seats
                         DebugLog("reload","\"slot\":%d,\"mag\":%d,\"reserve\":%d,\"shell\":1", g_curWeapon, cw->mag, cw->reserve); }
-                    if (g_animT>=(float)GL_FEED_TO){
-                        if (cw->mag<cw->magSize && cw->reserve>0) g_animT-=(float)(GL_FEED_TO-GL_FEED_FROM);     // another one
-                        else { g_glPhase=3; g_animT=(float)GL_SHUT_FROM; if (g_audio && g_hasGlSnd[2]) PlaySound(g_glSnd[2]); } }
+                    if (g_animT>=base+(float)GL_FEED_LEN){
+                        float over=g_animT-(base+(float)GL_FEED_LEN);
+                        if (cw->mag<cw->magSize && cw->reserve>0 && cw->mag<6){ g_glSlot=cw->mag; g_animT=(float)(GL_FEED_FROM+GL_FEED_LEN*g_glSlot)+over; }   // the next chamber
+                        else { g_glPhase=3; g_animT=(float)GL_SHUT_FROM; } }
                 }
-                else if (g_glPhase==3 && g_animT>=(float)GL_SHUT_TO){
-                    g_reloading=0; g_glPhase=0; g_animT=hold; if (g_glCut){ g_glCut=0; g_glFire=1; } }
+                else if (g_glPhase==3){
+                    if (pv<(float)GL_SHUT_SNAP && g_animT>=(float)GL_SHUT_SNAP && g_audio && g_hasGlSnd[2]) PlaySound(g_glSnd[2]);          // the barrel snaps shut
+                    if (g_animT>=(float)GL_SHUT_TO){ g_reloading=0; g_glPhase=0; g_animT=hold; g_vmRaise=fmaxf(g_vmRaise,0.55f);       // down and back up into the hold: covers the change of pose
+                        if (g_glCut){ g_glCut=0; g_glFire=1; } }
+                }
                 else if (g_glPhase==0){ g_reloading=0; g_animT=hold; }                                          // (never left mid-air)
+            } else if (g_glShotT>=0.0f && cw->parts){
+                g_glShotT+=dt*60.0f; g_animT=g_glShotT;
+                if (g_glShotT>=(float)GL_SHOT_TO){ g_glShotT=-1.0f; g_animT=(nf>0)?hold:0.0f; }
             } else g_animT = (nf>0) ? hold : 0.0f;
         } else if (g_weapons[g_curWeapon].spinUp && g_curAnim==g_aIdle && !g_animOnce){
             // minigun: the barrel mesh is rigid (not skinned) and 'allanims' only
@@ -3914,7 +3974,7 @@ static void WeaponAnimate(float dt, int moving){
             }
         } else {
             float pvT=g_animT;
-            g_animT += dt*30.0f;
+            g_animT += dt*(cw->animRate>0.0f?cw->animRate:30.0f);
             ShellFeed(cw, pvT);
             // nf<=0 (empty/malformed clip) counts as instantly finished, so a
             // zero-frame reload phase can't wedge g_reloading=1 forever.
@@ -4568,7 +4628,7 @@ static void DrawEnemies(void){
         if (rg->animN>0){                                     // remember the pose shown (new wounds go on it), draw the old ones
             e->drawAn=RigClip(e->type, e->state==2?(e->deathRole?e->deathRole:CL_DEATH):e->clip); e->drawFrame=e->animT; e->drawYaw=yaw;
             g_woundPose=stored?e->pose:NULL;
-            if (e->wN>0) DrawWounds(e->drawAn, e->animT, dpos, yaw, esc, e->wN, e->wBone, e->wOff, e->wSz);
+            if (e->wN>0) DrawWounds(e->drawAn, e->animT, dpos, yaw, esc, e->wN, e->wBone, e->wOff, e->wSz, e->wDir, e->wT0);
             g_woundPose=NULL;
         }
         if (e->state==1 && e->hp<e->maxHp && !e->boss){       // HP bar above damaged enemies (bosses get the HUD bar)
@@ -4590,7 +4650,7 @@ static void DrawEnemies(void){
             DrawModelEx(*EnemyLodModel(rg,g_corpses[c].pos), g_corpses[c].pos, (Vector3){0,1,0}, g_corpses[c].yaw,
                         (Vector3){csc,csc,csc}, kEnemy[g_corpses[c].type].tint);
             if (g_corpses[c].wN>0) DrawWounds(&rg->anim[rg->clip[role]], (float)rg->settle[role], g_corpses[c].pos, g_corpses[c].yaw, csc,
-                                              g_corpses[c].wN, g_corpses[c].wBone, g_corpses[c].wOff, g_corpses[c].wSz);
+                                              g_corpses[c].wN, g_corpses[c].wBone, g_corpses[c].wOff, g_corpses[c].wSz, g_corpses[c].wDir, g_corpses[c].wT0);
             if (g_corpses[c].burnN>0){   // prone body: compress the mark heights so soot sits on it, not floating above
                 Vector3 b={g_corpses[c].pos.x, g_corpses[c].pos.y+0.05f, g_corpses[c].pos.z};
                 DrawBurnMarks(b, 0.30f, g_corpses[c].burnY, g_corpses[c].burnR, g_corpses[c].burnN);
@@ -4627,17 +4687,21 @@ static void DrawInspect(void){
 // Draw a weapon model but spin ONE rigid mesh about its local Z axis. The minigun
 // barrel cluster isn't rigged, so we rotate its geometry directly. Mirrors how
 // DrawModelEx composes its transform so every other mesh draws byte-identically.
+static Matrix PartsMatrix(const Weapon *w, int track, float frameF);
 static void DrawGunSpinMesh(Model model, Vector3 pos, float scale, int spinMesh, float angle,
                             unsigned long long gunMask, Vector3 armsOff){
     Matrix mt = MatrixMultiply(model.transform, MatrixMultiply(MatrixScale(scale,scale,scale), MatrixTranslate(pos.x,pos.y,pos.z)));
-    Matrix spun = MatrixMultiply(MatrixRotateZ(angle), mt);   // spin in local space (barrels run along local Z, centred on X=Y=0)
     // The skinned ARMS (meshes not in gunMask) can be slid as a rigid unit onto the
     // grips (this rig only renders sanely at its baked pose -- see gun-pin memory --
     // so the hands can't be re-posed per frame; a model-space nudge seats them).
     Matrix armsM = MatrixMultiply(MatrixTranslate(armsOff.x,armsOff.y,armsOff.z), mt);
+    const Weapon *pw=&g_weapons[g_curWeapon];
+    int parts = pw->parts && pw->model.meshes==model.meshes;         // the gun's own authored pieces (lid, ammo box...), when baked
     for (int i=0;i<model.meshCount;i++){
         int isGun = (i<64) && ((gunMask>>i)&1ULL);
-        Matrix m = (i==spinMesh)?spun:(isGun?mt:armsM);
+        Matrix m = isGun?mt:armsM;
+        if (isGun && parts && pw->partTrack[i]>=0) m=MatrixMultiply(PartsMatrix(pw,pw->partTrack[i],g_animT), mt);
+        if (i==spinMesh) m=MatrixMultiply(MatrixRotateZ(angle), m);   // spin in local space (barrels run along local Z, centred on X=Y=0)
         DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], m);
     }
 }
@@ -4661,6 +4725,54 @@ static Matrix XformToMatrix(Transform t){
 // Model-space matrix that carries the pinned gun's bind-space verts onto the posed
 // hand (identity when there's no hand/keyframe data). Shared by the draw and by
 // ComputeVmFrame, which needs to measure the gun exactly where it gets drawn.
+// ---- Authored part animation (<model>.glb.parts, tools/gen_parts.py) -------------------------
+// The launcher's own pieces are animated in its file as plain nodes -- the barrel breaking open,
+// the release lever, six grenades carried up into the drum -- which raylib does not play. The
+// sidecar holds each gun mesh's motion through the clip (relative to its rest place); with it
+// loaded the gun is drawn piece by piece from that, instead of rigid on the hand.
+static void PartsLoad(Weapon *w, const char *glbPath){
+    for (int k=0;k<64;k++){ w->partTrack[k]=-1; w->partSeat[k]=-1; w->partSlug[k]=-1; }
+    w->parts=NULL; w->partsFrames=0;
+    char p[300]; snprintf(p,sizeof p,"%s.parts",glbPath);
+    int n=0; unsigned char *d=LoadFileData(p,&n); if (!d) return;
+    int ver=0, nt=0, nf=0;
+    if (n>=16 && !memcmp(d,"C2PT",4)){ memcpy(&ver,d+4,4); memcpy(&nt,d+8,4); memcpy(&nf,d+12,4); }
+    long rec=40L+(long)nf*48L;
+    if (ver!=1 || nt<=0 || nt>64 || nf<=0 || n<16+nt*rec){ UnloadFileData(d); DebugLog("parts","\"error\":\"bad file\",\"path\":\"%s\"",JStr(p)); return; }
+    w->parts=(float*)MemAlloc((unsigned int)(nt*nf*12*sizeof(float))); w->partsFrames=nf;
+    int used=0;
+    for (int t=0;t<nt;t++){
+        const unsigned char *r=d+16+t*rec; char name[33]; memcpy(name,r,32); name[32]=0;
+        int mesh=0, seated=0; memcpy(&mesh,r+32,4); memcpy(&seated,r+36,4);
+        memcpy(w->parts+(size_t)t*nf*12, r+40, (size_t)nf*48);
+        if (mesh<0 || mesh>=64 || mesh>=w->model.meshCount || !((w->gunMask>>mesh)&1ULL)) continue;   // (a sidecar that drifted from the model)
+        if (seated) w->partSeat[mesh]=(short)t; else { w->partTrack[mesh]=(short)t; used++; }
+        if (!strncmp(name,"slug",4) && name[4]>='1' && name[4]<='9') w->partSlug[mesh]=(signed char)(name[4]-'1');
+    }
+    UnloadFileData(d);
+    DebugLog("parts","\"path\":\"%s\",\"tracks\":%d,\"frames\":%d,\"meshes\":%d",JStr(p),nt,nf,used);
+    if (used<=0){ MemFree(w->parts); w->parts=NULL; w->partsFrames=0; }
+}
+static Matrix PartsMatrix(const Weapon *w, int track, float frameF){
+    if (!w->parts || track<0) return MatrixIdentity();
+    int nf=w->partsFrames; if (frameF<0) frameF=0; if (frameF>(float)(nf-1)) frameF=(float)(nf-1);
+    int f0=(int)frameF, f1=(f0+1<nf)?f0+1:f0; float k=frameF-(float)f0;
+    const float *a=w->parts+((size_t)track*nf+f0)*12, *b=w->parts+((size_t)track*nf+f1)*12; float m[12];
+    for (int i=0;i<12;i++) m[i]=a[i]+(b[i]-a[i])*k;
+    return (Matrix){ m[0],m[1],m[2],m[3],  m[4],m[5],m[6],m[7],  m[8],m[9],m[10],m[11],  0,0,0,1 };
+}
+// Which track (if any) a gun mesh is drawn with right now. Rounds: the ones in the drum sit in
+// it; the one being fed plays its own carry-and-seat; as the barrel opens the fired ones are
+// thrown clear by the release; the rest are not there.
+static int PartsTrackNow(const Weapon *w, int mesh, float frameF){
+    int s=w->partSlug[mesh];
+    if (s<0) return w->partTrack[mesh];
+    int seat=(w->partSeat[mesh]>=0)?w->partSeat[mesh]:w->partTrack[mesh];
+    if (!g_reloading || g_glPhase==0 || g_glPhase==3) return (s<w->mag)?seat:-2;
+    if (g_glPhase==1) return (s<w->mag)?seat:((frameF<74.0f)?w->partTrack[mesh]:-2);
+    if (s<g_glSlot) return seat;
+    return (s==g_glSlot)?w->partTrack[mesh]:-2;                       // -2 = not drawn
+}
 static Matrix PinnedGunLocal(Model model, ModelAnimation *anim, float frameF,
                              int handBone, Vector3 gunC, Matrix align, Vector3 seat, int authored,
                              Vector3 pinOff, float pinScale, float pinYaw, float pinPitch, float pinRoll){
@@ -4696,9 +4808,19 @@ static void DrawPinnedGun(Model model, ModelAnimation *anim, float frameF, Vecto
     Matrix mt = MatrixMultiply(model.transform, MatrixMultiply(MatrixScale(scale,scale,scale), MatrixTranslate(pos.x,pos.y,pos.z)));
     Matrix gunMat = MatrixMultiply(PinnedGunLocal(model, anim, frameF, handBone, gunC, align, seat, authored,
                                                   pinOff, pinScale, pinYaw, pinPitch, pinRoll), mt);
+    const Weapon *pw=&g_weapons[g_curWeapon];
+    int parts = authored && pw->parts && pw->model.meshes==model.meshes;    // the authored piece-by-piece animation, when the sidecar is there
+    Matrix trim = MatrixMultiply(MatrixScale(pinScale,pinScale,pinScale), MatrixMultiply(MatrixRotateZ(DEG2RAD*pinRoll),
+                  MatrixMultiply(MatrixRotateX(DEG2RAD*pinPitch), MatrixRotateY(DEG2RAD*pinYaw))));
+    Matrix pre = MatrixMultiply(MatrixMultiply(MatrixTranslate(-gunC.x,-gunC.y,-gunC.z), trim), MatrixTranslate(gunC.x+pinOff.x, gunC.y+pinOff.y, gunC.z+pinOff.z));
     for (int i=0;i<model.meshCount;i++){
         int isGun = (i<64) && ((gunMask>>i)&1ULL);                    // arms (blended skin) pose at mt; gun parts ride the hand
-        DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], isGun?gunMat:mt);
+        Matrix m = isGun?gunMat:mt;
+        if (isGun && parts){
+            int tr=PartsTrackNow(pw,i,frameF); if (tr==-2) continue;
+            if (tr>=0) m=MatrixMultiply(MatrixMultiply(pre, PartsMatrix(pw,tr,frameF)), mt);
+        }
+        DrawMesh(model.meshes[i], model.materials[model.meshMaterial[i]], m);
     }
 }
 
@@ -5684,7 +5806,7 @@ static void StartSelectedMap(void){
     g_vy=0.0f; g_eyeSmooth=0.0f;
     for (int i=0;i<g_numWeapons;i++){ g_weapons[i].mag=g_weapons[i].magSize; g_weapons[i].reserve=g_weapons[i].reserveStart; }
     g_flameFuel=0.0f; g_burstLeft=0; g_fireCd=0.0f;
-    g_reloading=0; g_reloadStep=-1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=0.0f;   // cancel a reload begun on the old map
+    g_reloading=0; g_clipReload=0; g_reloadStep=-1; g_animOnce=0; g_curAnim=g_aIdle; g_animT=0.0f;   // cancel a reload begun on the old map
     g_kills=0; g_headshots=0; g_shotsFired=0; g_shotsHit=0; g_cheatUsed=0;
     g_wave=0; g_waveBudget=0; g_waveBreather=0.0f; g_spawnTick=0.0f; g_runT=0.0f;    // wave director restarts with the run
     g_cam=(Camera3D){ g_pos, Vector3Add(g_pos,(Vector3){0,0,-1}), (Vector3){0,1,0}, 70.0f, CAMERA_PERSPECTIVE };
@@ -5953,12 +6075,24 @@ int main(int argc, char **argv) {
     if (g_weapons[2].hasAuxSnd) SetSoundVolume(g_weapons[2].auxSnd, 0.4f);  // spin-down was too loud/abrupt -> soften it
     g_weapons[0].grenade=1;      // grenade launcher: lobs an arcing grenade, explodes on impact
     g_weapons[0].pinGun=1;       // its launcher mesh is detached from the arms -> ride it on the hand bone
+    PartsLoad(&g_weapons[0], FileExists("assets/grenadelauncher.glb")?"assets/grenadelauncher.glb":"../assets/grenadelauncher.glb");   // ...or, better, play its own authored pieces
     DebugPinProbe(&g_weapons[0]);   // boot ActivateWeapon ran BEFORE these flags -> probe explicitly now
     g_weapons[1].playShoot=1; g_weapons[1].fireCd=0.7f;   // remington: plays Shot clip per blast, semi-auto cadence; R plays Reload
     g_weapons[2].spinUp=1;       // minigun: 5s fire cap -> cooldown sound + lockout
+    PartsLoad(&g_weapons[2], FileExists("assets/minigun.glb")?"assets/minigun.glb":"../assets/minigun.glb");
+    if (g_weapons[2].parts){ Weapon *w=&g_weapons[2]; w->crFrom=14.0f; w->crTo=256.0f; w->crFill=214.0f; w->crRate=88.0f; w->crDip=0.0f; w->crSkipA=16.0f; w->crSkipB=116.0f; }   // (16-116 is a second and a half of nothing: cut)   // the box swap out of its clip: lid up, box out, box in, lid down (1.6 s), ending where the gun is back at rest (256).
+                             // Before it (0-12) is one shot's kick -- started there it stuttered; after it (260-360) the gun is swung down and up twice, which read as pointless.
+    { const char *e=getenv("CHERNOBYL_CR"); int sl=-1; float a=0,b=0,f=0,r=0;      // dev: "slot from to fill rate" -- play any stretch of a gun's clip as its reload (to find what the clip holds)
+      if (e && sscanf(e,"%d %f %f %f %f",&sl,&a,&b,&f,&r)==5 && sl>=0 && sl<16){ Weapon *w=&g_weapons[sl]; w->crFrom=a; w->crTo=b; w->crFill=f; w->crRate=r; } }
     g_weapons[3].soundGated=1;   // LMG:     fire while the sound plays, then a 0.75s pause
     g_weapons[4].playShoot=1;    // AK-74M:  plays its Shot clip on fire; R plays AK_Reload
     g_weapons[5].flame=1;        // Flamethrower: continuous fire cone while held
+    // 20-33 s of its one clip is a tank swap. Its first 6 s are the left hand reaching in and unscrewing the canister in
+    // four twists (1200-1560): sped up to reload pace that was a hand jiggling at the gun, in any cut of it. So the reload
+    // starts with the hand already on the loosened canister (1540): it comes away, the cage stands empty, a fresh one goes
+    // in (2.5 s). It runs on to the hold frame (2091) so it ends without a jump; it cannot START on the hold, so the gun
+    // dips as the swap begins and comes up with the hand in place.
+    { Weapon *w=&g_weapons[5]; w->crFrom=1540.0f; w->crTo=2091.0f; w->crFill=1800.0f; w->crRate=220.0f; w->crDip=0.0f; w->crDipIn=0.6f; }
     LoadWeaponSound(5, "assets/flame_fire.mp3", "../assets/flame_fire.mp3", 1);  // flamethrower: looped roar (silent if asset absent)
 
     // M1 combat identity: damage / pellets / spread(deg) / kick(deg) / mag / reserve
@@ -5979,8 +6113,14 @@ int main(int argc, char **argv) {
     g_weapons[2].fireCd=0.06f;   // minigun: ~17 rounds/s once spun up
     g_weapons[4].burst=3;        // AK-74M: one 3-round burst per trigger pull
     g_weapons[1].autoReload=1;   // remington: cock between shots
-    g_weapons[1].shellPump=300.0f; g_weapons[1].shellRackAt=352.0f;   // the 410-frame clip holds ~7 inserts, then the pump from ~300: a full tube skips there
-    g_weapons[1].shellFirst=40.0f; g_weapons[1].shellCycle=40.0f; g_weapons[1].shellCount=4;   // its Reload clip: shells go in at 40/80/120/160, pump at 180
+    // The Remington's clips are keyed at 60 a second and were being played at 30, against a table that had a shell
+    // going in every 40 frames. Measured from the clip itself (the shell and loading-gate bones): the reload pushes
+    // FOUR shells home, at 79 / 160 / 240 / 319, then the slide comes back at 361; the shot clip works the slide at 24.
+    // So the sounds and the round count landed between the hand's pushes, and the pump sounded before it moved.
+    g_weapons[1].animRate=60.0f;
+    g_weapons[1].shellFirst=79.0f; g_weapons[1].shellCycle=80.0f; g_weapons[1].shellCount=4;     // a shell every 1.33 s, as before -- now on the push
+    g_weapons[1].shellPump=325.0f; g_weapons[1].shellRackAt=360.0f;   // a full tube skips to here = the clip's LAST push + SHELL_WITHDRAW, while the hand is still at the gate (every push looks the same
+                                                                      // there). Any later and it cut from a hand going down for another shell to one already on the fore-end. The rack sounds as the slide starts back.
     LoadWeaponAux(1, "assets/shotgun_rack.wav", "../assets/shotgun_rack.wav");      // the pump: one rack cut from a pump-action recording
     if (!g_weapons[1].hasAuxSnd) LoadWeaponAux(1, "assets/shotgun_cock.mp3", "../assets/shotgun_cock.mp3");
     if (g_weapons[1].hasSnd) SetSoundVolume(g_weapons[1].fireSnd, 0.72f);    // the blast, pulled back so the pump after it can be heard

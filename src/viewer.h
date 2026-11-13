@@ -49,10 +49,15 @@ static int RunViewer(void){
     int role=CL_IDLE, paused=0; float t=0.0f, turn=0.0f, dist=3.4f, look=1.05f; int face=0;
     EnableCursor();
     // still set: (role, time, turn degrees, close-up?)
-    struct { int role; float t, turn; int face; const char *name; } shots[]={
+    struct { int role; float t, turn; int face; const char *name; } shots[16]={
         {CL_IDLE,0.6f,0,0,"front"}, {CL_IDLE,0.6f,35,0,"three_quarter"}, {CL_IDLE,0.6f,0,1,"face"},
         {CL_IDLE,0.6f,40,1,"face_side"}, {CL_ATTACK,0.25f,20,0,"attack"}, {CL_WALK,0.4f,-30,0,"walk"} };
-    int nshots=(int)(sizeof shots/sizeof shots[0]), shot=0, settle=0;
+    int nshots=6, shot=0, settle=0;
+    if (getenv("CHERNOBYL_VIEW_GAIT")){                      // dev: a stride strip instead -- walk and run, front three-quarter and side (legs vs apron / robe)
+        static const char *gn[16]={"walk_a0","walk_a1","walk_a2","walk_a3","walk_s0","walk_s1","walk_s2","walk_s3","run_a0","run_a1","run_a2","run_a3","run_s0","run_s1","run_s2","run_s3"};
+        nshots=16;
+        for (int k=0;k<16;k++){ shots[k].role=(k<8)?CL_WALK:CL_RUN; shots[k].t=(k%4)*((k<8)?0.37f:0.18f)+0.05f; shots[k].turn=((k/4)%2)?80:30; shots[k].face=0; shots[k].name=gn[k]; }
+    }
     RenderTexture2D rtA={0}, rtB={0}; int rtOk=0;
     // each model's eye line from its rig's Head bone (bind pose), not the bounding box --
     // hats, toques and tentacles would throw that off
@@ -427,7 +432,8 @@ static int RunGallery(void){
         float drawYawG=(range && tg->state==2)?tg->deathYaw:ENEMY_YAW_OFFSET;
         DrawModelEx(rg->model,(Vector3){0,0,0},(Vector3){0,1,0},drawYawG,(Vector3){esc,esc,esc},WHITE);
         if (range){ tg->drawAn=drawAn; tg->drawFrame=drawFrame; tg->drawYaw=drawYawG;     // wounds go on the pose shown
-            if (tg->wN>0) DrawWounds(drawAn, drawFrame, (Vector3){0,0,0}, drawYawG, esc, tg->wN, tg->wBone, tg->wOff, tg->wSz); }
+            g_runT+=GetFrameTime();                                    // (the gallery has no run: this is only the clock wounds bleed by)
+            if (tg->wN>0) DrawWounds(drawAn, drawFrame, (Vector3){0,0,0}, drawYawG, esc, tg->wN, tg->wBone, tg->wOff, tg->wSz, tg->wDir, tg->wT0); }
         if (boltT>=0 && !(range && tg->state!=1)){                         // the radiation bolt, flying off "at the player"
             Vector3 bp={boltP.x, boltP.y-1.0f*boltT, boltP.z+13.0f*boltT};       // from the hand it left
             DrawSphere(bp,0.12f,(Color){140,255,90,255}); DrawSphereWires(bp,0.2f,6,6,(Color){90,220,60,120});

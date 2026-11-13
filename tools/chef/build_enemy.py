@@ -1421,6 +1421,10 @@ def shovel():
         v.co.z += 1.2 * d * d
 
 
+APRON_SEG = 4                              # links in each of the skirt's two bone chains
+APRON_CHAINS = []                          # [(bone names hip->hem, rest joints (world), "Left"|"Right")] -- only rigs with an apron
+
+
 def apron(top_z, bottom_z, half_w, mat, pad=0.03, bib=False):
     """Apron draped by ray-casting onto the body: hugs chest and belly, hangs straight below the hips."""
     dg = bpy.context.evaluated_depsgraph_get()
@@ -1515,18 +1519,58 @@ def apron(top_z, bottom_z, half_w, mat, pad=0.03, bib=False):
         if n not in groups:
             groups[n] = o.vertex_groups.new(name=n)
         return groups[n]
+    # The skirt (everything below the hip line) is cloth on two bone chains, one hanging in front of
+    # each leg: apron_motion() runs a small cloth simulation through every clip -- gravity, the
+    # sheet's own inertia, and the thigh and shin behind each chain pushing it out. Across the
+    # sheet the two chains blend, so one knee coming through lifts its side and twists the hem.
+    # (Hung rigidly from the hips it was a board the knees punched through on every stride.)
+    hinge_z = hips_z - 0.03
+    seg = (hinge_z - bottom_z) / APRON_SEG
+    lx = (rig.matrix_world @ rig.data.bones["LeftUpLeg"].head_local).x
+    rx = (rig.matrix_world @ rig.data.bones["RightUpLeg"].head_local).x
+    def sheet_y(x, z):                     # the draped sheet's front surface at (x, z): bilinear in the grid
+        fi = min(nx - 1e-6, max(0.0, (x + half_w) / (2 * half_w) * nx))
+        fj = min(nz - 1e-6, max(0.0, (top_z - z) / (top_z - bottom_z) * nz))
+        i, j = int(fi), int(fj); u, w = fi - i, fj - j
+        return (S[j][i] * (1 - u) + S[j][i + 1] * u) * (1 - w) + (S[j + 1][i] * (1 - u) + S[j + 1][i + 1] * u) * w
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode="EDIT")
+    inv = rig.matrix_world.inverted()
+    for side, cx in (("L", lx), ("R", rx)):
+        joints = [Vector((cx, sheet_y(cx, hinge_z - seg * k), hinge_z - seg * k)) for k in range(APRON_SEG + 1)]
+        names = []
+        for k in range(APRON_SEG):
+            b = rig.data.edit_bones.new(f"Apron{side}{k}")
+            b.head = inv @ joints[k]; b.tail = inv @ joints[k + 1]
+            b.parent = rig.data.edit_bones["Hips"] if k == 0 else rig.data.edit_bones[names[-1]]
+            b.use_connect = k > 0; b.use_deform = True
+            names.append(b.name)
+        APRON_CHAINS.append((names, joints, f"{'Left' if side == 'L' else 'Right'}"))
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.context.view_layer.objects.active = o
     for v in o.data.vertices:
+        t = min(1.0, max(0.0, (hips_z + 0.03 - v.co.z) / 0.12)); sk = t * t * (3 - 2 * t)   # 0 above the hip line -> 1 a hand below it
         if v.co.z < hips_z:
-            grp("Hips").add([v.index], 1.0, "REPLACE")
-            continue
-        _, idx, _ = kd.find(v.co)
-        ws = [(gname[g.group], g.weight) for g in bverts[idx].groups
-              if g.weight > 0.01 and gname[g.group] in TORSO]
-        tot = sum(w for _, w in ws) or 1.0
-        if not ws:
-            ws, tot = [("Spine", 1.0)], 1.0
+            ws, tot = [("Hips", 1.0)], 1.0
+        else:
+            _, idx, _ = kd.find(v.co)
+            ws = [(gname[g.group], g.weight) for g in bverts[idx].groups
+                  if g.weight > 0.01 and gname[g.group] in TORSO]
+            tot = sum(w for _, w in ws) or 1.0
+            if not ws:
+                ws, tot = [("Spine", 1.0)], 1.0
         for n, w in ws:
-            grp(n).add([v.index], w / tot, "REPLACE")
+            if w / tot * (1.0 - sk) > 1e-4:
+                grp(n).add([v.index], w / tot * (1.0 - sk), "REPLACE")
+        if sk > 1e-4:
+            a = min(1.0, max(0.0, (v.co.x - rx) / (lx - rx))); a = a * a * (3 - 2 * a)      # 0 at the right leg's line -> 1 at the left's
+            u = (hinge_z - v.co.z) / seg                                                   # which link, as a float
+            for k in range(APRON_SEG):
+                c = k + 0.5
+                wk = 1.0 if (k == 0 and u < c) or (k == APRON_SEG - 1 and u > c) else max(0.0, 1.0 - abs(u - c))
+                for side, ws_ in (("L", a), ("R", 1.0 - a)):
+                    if sk * wk * ws_ > 1e-4:
+                        grp(f"Apron{side}{k}").add([v.index], sk * wk * ws_, "REPLACE")
     props.append((o, None))   # None = keep these weights
     return o
 
@@ -1683,6 +1727,9 @@ def steel_helmet():
         me = bpy.data.meshes.new("helmet_star"); bm.to_mesh(me); bm.free()
         so = bpy.data.objects.new("helmet_star", me); bpy.context.collection.objects.link(so)
         me.materials.append(paint("helmet_star_enamel", (0.62, 0.06, 0.05), grime=0.5, seed=31)); props.append((so, "Head"))
+        Xh, Yh = _grid(128)                 # the hammer and sickle in gold at the star's heart
+        M_hs = insignia_material("helmet_star_badge", 128, (0.62, 0.06, 0.05), (0.88, 0.70, 0.16), hammer_sickle(Xh / 0.78, Yh / 0.78), rough=0.5, grime=0.3, seed=44)
+        decal("helmet_star_badge", pc + n * 0.0024, B, n, 0.019, 0.019, M_hs, "Head", outline=lambda u, v: math.hypot(u - 0.5, v - 0.5) <= 0.5)
 
 
 def bandolier():
@@ -1756,6 +1803,76 @@ def bandolier():
         cyl(f"cartridge_{k}", q0 - w_ * 0.03, q0 + w_ * 0.03, 0.007, M_brass, max(wts, key=wts.get), verts=8)
 
 
+# ---- Soviet insignia, drawn as masks (1 = ink) on a [-1, 1] square, y up -------------------
+def _grid(size):
+    v, u = np.mgrid[0:size, 0:size].astype(np.float32)
+    return (u + 0.5) / size * 2 - 1, (v + 0.5) / size * 2 - 1          # row 0 = bottom (Blender image rows run upward)
+
+
+def _seg(X, Y, a, b, w):                 # a stroke from a to b, w wide
+    ax, ay = a; bx, by = b; dx, dy = bx - ax, by - ay
+    t = np.clip(((X - ax) * dx + (Y - ay) * dy) / (dx * dx + dy * dy), 0, 1)
+    return (np.hypot(X - (ax + dx * t), Y - (ay + dy * t)) < w / 2).astype(np.float32)
+
+
+def _star(X, Y, r, inner=0.40):          # five points, one up
+    th = np.arctan2(X, Y); k = 2 * np.pi / 5
+    a = np.abs(((th + k / 2) % k) - k / 2)                              # angle from the nearest point's axis
+    edge = r * inner * np.sin(np.pi / 5 + np.arctan2(inner * np.sin(np.pi / 5), 1 - inner * np.cos(np.pi / 5))) / \
+        np.sin(a + np.arctan2(inner * np.sin(np.pi / 5), 1 - inner * np.cos(np.pi / 5)) + 1e-9)
+    return (np.hypot(X, Y) < edge).astype(np.float32)
+
+
+def hammer_sickle(X, Y):
+    """The crossed hammer and sickle: the hammer's shaft runs from lower right to its head at
+    upper left; the sickle's blade curls round the right from a point at the top to its grip at
+    lower left."""
+    blade = ((np.hypot(X - 0.02, Y - 0.06) < 0.66) & (np.hypot(X + 0.15, Y - 0.10) > 0.60) & ~((X < -0.05) & (Y < -0.30) & (X + Y < -0.72))).astype(np.float32)
+    grip = _seg(X, Y, (-0.36, -0.50), (-0.66, -0.80), 0.17)
+    shaft = _seg(X, Y, (0.62, -0.78), (-0.30, 0.34), 0.13)
+    d = np.array((-0.92, 1.12)); d /= np.hypot(*d); pp = np.array((d[1], -d[0])); c = np.array((-0.36, 0.42))
+    head = ((np.abs((X - c[0]) * d[0] + (Y - c[1]) * d[1]) < 0.13) & (np.abs((X - c[0]) * pp[0] + (Y - c[1]) * pp[1]) < 0.30)).astype(np.float32)
+    return np.clip(blade + grip + shaft + head, 0, 1)
+
+
+def letters_CA(X, Y):
+    """The shoulder-board cypher: the Cyrillic letters for "Soviet Army", side by side."""
+    xc = X + 0.50; r = np.hypot(xc / 0.42, Y / 0.80)
+    C = ((r > 0.62) & (r < 1.0) & ~((xc > 0.05) & (np.abs(Y) < 0.36))).astype(np.float32)
+    xa = X - 0.50
+    A = np.clip(_seg(xa, Y, (-0.40, -0.80), (0.0, 0.80), 0.17) + _seg(xa, Y, (0.40, -0.80), (0.0, 0.80), 0.17) + _seg(xa, Y, (-0.22, -0.28), (0.22, -0.28), 0.14), 0, 1)
+    return np.clip(C + A, 0, 1)
+
+
+def insignia_material(name, size, base, ink, mask, rough=0.6, metal=0.0, grime=0.25, seed=40, shade=None):
+    h, w = mask.shape
+    a = np.zeros((h, w, 4), np.float32); a[..., 3] = 1
+    n1 = smooth_noise(h, w, 5, seed)
+    for ch in range(3):
+        a[..., ch] = (base[ch] * (1 - mask) + ink[ch] * mask) * (1.0 - grime * n1)
+    if shade is not None:
+        a[..., :3] *= shade[..., None]
+    return simple_material(name, from_np(f"{ENEMY}_{name}", np.clip(a, 0, 1)), rough=rough, metal=metal)
+
+
+def decal(name, centre, up, N, w, h, mat, bone, outline=None):
+    """A flat plate facing N with `up` up, w x h, mapped 0..1 (never mirrored: right = up x N).
+    outline(u, v) -> bool trims it to a shape (a 28 x 28 grid, faces outside dropped)."""
+    up = up.normalized(); N = N.normalized(); right = up.cross(N).normalized()
+    bm = bmesh.new(); uvl = bm.loops.layers.uv.new(); n = 28 if outline else 1
+    vs = [[bm.verts.new(centre + right * ((i / n - 0.5) * w) + up * ((j / n - 0.5) * h)) for i in range(n + 1)] for j in range(n + 1)]
+    for j in range(n):
+        for i in range(n):
+            if outline and not outline((i + 0.5) / n, (j + 0.5) / n):
+                continue
+            f = bm.faces.new((vs[j][i], vs[j][i + 1], vs[j + 1][i + 1], vs[j + 1][i]))
+            for lp, (u, v) in zip(f.loops, ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))): lp[uvl].uv = (u / n, v / n)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
+    me = bpy.data.meshes.new(name); bm.to_mesh(me); bm.free()
+    o = bpy.data.objects.new(name, me); bpy.context.collection.objects.link(o)
+    me.materials.append(mat); props.append((o, bone)); return o
+
+
 def soviet_kit():
     """What turns the khaki jacket into a Soviet Army field uniform: red shoulder boards, a brown
     leather belt with a brass buckle over the jacket, and tall black jackboots with the trousers
@@ -1822,8 +1939,16 @@ def soviet_kit():
     pf = C + Vector((0, -1, 0)) * (rad[kf] + 0.014)
     wf = torso_w(pf)
     box_basis("uniform_buckle", pf, Vector((1, 0, 0)), Vector((0, 0, 1)), Vector((0, -1, 0)), (0.062, 0.050, 0.006), M_brass, max(wf, key=wf.get), bevel=0.0015)
+    # the buckle's face: a five-pointed star with the hammer and sickle in it, stamped into the brass
+    X, Y = _grid(256); Xb = X * (0.062 / 0.050)                      # the plate is wider than tall: keep the star round
+    st = _star(Xb, Y, 0.92); rim = st - _star(Xb, Y, 0.80)
+    stamp = np.clip(rim + hammer_sickle(Xb / 0.40, (Y + 0.04) / 0.40) * st, 0, 1)
+    M_buckle = insignia_material("buckle_brass_emblem", 256, (0.72, 0.54, 0.22), (0.24, 0.16, 0.06), stamp, rough=0.35, metal=0.9, grime=0.15, seed=41)
+    decal("buckle_emblem", pf + Vector((0, -0.0036, 0)), Vector((0, 0, 1)), Vector((0, -1, 0)), 0.058, 0.046, M_buckle, max(wf, key=wf.get))
     # ---- shoulder boards: red, lying on each shoulder from the collar out
     M_board = paint("shoulder_board", (0.58, 0.07, 0.06), grime=0.35, seed=34)
+    Xc, Yc = _grid(256)
+    M_cypher = insignia_material("shoulder_board_cypher", 256, (0.58, 0.07, 0.06), (0.88, 0.70, 0.16), letters_CA(Xc / 0.84, (Yc + 0.12) / 0.66), rough=0.8, grime=0.3, seed=42)
     nk = bz("Neck")
     for side in ("Left", "Right"):
         sh = bz(side + "Arm")
@@ -1832,11 +1957,35 @@ def soviet_kit():
             x, y = nk.x + (sh.x - nk.x) * f, nk.y + (sh.y - nk.y) * f
             z = down_on(x, y, sh.z + 0.10)
             pts.append(Vector((x, y, (z if z is not None else sh.z + 0.03) + 0.007)))
+        lift = 0.0                           # the jacket's shoulder bulges between the two ends: a straight board sank into it
+        for f in (0.15, 0.3, 0.45, 0.6, 0.75, 0.9):
+            for dy in (-0.022, 0.0, 0.022):
+                q = pts[0].lerp(pts[1], f); zs = down_on(q.x, q.y + dy, sh.z + 0.12)
+                if zs is not None: lift = max(lift, zs + 0.0015 - (q.z - 0.0035))
+        lift = min(lift, 0.03); pts = [q + Vector((0, 0, lift)) for q in pts]
         X = (pts[1] - pts[0]).normalized(); Y = Vector((0, 1, 0)); Z = X.cross(Y).normalized()
         if Z.z < 0: Z = -Z
         Y = Z.cross(X).normalized()
         box_basis(f"shoulder_board_{side}", (pts[0] + pts[1]) / 2, X, Y, Z, ((pts[1] - pts[0]).length, 0.055, 0.007), M_board, side + "Shoulder", bevel=0.0015)
         cyl(f"board_button_{side}", pts[0] + X * 0.012 + Z * 0.002, pts[0] + X * 0.012 + Z * 0.008, 0.007, M_brass, side + "Shoulder", verts=10)
+        # the cypher on the board, in yellow, read with the collar end up
+        decal(f"board_cypher_{side}", (pts[0] + pts[1]) / 2 + X * 0.012 + Z * 0.0043, -X, Z, 0.049, (pts[1] - pts[0]).length - 0.030, M_cypher, side + "Shoulder")
+    # ---- sleeve patch: a red shield on the left upper arm -- gold star over the hammer and sickle
+    Xs, Ys = _grid(256)
+    field = np.clip(_star(Xs, Ys - 0.56, 0.26) + hammer_sickle(Xs / 0.46, (Ys + 0.16) / 0.46), 0, 1)
+    edge = ((np.abs(Xs) > 0.86) | (Ys > 0.90)).astype(np.float32)                      # a yellow border down the sides and across the top
+    M_patch = insignia_material("sleeve_patch_cloth", 256, (0.56, 0.06, 0.05), (0.86, 0.66, 0.14), np.clip(field + edge, 0, 1), rough=0.85, grime=0.3, seed=43)
+    S_, E_ = bz("LeftArm"), bz("LeftForeArm"); ax = (E_ - S_).normalized()
+    Np = Vector((0, 0, 1)) - ax * ax.z; Np = Np.normalized()                           # the side that faces out when the arm hangs
+    upp = -ax; rgt = upp.cross(Np).normalized(); pw, ph = 0.060, 0.076
+    Ac = S_ + ax * ((E_ - S_).length * 0.42)
+    shield = lambda u, v: abs(u - 0.5) <= (0.5 if v > 0.42 else 0.5 * math.sqrt(max(0.0, v / 0.42)))
+    po = decal("sleeve_patch", Ac, upp, Np, pw, ph, M_patch, "LeftArm", outline=shield)
+    for v in po.data.vertices:                                                          # lay it on the sleeve
+        A_t = S_ + ax * (v.co - S_).dot(ax); dv = ((v.co - A_t) + Np * 0.055).normalized()
+        r = out_from(A_t, dv, 0.25)
+        v.co = A_t + dv * ((r if r else 0.06) + 0.0035)
+    po.data.polygons.foreach_set("use_smooth", [True] * len(po.data.polygons))
     # ---- jackboots: a fitted leather shaft from under the knee to the ankle, the trousers inside it
     M_boot = paint("jackboot_leather", (0.045, 0.045, 0.05), grime=0.35, seed=35)
     btree = BVHTree.FromObject(body, dg); binv = body.matrix_world.inverted()
@@ -1855,6 +2004,21 @@ def soviet_kit():
         gone = [f for f in bm.faces if all((mw @ v.co).z < ztop - 0.03 for v in f.verts) or all(cuff(mw @ v.co) for v in f.verts)]
         bmesh.ops.delete(bm, geom=gone, context="FACES"); bm.to_mesh(o.data); bm.free()
         print("enemy: soviet kit -- %d faces (trouser legs below the boot tops, sleeves below the elbow) removed from %s" % (len(gone), o.name))
+    # ...and the skin the long sleeves used to hide comes back: the body's mask groups ("hidden
+    # under this garment") still covered the forearms, so the rolled sleeves ended in thin air
+    # with a hand floating below them.
+    bare = []
+    for v in body.data.vertices:
+        w = body.matrix_world @ v.co
+        for sd in ("Left", "Right"):
+            H = bz(sd + "Hand"); E = bz(sd + "ForeArm"); u = (E - H).normalized(); t = (w - H).dot(u)
+            if -0.05 < t < (E - H).length * 1.06 and ((w - H) - u * t).length < 0.12:
+                bare.append(v.index); break
+    shown = 0
+    for md in body.modifiers:
+        if md.type == "MASK" and md.vertex_group in body.vertex_groups:
+            body.vertex_groups[md.vertex_group].remove(bare); shown += 1
+    print("enemy: soviet kit -- %d forearm vertices unmasked in %d mask group(s)" % (len(bare), shown))
     for side in ("Left", "Right"):
         K, A = bz(side + "Leg"), bz(side + "Foot"); d = (A - K).normalized(); L = (A - K).length
         e1 = d.cross(Vector((0, 1, 0))).normalized(); e2 = d.cross(e1).normalized(); NA = 16; rings = []
@@ -2165,8 +2329,8 @@ def fire_axe():
     fR, wR = hand_frame("Right")
     side_v = wR.cross(Vector((0, 0, 1))).normalized()
     e = wR.cross(side_v).normalized()                 # the chop direction (edge points this way)
-    if e.z < 0:
-        e = -e
+    if e.z > 0:                                       # (rest-pose DOWN: carried and swung, that is the side that leads -- the other
+        e = -e                                        #  way round he walked with the pick forward and chopped with the back of the axe)
     a, b = fR - wR * 0.14, fR + wR * 0.72
     cyl("axe_haft", a, b + wR * 0.05, 0.019, M_wood, "RightHand", verts=10, r2=0.016)
     cyl("axe_knob", a - wR * 0.03, a, 0.024, M_wood, "RightHand", verts=10)
@@ -2332,7 +2496,9 @@ if os.environ.get("ENEMY_LOOK"):     # dev: look-dev stills of the rest pose (sk
                                     ("headback", (-0.45, 0.85, ez + 0.02), (90, 0, 208), 70, (640, 720)),
                                     ("front", (0.0, -4.6, 0.95), (90, 0, 0), 60, (760, 900)),
                                     ("back", (0.0, 4.6, 0.95), (90, 0, 180), 60, (760, 900)),
-                                    ("arm", (0.75, -1.1, ez - 0.45), (90, 0, 10), 60, (640, 720))):
+                                    ("arm", (0.75, -1.1, ez - 0.45), (90, 0, 10), 60, (640, 720)),
+                                    ("top", (0.32, -0.02, ez + 0.75), (0, 0, 0), 75, (760, 560)),          # shoulders from above (boards, sleeve patch)
+                                    ("belt", (0.0, -1.0, ez * 0.645), (90, 0, 0), 150, (640, 480))):
         if os.environ.get("ENEMY_LOOK_VIEWS") and nm not in os.environ["ENEMY_LOOK_VIEWS"].split(","):
             continue
         cam.location = loc; cam.rotation_euler = tuple(math.radians(a) for a in rot); cam.data.lens = lens
@@ -3141,6 +3307,133 @@ if SPEC.get("aim_gun") and GUN.get("parts"):
 # (whole cycles per clip), the attack whips them all forward over the shoulders, death
 # lets them thrash then go limp. Rotations are about WORLD axes mapped into each bone's
 # rest frame, so "forward" means forward whatever the chain's rest direction.
+def _leg_radii():
+    """How thick each leg is in front of its bone (trousers included): (thigh top, thigh bottom, shin) in metres."""
+    out = {}
+    for side in ("Left", "Right"):
+        r = []
+        for bn, ch, cuts in ((f"{side}UpLeg", f"{side}Leg", ((0.15, 0.5), (0.5, 0.95))), (f"{side}Leg", f"{side}Foot", ((0.05, 0.6),))):
+            a, b = Ht0[bn], Ht0[ch]; ax = (b - a); L = ax.length; ax = ax / L
+            for lo, hi in cuts:
+                best = 0.05
+                for o in meshes:
+                    if "low-poly" in o.name or bn not in o.vertex_groups:
+                        continue
+                    gi = o.vertex_groups[bn].index
+                    for v in o.data.vertices:
+                        if any(g.group == gi and g.weight > 0.5 for g in v.groups):
+                            w = o.matrix_world @ v.co; t = (w - a).dot(ax) / L
+                            if lo <= t <= hi:
+                                best = max(best, (a + ax * (t * L)).y - w.y)        # how far the surface stands in FRONT (-Y) of the bone
+                r.append(best * 0.9)                                   # the widest fold of the trousers overstates it
+        out[side] = r
+    return out
+
+
+def apron_motion(poses, loop):
+    """Cloth for the apron skirt. Each chain is a string of point masses hung from the hip line and
+    stepped through the clip in world space: gravity, drag, links that keep their length, a little
+    resistance to folding (it is heavy rubber), and the thigh and shin behind it as capsules that
+    push it out. So it swings out with the leading knee, falls back and overshoots when the leg
+    goes away, and lags the body's bob -- and the two sides do it out of step. Loops are run
+    round until they repeat; one-shots start from the sheet hanging still."""
+    if not APRON_CHAINS or not poses:
+        return poses
+    global _APRON_R
+    if _APRON_R is None:
+        _APRON_R = _leg_radii()
+        print("enemy: apron cloth, leg radii", {k: [round(x, 3) for x in v] for k, v in _APRON_R.items()})
+    n = len(poses)
+    PAD, SUB, DT = 0.030, 6, 1.0 / 30.0
+    G = Vector((0, 0, -9.8))
+    def frame(p):                          # pelvis frame + where the hinges and the leg joints are, in world
+        Hrel = fk_world(p, "Hips") @ Rt0["Hips"].inverted()
+        off = Rt0["Hips"] @ p["Hips"][1] if p["Hips"][1] is not None else Vector()
+        pos = lambda bn: fk_pos(p, bn) + off
+        hp = pos("Hips")
+        legs = {sd: (pos(f"{sd}UpLeg"), pos(f"{sd}Leg"), pos(f"{sd}Foot")) for sd in ("Left", "Right")}
+        return Hrel, hp, legs
+    F = [frame(p) for p in poses]
+    for names, joints, sd in APRON_CHAINS:
+        rest = [j - Ht0["Hips"] for j in joints]                    # joints in the pelvis' rest frame
+        lens = [(joints[k + 1] - joints[k]).length for k in range(APRON_SEG)]
+        rad = _APRON_R[sd]
+        def collide(q, Hrel, hp, legs):
+            # work in the pelvis' own frame, in the plane this chain hangs in (x fixed): rest axes, front = -Y
+            inv = Hrel.inverted()
+            l = inv @ (q - hp); l.x = rest[0].x
+            for other in (False, True):                              # this leg, then the other one (it crosses over in a turn or a fall)
+                hj, kj, fj = (inv @ (v - hp) for v in legs[sd if not other else ("Right" if sd == "Left" else "Left")])
+                for a, b, r0, r1 in ((hj, kj, rad[0], rad[1]), (kj, fj, rad[2], rad[2] * 0.85)):
+                    ab = b - a; t = max(0.0, min(1.0, (l - a).dot(ab) / ab.length_squared))
+                    c = a + ab * t; r = r0 + (r1 - r0) * t + PAD
+                    dx = l.x - c.x
+                    if abs(dx) >= r:
+                        continue
+                    ry = math.sqrt(r * r - dx * dx)                  # the capsule's half-depth at this chain's x
+                    dy, dz = l.y - c.y, l.z - c.z
+                    if dy * dy + dz * dz < ry * ry and dy < ry * 0.6:    # inside it (and not already round the back): out through the FRONT
+                        m = math.hypot(dy, dz)
+                        if dy > 0 or m < 1e-5:
+                            l.y = c.y - math.sqrt(max(0.0, ry * ry - dz * dz))
+                        else:
+                            l.y, l.z = c.y + dy / m * ry, c.z + dz / m * ry
+            l.y = min(l.y, rest[0].y + 0.02)                         # never back through the belly / between the legs
+            return hp + Hrel @ l
+        def step(P, V, fa, fb, s0, s1):                              # advance one pose interval, frames fa -> fb
+            for sub in range(SUB):
+                w = (sub + 1) / SUB
+                Hrel = fa[0].lerp(fb[0], w) if hasattr(fa[0], "lerp") else fb[0]
+                hp = fa[1].lerp(fb[1], w)
+                legs = {k: tuple(x.lerp(y, w) for x, y in zip(fa[2][k], fb[2][k])) for k in fa[2]}
+                h = DT / SUB
+                old = [q.copy() for q in P]
+                for k in range(1, APRON_SEG + 1):
+                    V[k] = V[k] * 0.93 + G * h                       # heavy drag: wet rubber, not silk
+                    P[k] = P[k] + V[k] * h
+                P[0] = hp + Hrel @ rest[0]
+                for _ in range(5):
+                    for k in range(1, APRON_SEG + 1):                # links keep their length (the hinge end is fixed)
+                        d = P[k] - P[k - 1]; L = d.length or 1e-6
+                        P[k] = P[k - 1] + d * (lens[k - 1] / L)
+                    for k in range(2, APRON_SEG + 1):                # heavy rubber: resists folding sharply
+                        d = P[k] - P[k - 2]; L = d.length or 1e-6; want = (lens[k - 1] + lens[k - 2]) * 0.93
+                        if L < want:
+                            P[k] = P[k] + d * ((want - L) / L) * 0.5
+                    for k in range(1, APRON_SEG + 1):
+                        P[k] = collide(P[k], Hrel, hp, legs)
+                for k in range(1, APRON_SEG + 1):
+                    V[k] = (P[k] - old[k]) / h
+                    if V[k].length > 2.5:                            # a knee shoves it, it does not launch it
+                        V[k] = V[k] * (2.5 / V[k].length)
+        Hrel, hp, legs = F[0]
+        P = [hp + Hrel @ r for r in rest]; V = [Vector() for _ in P]
+        for _ in range(45):                                          # let it settle on the first pose
+            step(P, V, F[0], F[0], 0, 0)
+        track = [None] * n
+        if loop:
+            for _ in range(2):                                       # round the loop until it repeats
+                for i in range(n):
+                    step(P, V, F[i - 1], F[i], 0, 0)
+        track[0] = [q.copy() for q in P] if not loop else None
+        for i in range(n):
+            if i > 0 or loop:
+                step(P, V, F[i - 1], F[i], 0, 0)
+            track[i] = [q.copy() for q in P]
+        for p, pts in zip(poses, track):                             # aim each link's bone down its segment
+            for k, bn in enumerate(names):
+                p[bn] = [Quaternion((1, 0, 0, 0)), None]
+            for k, bn in enumerate(names):
+                par = tbones[bn].parent
+                B = fk_world(p, par.name) @ (Rt0[par.name].inverted() @ Rt0[bn])
+                R = swing(B @ Vector((0, 1, 0)), pts[k + 1] - pts[k])
+                p[bn][0] = (B.inverted() @ R @ B).to_quaternion()
+    return poses
+
+
+_APRON_R = None
+
+
 def tentacle_motion(poses, role):
     if not TENT_BONES:
         return poses
@@ -3441,10 +3734,15 @@ for _sd in ("Left", "Right"):
         RELAXQ.update(curl_quats(_sd, RELAX))
 
 
-def grip(poses):
+# A gun is carried in the right hand; the left only closes on it where the clip puts it on the
+# handguard (the aim). Everywhere else it hangs empty, and an empty hand is not a fist.
+GUN_LEFT_FREE = curl_quats("Left", RELAX) if (GUN.get("parts") and "LeftHandFinger1" in tbones) else {}
+
+
+def grip(poses, support=False):
     for p in poses:          # the mocap has no finger channels: ADD them (they stayed flat at rest)
         for bn, q in GRIPQ.items():
-            p[bn] = [q.copy(), None]
+            p[bn] = [(GUN_LEFT_FREE[bn] if (bn in GUN_LEFT_FREE and not support) else q).copy(), None]
         for bn, q in RELAXQ.items():                     # empty hands: relaxed, unless a synth set them
             if bn not in p:
                 p[bn] = [q.copy(), None]
@@ -3513,7 +3811,7 @@ if SPEC.get("two_hand") == "shaft":
     print(f"enemy: two_hand left fist on the shaft, max miss {worst * 100:.1f} cm, "
           f"min forearm clearance {worst_clear * 100:.1f} cm")
 
-idle, walk, run, attack, hit, death = (grip(ps) for ps in (idle, walk, run, attack, hit, death))
+idle, walk, run, attack, hit, death = (grip(ps, ps is attack) for ps in (idle, walk, run, attack, hit, death))
 HITX = {k: grip(v) for k, v in HITX.items()}
 EXTRA = {k: (grip(v), kind, st) for k, (v, kind, st) in EXTRA.items()}
 print(f"enemy: grip {GRIP_SIDES} closed, relaxed {sorted({b[:4] for b in RELAXQ})} on every frame")
@@ -3522,6 +3820,11 @@ idle, walk, run, attack, hit, death = (tentacle_motion(ps, r) for ps, r in
     ((idle, "idle"), (walk, "walk"), (run, "run"), (attack, "attack"), (hit, "hit"), (death, "death")))
 HITX = {k: tentacle_motion(v, "hit") for k, v in HITX.items()}
 EXTRA = {k: (tentacle_motion(v, kind), kind, st) for k, (v, kind, st) in EXTRA.items()}
+
+idle, walk, run = (apron_motion(ps, True) for ps in (idle, walk, run))
+attack, hit, death = (apron_motion(ps, False) for ps in (attack, hit, death))
+HITX = {k: apron_motion(v, False) for k, v in HITX.items()}
+EXTRA = {k: (apron_motion(v, kind in ("walk", "run", "idle")), kind, st) for k, (v, kind, st) in EXTRA.items()}
 
 for name, poses, step in (("idle", idle, 1), ("walk", walk, 1), ("run", run, 1),
                           ("attack", attack, 2), ("hit", hit, 1), ("death", death, 2),
