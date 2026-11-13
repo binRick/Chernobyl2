@@ -31,13 +31,22 @@ try {
   await send('Page.navigate', { url });
   const ev = async e => (await send('Runtime.evaluate', { expression: e, returnByValue: true })).result?.value;
   let ready = false; const t0 = Date.now();
-  while (Date.now() - t0 < 120000 && !ready) { await sleep(500); ready = await ev("document.getElementById('gate').style.display==='none' || document.getElementById('cta').className==='ready'"); }
+  while (Date.now() - t0 < 120000 && !ready) { await sleep(500); ready = await ev("!!window.__c2_loaded"); }
   console.log(ready ? `ready after ${((Date.now() - t0) / 1000).toFixed(1)} s` : 'NOT READY after 120 s; status: ' + await ev("document.getElementById('cta').textContent"));
   for (let k = 0; k < +(process.env.SMOKE_SHOTS || 0); k++) {     // a strip of stills, runSecs apart: out_0.png, out_1.png ...
     await sleep(runSecs * 1000); const s = await send('Page.captureScreenshot', { format: 'png' });
     if (s.data) writeFileSync(out.replace(/\.png$/, `_${k}.png`), Buffer.from(s.data, 'base64'));
   }
   if (!process.env.SMOKE_SHOTS) await sleep(runSecs * 1000);
+  if (process.env.SMOKE_INTRO) {           // the title intro: begin, a still of the montage, skip to the title, a still, start, a still of the game
+    const shotTo = async tag => { const s = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(out.replace(/\.png$/, `_${tag}.png`), Buffer.from(s.data, 'base64')); };
+    const key = async () => { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }); await sleep(120); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }); };
+    const st = async () => 'video t=' + (await ev("document.getElementById('ivid').currentTime.toFixed(2)")) + ' music t=' + (await ev("(typeof music!=='undefined'&&music)?music.currentTime.toFixed(2):'-'")) + ' stage=' + (await ev("typeof stage!=='undefined'?stage:-1")) + ' go=' + (await ev('!!window.__c2_go'));
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 640, y: 360, button: 'left', clickCount: 1 }); await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 640, y: 360, button: 'left', clickCount: 1 });
+    await sleep(6000); console.log('montage: ' + await st()); await shotTo('intro0');
+    await key(); await sleep(2500); console.log('title:   ' + await st()); await shotTo('intro1');
+    await key(); await sleep(3500); console.log('started: ' + await st() + ' locked=' + await ev('!!document.pointerLockElement')); await shotTo('intro2');
+  }
   if (process.env.SMOKE_LOOK) {            // click to take pointer lock, then drag the view: before / after stills + whether the lock held
     const mouse = (type, x, y, extra = {}) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, ...extra });
     for (let k = 0; k < 2 && !(await ev('!!document.pointerLockElement')); k++) { await mouse('mousePressed', 640, 360); await mouse('mouseReleased', 640, 360); await sleep(600); }   // the gate's click, then the game's own re-grab

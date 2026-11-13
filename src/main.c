@@ -5843,7 +5843,19 @@ static void EndCurrentMap(void){
 // Browser main loop: one frame per callback. "Restart Run" and "play again" cannot fall out of
 // a loop here, so the reload the native build does between runs happens in place.
 static void WebFrame(void){
-    static int n=0; if (++n==3) EM_ASM({ if (window.__c2_ready) window.__c2_ready(); });   // first frames are up: the page can offer "click to play"
+    // The page plays the title intro (and shows its "press any key") while this downloads and
+    // loads; the run must not begin under it. So nothing updates -- no wave clock, no enemies, no
+    // sound -- until the page says go (window.__c2_go). Before, the game ran on behind the gate.
+    static int n=0, go=0; static float vol=1.0f;
+    if (!go){
+        if (n==0){ vol=GetMasterVolume(); SetMasterVolume(0.0f); }               // (streams that are not being fed would stutter)
+        go=EM_ASM_INT({ return window.__c2_go ? 1 : 0; });
+        if (++n==3 || (go && n<3)){ n=3; EM_ASM({ if (window.__c2_ready) window.__c2_ready(); }); }   // loaded: the page can offer the start
+        BeginDrawing(); ClearBackground(BLACK); EndDrawing();
+        if (!go) return;
+        SetMasterVolume(vol); while (GetKeyPressed()!=0) {}                      // the start key is not a game key
+        return;
+    }
     Frame();
     if (g_returnToMenu){ g_returnToMenu=0; EndCurrentMap(); g_mapPath=DEFAULT_MAP; StartSelectedMap(); }
 }

@@ -21,7 +21,22 @@
   #cta { margin-top:14px; font-size:16px; color:#aaa69c; min-height:22px; }
   #cta.ready { color:#eeeade; cursor:pointer; animation:blink 1.2s infinite; }
   #gate.ready { cursor:pointer; }
+  #sub { margin-top:6px; font-size:12px; color:#6f6b63; min-height:16px; }
   @keyframes blink { 50% { opacity:.35; } }
+  /* the title intro: the montage, then the title card held until a key */
+  #intro { position:fixed; inset:0; background:#000; z-index:20; display:none; align-items:center; justify-content:center; cursor:pointer; }
+  #intro video { width:100%; height:100%; object-fit:contain; background:#000; }
+  #card { position:relative; display:none; aspect-ratio:16/9; width:min(100vw, calc(100vh * 16 / 9)); }
+  #card img { position:absolute; inset:0; width:100%; height:100%; }
+  #card #ititle { animation:flicker .12s steps(1) infinite; }
+  #card #ictl { opacity:0; transition:opacity .6s linear; }
+  #card #ipress { inset:auto; left:50%; top:90.5%; width:59.4%; height:auto; transform:translate(-50%,-50%); opacity:0; }
+  #card #ipress.on { animation:pulse 1.96s ease-in-out infinite; opacity:1; }
+  #iload { position:absolute; left:0; right:0; top:90.5%; transform:translateY(-50%); text-align:center; color:#aaa69c; font-size:min(2.2vw,16px); letter-spacing:2px; }
+  #note { position:absolute; right:14px; bottom:10px; color:#8d8980; font-size:12px; letter-spacing:1px; text-shadow:0 0 4px #000; }
+  #fade { position:fixed; inset:0; background:#000; opacity:0; z-index:30; pointer-events:none; transition:opacity 1.2s linear; }
+  @keyframes flicker { 0% { filter:brightness(.93); } 33% { filter:brightness(1); } 66% { filter:brightness(.96); } }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.1; } }
 </style>
 </head>
 <body>
@@ -34,17 +49,110 @@
     <p><b>1</b> minigun &nbsp; <b>2</b> flamethrower &nbsp; <b>3</b> grenade launcher &nbsp; <b>4</b> Remington</p>
     <div id="bar"><div id="fill"></div></div>
     <div id="cta">loading&hellip;</div>
+    <div id="sub"></div>
   </div>
+  <div id="intro">
+    <video id="ivid" playsinline muted preload="auto"></video>
+    <div id="card">
+      <img id="ititle" alt=""><img id="ictl" alt=""><img id="ipress" alt="">
+      <div id="iload"></div>
+    </div>
+    <div id="note"></div>
+  </div>
+  <div id="fade"></div>
   <div id="stage"><canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas></div>
   <script>
-    var gate=document.getElementById('gate'), fill=document.getElementById('fill'), cta=document.getElementById('cta'), canvas=document.getElementById('canvas');
-    var ready=false;
-    function setReady(){ if (ready) return; ready=true; fill.style.width='100%'; cta.textContent='[ CLICK TO PLAY ]'; cta.className='ready'; gate.className='ready'; }
-    var autostart=/[?&]autostart=1/.test(location.search);       // dev: no gate (headless screenshots)
-    if (autostart) window.__c2_ready=function(){ setReady(); gate.style.display='none'; };
-    gate.addEventListener('click', function(){ if (!ready) return; gate.style.display='none'; canvas.focus();
-        try { canvas.requestPointerLock(); } catch(e){} });
-    var argm=location.search.match(/[?&]args=([^&]*)/);           // dev: ?args=--god,--kite passes game flags
+    var $=function(id){ return document.getElementById(id); };
+    var gate=$('gate'), fill=$('fill'), cta=$('cta'), sub=$('sub'), canvas=$('canvas');
+    var intro=$('intro'), vid=$('ivid'), card=$('card'), ictl=$('ictl'), ipress=$('ipress'), iload=$('iload'), note=$('note'), fade=$('fade');
+    var ready=false, pct=0;                       // the game has loaded / how far along the download is
+    var qs=location.search, autostart=/[?&]autostart=1/.test(qs);      // dev: no gate, no intro (headless screenshots)
+    var wantIntro=!autostart && !/[?&]nointro=1/.test(qs);
+    // ---- the title intro ------------------------------------------------------------------
+    // The page plays it, not the game: a <video> of the montage with the music beside it, then the
+    // title card with the controls and PRESS ANY KEY -- all while the game downloads behind it.
+    // The picture follows the music's clock, as on desktop. Stages: 0 none, 1 montage, 2 title, 3 leaving.
+    var music=null, stage=0, stageAt=0, tStamp=55.0, tEnd=59.0, introOK=false;
+    if (wantIntro){
+      vid.src='intro.mp4'; music=new Audio('intro_music.mp3'); music.preload='auto'; music.loop=true;
+      $('ititle').src='intro_title.jpg'; ictl.src='intro_controls.png'; ipress.src='intro_press.png';
+      vid.addEventListener('loadedmetadata', function(){ introOK=true; refreshGate(); });
+      vid.addEventListener('error', function(){ introOK=false; wantIntro=false; refreshGate(); });
+      fetch('intro_times.txt').then(function(r){ return r.ok ? r.text() : ''; }).then(function(t){
+        var m; if ((m=t.match(/stamp\s+([\d.]+)/))) tStamp=parseFloat(m[1]); if ((m=t.match(/end\s+([\d.]+)/))) tEnd=parseFloat(m[1]); }).catch(function(){});
+    }
+    function now(){ return performance.now()/1000; }
+    function setStage(s){ stage=s; stageAt=now(); }
+    function toTitle(skipped){
+      if (stage!==1) return;
+      if (skipped && music){ try { music.currentTime=Math.max(0,tStamp-0.05); } catch(e){} }   // land on the stamp
+      vid.pause(); vid.style.display='none'; card.style.display='block'; setStage(2);
+      setTimeout(function(){ ictl.style.opacity=1; }, 600);
+    }
+    function startIntro(){
+      gate.style.display='none'; intro.style.display='flex'; setStage(1);
+      var p=music.play(); if (p && p.catch) p.catch(function(){});
+      p=vid.play(); if (p && p.catch) p.catch(function(){ toTitle(false); });
+      requestAnimationFrame(tick);
+    }
+    function tick(){
+      if (stage===0 || stage===3) return;
+      if (stage===1){
+        var c=music.currentTime;
+        if (Math.abs(vid.currentTime-c)>0.25 && vid.readyState>=2 && c<vid.duration-0.3){ try { vid.currentTime=c; } catch(e){} }   // the picture follows the music
+        if (vid.ended || c>=tEnd-0.05) toTitle(false);
+        note.textContent = ready ? '' : 'loading '+pct+'%';
+      } else if (stage===2){
+        var t=now()-stageAt; note.textContent='';
+        if (t>0.9 && ready){ ipress.className='on'; iload.textContent=''; }
+        else { ipress.className=''; iload.textContent = (t>0.9 && !ready) ? 'LOADING '+pct+'%' : ''; }
+      }
+      requestAnimationFrame(tick);
+    }
+    function go(){                                  // the game takes over
+      window.__c2_go=true; canvas.focus();
+    }
+    function leaveIntro(){
+      if (stage!==2 || !ready || now()-stageAt<1.0) return;
+      setStage(3); fade.style.opacity=1;
+      try { canvas.requestPointerLock(); } catch(e){}               // (asked on the key / click itself: a browser only grants it then)
+      var t0=now(), v0=music.volume, iv=setInterval(function(){ var k=1-(now()-t0)/1.2; music.volume=Math.max(0,v0*k); if (k<=0) clearInterval(iv); }, 40);
+      setTimeout(function(){
+        music.pause(); intro.style.display='none'; go();
+        fade.style.transition='opacity .5s linear'; fade.style.opacity=0;
+      }, 1250);
+    }
+    function introInput(e){
+      if (stage===1){ if (now()-stageAt>1.5) toTitle(true); }
+      else if (stage===2) leaveIntro();
+    }
+    document.addEventListener('keydown', function(e){
+      if (stage!==1 && stage!==2) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || /^(Shift|Control|Alt|Meta|CapsLock|ContextMenu)$/.test(e.key)) return;   // system chords are not a skip
+      e.preventDefault(); introInput(e);
+    }, true);
+    intro.addEventListener('mousedown', introInput);
+    // ---- the gate: before anything -----------------------------------------------------------
+    // With the intro: clickable at once (a browser only lets sound start on a click), and the
+    // download carries on under the montage. Without it: as before, click once the game is loaded.
+    function refreshGate(){
+      if (gate.style.display==='none') return;
+      var can = wantIntro ? introOK : ready;
+      cta.textContent = can ? (wantIntro ? '[ CLICK TO BEGIN ]' : '[ CLICK TO PLAY ]') : (wantIntro && !introOK ? 'loading…' : cta.textContent);
+      cta.className = can ? 'ready' : ''; gate.className = can ? 'ready' : '';
+      sub.textContent = (wantIntro && can && !ready) ? 'the game loads while the intro plays — '+pct+'%' : '';
+      if (ready) fill.style.width='100%';
+    }
+    function setReady(){ if (ready) return; ready=true; pct=100; window.__c2_loaded=true; refreshGate(); }
+    gate.addEventListener('click', function(){
+      if (wantIntro){ if (introOK) startIntro(); return; }
+      if (!ready) return;
+      gate.style.display='none'; go();
+      try { canvas.requestPointerLock(); } catch(e){}
+    });
+    if (autostart) window.__c2_go=true;
+    window.__c2_ready=function(){ setReady(); if (autostart) gate.style.display='none'; };
+    var argm=qs.match(/[?&]args=([^&]*)/);                         // dev: ?args=--god,--kite passes game flags
     var Module = {
       arguments: argm ? decodeURIComponent(argm[1]).split(',') : [],
       canvas: canvas,
@@ -52,16 +160,16 @@
       printErr: function(t){ console.warn(t); },
       setStatus: function(t){
         var m = t && t.match(/\((\d+(?:\.\d+)?)\/(\d+)\)/);
-        if (m) { fill.style.width = (100*parseFloat(m[1])/parseFloat(m[2])).toFixed(1)+'%'; cta.textContent='loading '+Math.round(100*parseFloat(m[1])/parseFloat(m[2]))+'%'; }
-        else if (t && !ready) cta.textContent=t;
+        if (m) { pct=Math.round(100*parseFloat(m[1])/parseFloat(m[2])); fill.style.width = pct+'%';
+                 if (!wantIntro) cta.textContent='loading '+pct+'%'; else refreshGate(); }
+        else if (t && !ready && !wantIntro) cta.textContent=t;
       },
       totalDependencies: 0,
       monitorRunDependencies: function(left){ this.totalDependencies=Math.max(this.totalDependencies,left); },
       onRuntimeInitialized: function(){ window.__c2_runtime=true; }
     };
-    // the game is "ready" once its first frames are on screen (the C side sets this)
-    if (!autostart) window.__c2_ready=function(){ setReady(); };
-    window.addEventListener('error', function(e){ cta.textContent='error: '+(e.message||e); });
+    window.addEventListener('error', function(e){ if (!wantIntro || stage===0) cta.textContent='error: '+(e.message||e); });
+    refreshGate();
   </script>
   {{{ SCRIPT }}}
 </body>

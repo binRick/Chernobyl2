@@ -71,6 +71,7 @@ web: src/main.c $(HDRS) web/shell.html $(RAYLIB_DIR)/lib/libraylib.web.a
 	    -s USE_GLFW=3 -s MIN_WEBGL_VERSION=2 -s MAX_WEBGL_VERSION=2 -s FORCE_FILESYSTEM=1 \
 	    -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=512MB -s MAXIMUM_MEMORY=2GB -s STACK_SIZE=4MB \
 	    --preload-file $(WEBFS)@/ --shell-file web/shell.html
+	@if [ -d $(BUILD)/web/intro ]; then cp $(BUILD)/web/intro/* $(WEBDIST)/; fi     # the title intro the page plays (pack_web.py)
 	@ls -la $(WEBDIST) | awk '{print $$5, $$9}'
 web-serve: web
 	cd $(WEBDIST) && python3 -m http.server 8642

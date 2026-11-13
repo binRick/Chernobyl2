@@ -9,7 +9,7 @@ sounds, and the default map with the textures it names.
 
     python3 tools/web/pack_web.py [--albedo 1024] [--detail 512]
 """
-import io, json, os, re, shutil, struct, sys
+import io, json, os, re, shutil, struct, subprocess, sys
 from PIL import Image
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -78,7 +78,29 @@ def copy(rel):
     os.makedirs(os.path.dirname(t), exist_ok=True); shutil.copy2(s, t); return os.path.getsize(t)
 
 
+def pack_intro():
+    """The title intro for the page (build/web/intro): the browser plays it itself, as a <video> with
+    the music beside it, WHILE the game downloads -- so it is not in the preloaded set. The desktop's
+    MPEG-1 montage becomes H.264 (a tenth the size), the music a smaller MP3; the title, controls and
+    PRESS ANY KEY cards and the timings file go along as they are (web/shell.html reads them)."""
+    A = os.path.join(REPO, "assets"); D = os.path.join(REPO, "build", "web", "intro"); os.makedirs(D, exist_ok=True)
+    if not os.path.exists(os.path.join(A, "intro.mpg")): return
+    def stale(dst, src): return not os.path.exists(dst) or os.path.getmtime(dst) < os.path.getmtime(src)
+    v, m = os.path.join(D, "intro.mp4"), os.path.join(D, "intro_music.mp3")
+    if stale(v, os.path.join(A, "intro.mpg")):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", os.path.join(A, "intro.mpg"), "-an", "-c:v", "libx264", "-preset", "slow", "-crf", "25",
+                        "-r", "30", "-pix_fmt", "yuv420p", "-movflags", "+faststart", v], check=True)
+    if stale(m, os.path.join(A, "intro_music.mp3")):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", os.path.join(A, "intro_music.mp3"), "-c:a", "libmp3lame", "-b:a", "128k", m], check=True)
+    t = os.path.join(D, "intro_title.jpg")
+    if stale(t, os.path.join(A, "intro_title.png")): Image.open(os.path.join(A, "intro_title.png")).convert("RGB").save(t, "JPEG", quality=90, optimize=True)
+    for n in ("intro_controls.png", "intro_press.png", "intro_times.txt"):
+        if os.path.exists(os.path.join(A, n)) and stale(os.path.join(D, n), os.path.join(A, n)): shutil.copy2(os.path.join(A, n), os.path.join(D, n))
+    print("intro for the page: " + ", ".join(f"{f} {os.path.getsize(os.path.join(D, f))/1e6:.1f} MB" for f in sorted(os.listdir(D))))
+
+
 def main():
+    pack_intro()
     shutil.rmtree(OUT, ignore_errors=True); os.makedirs(OUT)
     tot_in = tot_out = 0
     for n in ENEMIES + WEAPONS:
@@ -92,7 +114,7 @@ def main():
         if os.path.exists(os.path.join(REPO, "assets", n + ".glb.ibm")): other += copy(f"assets/{n}.glb.ibm")
         if os.path.exists(os.path.join(REPO, "assets", n + ".glb.parts")): other += copy(f"assets/{n}.glb.parts")   # authored gun-piece animation (PartsLoad)
     for f in sorted(os.listdir(os.path.join(REPO, "assets"))):
-        if f.startswith("intro"): continue          # the title montage (33 MB of video + music) stays desktop-only for now
+        if f.startswith("intro"): continue          # the title montage is the PAGE's to play (pack_intro), not the game's to preload
         if f.endswith((".mp3", ".wav", ".txt")) or f == "icon.png":
             other += copy("assets/" + f)
     for f in sorted(os.listdir(os.path.join(REPO, "assets", "voice"))): other += copy("assets/voice/" + f)
