@@ -4662,7 +4662,7 @@ static void Update(void) {
 #endif
     if (devKeys && (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB))) g_devOverlay=!g_devOverlay;
     if (devKeys && IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
-    if (IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode){ g_playerHp=100.0f; g_cheatUsed=1; }   // refill on re-enable; the run is tagged
+    if (devKeys && IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode){ g_playerHp=100.0f; g_cheatUsed=1; }   // refill on re-enable; the run is tagged
         DebugLog("mode","\"godMode\":%s", g_godMode?"true":"false"); }
     if (devKeys && IsKeyPressed(KEY_F) && g_hasMap){ g_noclip=!g_noclip; g_vy=0.0f; if (g_noclip) g_cheatUsed=1;   // map: fly/noclip <-> walk. Not in the browser build: F is beside the movement keys, and a player who brushed it flew through the walls. The run is tagged
         DebugLog("mode","\"noclip\":%s", g_noclip?"true":"false"); }
