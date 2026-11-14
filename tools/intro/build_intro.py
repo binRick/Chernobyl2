@@ -41,16 +41,19 @@ CROP = {
     "radiological.mp4":      (0.14, 0.03, 0.72, 0.78),   # PF# timecode at the bottom
     "doc_subs.mp4":          (0.00, 0.00, 1.00, 0.72),   # cut off ABOVE the clipped burned-in subtitles
     "montage.mp4":           (0.00, 0.00, 1.00, 1.00),   # Chernobyl 1's montage frames
+    "soldiers_dance.mp4":    (0.00, 0.20, 1.00, 0.767),  # "Soldier's dance", the Alexandrov Ensemble, 1965. 4:3 -> 16:9 from lower down: the boots stay in, spare sky goes
+    "women.mp4":             (0.17, 0.08, 0.66, 0.70),   # Soviet disco home video: pillarboxed 4:3
+    "disaster2.mp4":         (0.00, 0.00, 1.00, 1.00),   # "Chernobyl. Helicopter crashes.": over the vent stack, then the Mi-8 and the crane
 }
 
 # ------------------------------------------------------------------ music timing
 ANTHEM_IN = 1.0          # brass intro starts
-ANTHEM_LEN = 14.0        # anthem section length (T 0 -> 14)
-GLITCH_LEN = 3.0         # the disaster transition (T 14 -> 17)
+ANTHEM_LEN = 22.3        # anthem section length: the good times (the first cut was 14 s; the soldiers' dance and the disco were added, nothing taken out)
+GLITCH_LEN = 3.0         # the disaster transition
 STALL = 1.2              # last good shot stalls while the anthem tape-stops; then the blast
 HM_KICK_SRC = 32.30      # Hell March: full band slams in here (measured)
-BUILD_BEATS = 32         # Hell March build-up before the kick
-KICK_BEATS = 40          # fast-cut section, then the title slam
+BUILD_BEATS = 36         # Hell March build-up before the kick
+KICK_BEATS = 48          # fast-cut section, then the title slam
 TAIL = 6.0               # title hold after the slam
 STAMP_BEATS = 4          # the hammer & sickle stamps down this many beats after the title
 
@@ -79,10 +82,17 @@ print(f"beat {P:.4f}s  kick T={T_KICK:.2f}  title T={T_TITLE:.2f}  end T={T_END:
 ANTHEM = [
     ("mayday1958.mp4", 2.0, 2.2, "zoom"),           # endless columns in the rain
     ("parade1990.mp4", 183.0, 1.8, "zoom"),         # Red Square, Kremlin
+    ("soldiers_dance.mp4", 26.0, 1.3, ""),          # two soldiers dance against the sky
     ("newsreel1961.mp4", 95.0, 1.6, ""),            # Khrushchev waves from the mausoleum
+    ("women.mp4", 88.3, 1.3, ""),                   # the disco: girls laughing as they dance
     ("parade1990.mp4", 2930.0, 1.6, ""),            # ranks goose-stepping
+    ("soldiers_dance.mp4", 184.3, 1.1, ""),         # a leap into the splits, high over the hill
     ("mayday1958.mp4", 789.0, 1.2, "zoom"),         # Marx banner
+    ("women.mp4", 111.5, 1.2, ""),                  # two friends smile for the camera
     ("parade1990.mp4", 1770.0, 1.4, "zoom"),        # red flag over the Kremlin
+    ("soldiers_dance.mp4", 77.0, 1.1, "zoom"),      # the whole troupe above the Moscow river
+    ("women.mp4", 19.0, 1.1, ""),                   # a girl turns, smiling
+    ("soldiers_dance.mp4", 250.2, 1.2, ""),         # the squat dance, his comrades clapping
     ("pripyat_may86.mp4", 30.0, 1.4, ""),           # Pripyat from the air: the model city
     ("pripyat_may86.mp4", 131.5, 1.0, ""),          # the Ferris wheel turning
     ("pripyat_may86.mp4", 236.0, 0.8, ""),          # waving girls
@@ -103,6 +113,7 @@ GLITCH = [  # good times -> disaster: stall, blast, strobe, black + date card (s
 BUILD = [   # 32 beats; Hell March's ominous pulse
     ("aerial.mp4", 23.4, 4, "slow"),                # unit 4: the roof torn open
     ("pd_compilation.ogv", 5.0, 2, ""),             # from the helicopter, in the haze
+    ("disaster2.mp4", 4.4, 2, ""),                  # down the vent stack, the ruin smoking beside it
     ("doc_subs.mp4", 0.0, 4, ""),                   # SUB 1: "There is a hole in the platform"
     ("newsreel_hd.mp4", 403.0, 2, ""),              # suiting up: lead apron
     ("newsreel_hd.mp4", 372.0, 2, ""),              # hooded, masked
@@ -115,6 +126,7 @@ BUILD = [   # 32 beats; Hell March's ominous pulse
     ("doc_subs.mp4", 13.0, 2, ""),                  # SUB 3: "...in the memory and do your business!"
     ("newsreel_hd.mp4", 217.0, 1, "shake"),         # face in the hood
     ("newsreel_hd.mp4", 31.0, 1, "shake"),          # the wreck
+    ("disaster2.mp4", 8.3, 2, "shake"),             # the torn hall, close
     ("montage.mp4", 12.0, 2, "glitch"),             # Chernobyl 1 montage: the roof
 ]
 KICK = [    # 40 beats from the kick; flashes on downbeats
@@ -151,6 +163,7 @@ KICK = [    # 40 beats from the kick; flashes on downbeats
     ("parade1990.mp4", 3355.0, 1, "glitch"),        # tanks on Red Square
     ("radiological.mp4", 89.0, 1, "shake"),         # the plant in fog
     ("pripyat_film_0426.mp4", 257.0, 1, "flash red"),
+    ("disaster2.mp4", 14.0, 8, "flash"),            # the Mi-8: its rotor takes the crane cable, the blades fly off, it falls
     ("doc_subs.mp4", 22.0, 4, "slow"),              # SUB 4: "Any questions?" -- the wall goes up
     ("BLACK", 0, 2, ""),                            # breath ...
 ]
