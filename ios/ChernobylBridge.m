@@ -24,6 +24,7 @@
 #import <objc/runtime.h>
 
 #import "ChernobylBridge.h"
+#import "C2Intro.h"
 
 // Device pixels per UIKit point. Lives here, not in rcore_ios.c, because
 // rcore is baked into the prebuilt libraylib.a. The touch overlay divides
@@ -101,9 +102,20 @@ float ChernobylRcoreContentScale(void) { return s_contentScale; }
     // (which we'll rewrite to use these on iOS) match what we created here.
     ChernobylRcoreSetScreenSize(_backingW, _backingH);
 
-    ChernobylGameInit();
-    _gameInitialized = YES;
+    // The title intro (C2Intro.m) starts now and plays over the loading: the game is brought up on
+    // the next turn of the run loop, under it, and its frames only start once the title is left.
+    C2IntroView *intro = [C2IntroView introOver:self.view];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [EAGLContext setCurrentContext:self->_glContext];
+        ChernobylGameInit();
+        self->_gameInitialized = YES;
+        if (intro) [intro gameLoaded:^{ [self startFrames]; }];
+        else [self startFrames];
+    });
+}
 
+- (void)startFrames
+{
     _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(renderFrame:)];
     _displayLink.preferredFramesPerSecond = 60;
     [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];

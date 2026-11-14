@@ -135,6 +135,8 @@ static int TrapInZone(const Trap *t, const Enemy *e){                           
 }
 static void TrapHurt(int i, float dmg, int cause, Vector3 from){
     Enemy *e=&g_enemies[i]; int oc=g_hurtCause; Vector3 of=g_hurtFrom; g_hurtCause=cause; g_hurtFrom=from;
+    if (!e->boss) dmg=99999.0f;                      // a trap that catches a man kills him, whichever trap (the owner's rule). A boss still takes each trap's own damage
+
     Vector3 d=Vector3Subtract(e->pos,from); d.y=0; float l=Vector3Length(d); d=(l>1e-3f)?Vector3Scale(d,1.0f/l):(Vector3){0,0,1};
     HurtEnemy(i,dmg,0,d,(Vector3){e->pos.x,e->pos.y+1.0f,e->pos.z},cause!=HC_FLAME);
     g_hurtCause=oc; g_hurtFrom=of;
@@ -223,7 +225,7 @@ static void TrapsUpdate(float dt){
             case TR_STEAM: if (fabsf(x)<3.1f && fabsf(z)<1.6f){ TrapHurt(i,48.0f*dt,HC_FLAME,TW(t,x,3.0f,0)); e->limpT=fmaxf(e->limpT,1.2f); } break;
             case TR_PLATE: if (fabsf(x)<2.5f && fabsf(z)<2.5f){ e->stagT=fmaxf(e->stagT,0.35f); e->hitT=fmaxf(e->hitT,0.35f); e->vel=(Vector3){0,0,0};
                                if (floorf(t->t*2.0f)!=floorf(pt*2.0f)){ TrapHurt(i,26.0f,HC_BULLET,TW(t,x,-1.0f,z)); SpawnImpact((Vector3){ep.x,ep.y+1.0f,ep.z},(Vector3){0,1,0}); } } break;
-            case TR_HOSE: if (t->t>0.35f && x>-3.6f && x<-3.6f+11.0f*fminf(1.0f,(t->t-0.35f)*4.0f) && fabsf(z)<1.0f) EnemyKnock(i,Vector3Scale(t->tv,7.5f)); break;       // (along the jet)
+            case TR_HOSE: if (t->t>0.35f && x>-3.6f && x<-3.6f+11.0f*fminf(1.0f,(t->t-0.35f)*4.0f) && fabsf(z)<1.0f){ if (e->boss) EnemyKnock(i,Vector3Scale(t->tv,7.5f)); else TrapHurt(i,99999.0f,HC_BLAST,TW(t,x-3.0f,1.0f,z)); } break;       // (along the jet: it throws a boss, and breaks anyone else)
             case TR_SURGE: if (pt<0.45f && t->t>=0.45f){ float d=sqrtf(x*x+z*z); if (t->hole>=0 && e->climbT>0 && e->hole==t->hole) d=0.0f;   /* still climbing out of the breach it vents */ if (d<1.9f) TrapHurt(i,99999.0f,HC_BLAST,TW(t,0,-1.0f,0)); else if (d<5.5f) TrapHurt(i,85.0f,HC_BLAST,t->c); } break;
             case TR_CRANE: if (t->stage==1 && t->aux==0 && fabsf(x)<1.5f && fabsf(z)<1.5f) TrapHurt(i,99999.0f,HC_BLAST,TW(t,x,6.0f,z)); break;
             case TR_DOOR: if (t->stage==1 && t->aux==0 && fabsf(x)<1.5f && fabsf(z)<0.55f) TrapHurt(i,99999.0f,HC_BLAST,TW(t,x,5.0f,z));

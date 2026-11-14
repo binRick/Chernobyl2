@@ -20,4 +20,24 @@ What is where:
   the overlay, aim assist, and the entry points the bridge calls (`ChernobylGameInit / Step / Shutdown`).
 - `../src/scores.h`, under `C2_IOS` - the on-screen keys for leaderboard initials.
 
-Not on the phone yet: the title intro (the desktop's is a blocking loop; the browser's is played by the page).
+- `C2Intro.{h,m}` - the title intro: the browser's video and music (`build/web/intro`), played over the loading, then the title held until a tap.
+
+The phone is the easy version: `PLAYER_DMG_K` halves what hurts the player, and the auto-aim (`Frame`, under `C2_IOS`) pulls the view onto the nearest enemy in sight.
+
+## App Store
+
+App "Chernobyl 2", app ID `6834835921`, bundle `app.ximg.chernobyl2`, SKU `chernobyl2-ios-001`, team `4L7XW5NPCX`.
+
+    ASC_KEY_ID=A3TP273HH7 ASC_ISSUER_ID=<issuer, in ../Chernobyl/CLAUDE.md> BUILD=<n> scripts/ios-appstore.sh
+
+packs the assets, archives, exports, validates and uploads (`DRY_RUN=1` stops before the upload). `BUILD` goes up
+with every upload; the store version is `MARKETING_VERSION` in `project.yml`. The listing (text, screenshots,
+category, price, age rating 18+, review contact) was set through the App Store Connect API; App Privacy
+("Gameplay Content", not linked, no tracking) and the age rating's last step only exist on the website.
+
+Stills for the store page come from a simulator on autopilot (it draws about 2 frames a second, so let it run):
+
+    SIMCTL_CHILD_CHERNOBYL_CLEAN_HUD=1 SIMCTL_CHILD_CHERNOBYL_MUTE=1 SIMCTL_CHILD_CHERNOBYL_INTRO_AUTO="12,20" \
+    SIMCTL_CHILD_CHERNOBYL_ARGS="--kite --autofire --god --mute --seed 7" xcrun simctl launch <sim> app.ximg.chernobyl2
+
+`CHERNOBYL_ARGS` gives the phone build the desktop's flags; `CHERNOBYL_INTRO_AUTO="skipAt,startAt"` taps the intro.

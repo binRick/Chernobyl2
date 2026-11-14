@@ -38,6 +38,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.ximg.chernobyl2
+        MARKETING_VERSION: "1.0"            # the store's version; scripts/ios-appstore.sh passes the build number
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: 4L7XW5NPCX
         INFOPLIST_FILE: $(SRCROOT)/Info.plist
         CLANG_ENABLE_OBJC_ARC: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -52,6 +55,10 @@ targets:
       - path: ChernobylBridge.m
         type: file
       - path: C2Platform.m
+        type: file
+      - path: C2Intro.h
+        type: file
+      - path: C2Intro.m
         type: file
       - path: ../src/main.c          # the whole game is one translation unit
         type: file
@@ -68,3 +75,5 @@ targets:
           src="$SRCROOT/../build/web/fs"
           test -d "$src/assets" || { echo "run: python3 tools/web/pack_web.py"; exit 1; }
           for d in assets maps; do rsync -a --delete "$src/$d/" "$dst/$d/"; done
+          # the title intro (ios/C2Intro.m plays it): the page's files, less the two cards that speak of a keyboard
+          rsync -a --delete --exclude intro_controls.png --exclude intro_press.png "$SRCROOT/../build/web/intro/" "$dst/intro/"

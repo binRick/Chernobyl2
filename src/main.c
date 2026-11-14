@@ -274,11 +274,6 @@ static float   g_lookYaw = 0.0f, g_lookPitch = 0.0f;
 static int     g_devJump = 0;            // dev (CHERNOBYL_WALK): jump this frame
 static float   g_vy    = 0.0f;
 static int     g_grounded = 1;
-#if defined(C2_GLES)
-static int     g_devOverlay = 0;   // the public browser and phone builds ship without the dev readout
-#else
-static int     g_devOverlay = 1;
-#endif
 static float   g_bob = 0.0f;
 // Procedural viewmodel motion (view-space, decaying): sway lags the mouse, bob
 // follows the stride, and the raise/lower offset drives weapon switches.
@@ -343,9 +338,6 @@ static int             g_lmgWasPlaying = 0;     // LMG: fire sound was playing l
 static Camera3D        g_cam;           // world camera (set per-map in StartSelectedMap)
 static Camera3D        g_vmCam;
 static int             g_inspect = 0;           // V: gun floats in the world
-static float           g_savedMsg = 0.0f;       // >0: flash a "SAVED" confirmation
-static int             g_tuneTarget = 0;        // tuning focus: 0 = whole viewmodel, 1 = gun-on-hand grip (B toggles, pinned guns only)
-static float           g_spawnMsg = 0.0f;       // >0: flash a "SPAWN SET" confirmation
 static int             g_menu = 0;              // ESC: options/pause menu open (frees cursor, pauses)
 static int             g_paused = 0;            // P: pause the game (freezes the world, keeps mouse captured)
 static int             g_fullscreen = 0;        // borderless monitor-fill on/off (set via the menu, persisted)
@@ -583,14 +575,6 @@ static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, fl
     if(n>=6){ *off=(Vector3){ox,oy,oz}; *scale=sc; *yaw=yw; *pitch=pt; *roll=(n>=7)?rl:0.0f; return 1; }
     return 0;
 }
-// Gun-pin grip tune (gun pose relative to the hand bone) -- kept in a sibling "<tune>.pin"
-// file so it's separate from the whole-viewmodel transform.
-static void SavePin(const char *tunePath, Vector3 off, float scale, float yaw, float pitch, float roll, Vector3 rOff, Vector3 lOff){
-    char p[280]; snprintf(p,sizeof p,"%s.pin",tunePath);
-    FILE *f=fopen(p,"w"); if(!f) return;
-    fprintf(f,"%.5f %.5f %.5f %.5f %.2f %.2f %.2f %.5f %.5f %.5f %.5f %.5f %.5f\n",
-            off.x,off.y,off.z,scale,yaw,pitch,roll,rOff.x,rOff.y,rOff.z,lOff.x,lOff.y,lOff.z); fclose(f);
-}
 static void LoadPin(const char *tunePath, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll, Vector3 *rOff, Vector3 *lOff){
     char p[280]; snprintf(p,sizeof p,"%s.pin",tunePath);
     FILE *f=fopen(p,"r"); if(!f) return;
@@ -612,10 +596,6 @@ static const char *SpawnPath(char *buf, int sz){
     char stem[160]; snprintf(stem,sizeof stem,"%s",b);
     char *dot=strrchr(stem,'.'); if (dot) *dot=0;              // drop ".map"
     snprintf(buf,sz,"spawn_%s.txt",stem); return buf;
-}
-static void SaveSpawn(Vector3 pos, float yaw, float pitch){
-    char path[224]; FILE *f=fopen(SpawnPath(path,sizeof path),"w"); if(!f) return;
-    fprintf(f,"%.4f %.4f %.4f %.4f %.4f\n", pos.x,pos.y,pos.z,yaw,pitch); fclose(f);
 }
 static int LoadSpawn(Vector3 *pos, float *yaw, float *pitch){
     char path[224]; FILE *f=fopen(SpawnPath(path,sizeof path),"r"); if(!f) return 0;
@@ -669,21 +649,6 @@ static void ApplyArmsSideDelta(Weapon *w, Vector3 dv, int side){
     }
 }
 static Matrix XformToMatrix(Transform t);      // fwd decl (defined near DrawPinnedGun)
-// Convert a view-axis nudge into bind space (the verts live PRE-skin) by counter-
-// rotating with the given hand bone's skin transform at the currently held frame.
-// Identity-frame rigs (minigun) pass through unchanged.
-static Vector3 NudgeToBindSpace(Weapon *w, int bone, Vector3 dv){
-    if (bone>=0 && g_gunAnimN>0 && g_curAnim<g_gunAnimN && g_gunAnim[g_curAnim].keyframePoses){
-        ModelAnimation *an=&g_gunAnim[g_curAnim];
-        int kf=(int)g_animT; int nf=ANIM_FRAMES(*an); if(kf<0)kf=0; if(nf>0&&kf>=nf)kf=nf-1;
-        Matrix skin=MatrixMultiply(MatrixInvert(XformToMatrix(w->model.skeleton.bindPose[bone])),
-                                   XformToMatrix(an->keyframePoses[kf][bone]));
-        Matrix invs=MatrixInvert(skin);
-        Vector3 o=Vector3Transform((Vector3){0,0,0},invs);
-        dv=Vector3Subtract(Vector3Transform(dv,invs),o);          // direction only (no translation)
-    }
-    return dv;
-}
 
 // One-shot diagnostic for the pinned-gun path: after posing the model at the held
 // frame, log (a) where raylib's OWN skinning matrix sends the wrist bind point,
@@ -1988,6 +1953,13 @@ static int             g_headshots = 0;        // running headshot-kill tally (H
 static float           g_hsFlash = 0.0f;       // >0: flash "HEADSHOT!" near the crosshair
 static float           g_hitMark = 0.0f, g_killMark = 0.0f;   // >0: hit marker (white X) / kill marker (red, wider) at the crosshair
 static float           g_recoilRet = 0.0f;     // camera recoil still owed back (radians of pitch)
+// The phone is the easy version: thumbs on glass against a game tuned for a mouse. Everything that
+// hurts the player hurts half as much there (and the aim is taken most of the way: see the auto-aim in Frame).
+#if defined(C2_IOS)
+  #define PLAYER_DMG_K 0.5f
+#else
+  #define PLAYER_DMG_K 1.0f
+#endif
 static float           g_playerHp = 100.0f;
 static int             g_godMode = 0;           // invulnerable cheat; G toggles (tags the run as cheated)
 static int             g_cheatUsed = 0;         // god mode was enabled this run -> the results get tagged
@@ -3271,7 +3243,7 @@ static void EnemyHitscan(Enemy *e, float d){
     Vector3 end=Vector3Add(m,Vector3Scale(dir,L));
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){m,end,0.06f}; break; }
     SpawnMuzzleFlash(m, dir);
-    if (hit && !g_godMode) g_playerHp-=kEnemy[e->type].shotDmg;
+    if (hit && !g_godMode) g_playerHp-=kEnemy[e->type].shotDmg*PLAYER_DMG_K;
     g_sfxAt=e->pos; EnemySfx(g_eShotSnd,g_hasEShot,d);
     DebugLog("eshot","\"type\":\"%s\",\"d\":%.1f,\"hit\":%d", kEnemy[e->type].name, d, hit);
 }
@@ -3364,7 +3336,7 @@ static void BoltsUpdate(float dt){
         }
         Vector3 chest=Vector3Add(g_cam.position,(Vector3){0,-0.45f,0});
         if (Vector3Distance(b->pos,chest)<0.6f){
-            if (!g_godMode) g_playerHp-=b->dmg;
+            if (!g_godMode) g_playerHp-=b->dmg*PLAYER_DMG_K;
             DebugLog("bolthit","\"dmg\":%.0f",b->dmg);
             b->active=0;
         }
@@ -3759,7 +3731,7 @@ static void UpdateEnemies(float dt){
                 if (e->drawY < e->pos.y-0.03f) e->drawY = e->pos.y-0.03f;   // feet never sink into the stairs
             }
             if (g_meleeDrain){                                 // legacy A/B: untimed contact drain
-                if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*dt;
+                if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*PLAYER_DMG_K*dt;
             } else if (e->atkCd>0) e->atkCd-=dt;
             if (RigOf(e->type)->animN>0){                      // advance the action clip
                 int nf=ANIM_FRAMES(*RigClip(e->type,e->clip));
@@ -3777,7 +3749,7 @@ static void UpdateEnemies(float dt){
                     const float fr[2]={ dual?DUAL_STRIKE_A:ATK_STRIKE_FRAC, DUAL_STRIKE_B };
                     for (int k=0;k<ns && e->atkCd<=0;k++){ float strike=nf*fr[k];
                         if (prevT<strike && e->animT>=strike && d<=reach*1.15f && !g_godMode){
-                            g_playerHp-=kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f);   // per-type swing damage
+                            g_playerHp-=kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f)*PLAYER_DMG_K;   // per-type swing damage
                             ExtraAt(EX_MELEE,e->pos,0.9f);
                             DebugLog("melee","\"type\":\"%s\",\"blade\":%d,\"dmg\":%.1f,\"hp\":%.0f",kEnemy[e->type].name,k,kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f),g_playerHp);
                             e->atkCd = dual ? 0.25f : ATK_COOLDOWN;
@@ -4500,10 +4472,11 @@ static void Update(void) {
         g_vmLook=md;
         g_yaw-=md.x*0.0025f; g_pitch-=md.y*0.0025f;
 #if defined(C2_IOS)
-        // Aim assist (thumbs are not a mouse): the view leans toward the nearest enemy that is already
-        // close to the crosshair and in sight -- gently, a little harder while firing, and not at all
-        // while the thumb is actively steering away. From ../Chernobyl's touch auto-aim.
-        { const float RANGE=26.0f, CY=22.0f*DEG2RAD, CP=12.0f*DEG2RAD, RATE=3.0f;
+        // Auto-aim (thumbs are not a mouse): the view is pulled onto the enemy nearest the crosshair that
+        // is in sight -- from well off to the side, quickly, harder still while firing, and eased (not
+        // dropped) while the thumb is steering, so a swipe still picks another target. It was a gentle
+        // lean within 22 degrees (from ../Chernobyl's touch auto-aim); on the phone that was not enough.
+        { const float RANGE=45.0f, CY=34.0f*DEG2RAD, CP=24.0f*DEG2RAD, RATE=9.0f;
           float best=0.0f, bdy=0.0f, bdp=0.0f; Vector3 eye=g_pos;
           for (int i=0;i<MAX_ENEMIES;i++){ Enemy *e=&g_enemies[i]; if (e->state!=1) continue;
               Vector3 c={e->pos.x, e->pos.y+1.15f*kEnemy[e->type].scale*e->sc, e->pos.z}, d=Vector3Subtract(c,eye);
@@ -4514,8 +4487,8 @@ static void Update(void) {
               if (g_hasMap){ float w=MapRayNearest(eye,Vector3Scale(d,1.0f/dist),dist); if (w>0.0f && w<dist-0.3f) continue; }   // a wall between
               float sc=(1.0f-fabsf(dy)/CY)*(1.0f-fabsf(dp)/CP)*(1.0f-0.5f*dist/RANGE);
               if (sc>best){ best=sc; bdy=dy; bdp=dp; } }
-          if (best>0.0f){ float boost=(TouchOverlayFireDown()?1.8f:1.0f)*(TouchOverlayLookActive()?0.35f:1.0f);
-              float k=1.0f-expf(-RATE*boost*best*dt); g_yaw+=bdy*k; g_pitch+=bdp*k; } }
+          if (best>0.0f){ float boost=(TouchOverlayFireDown()?1.6f:1.0f)*(TouchOverlayLookActive()?0.5f:1.0f);
+              float k=1.0f-expf(-RATE*boost*(0.35f+0.65f*best)*dt); g_yaw+=bdy*k; g_pitch+=bdp*k; } }
 #endif
         if (g_pitch>1.5f) g_pitch=1.5f;  if (g_pitch<-1.5f) g_pitch=-1.5f;
     }
@@ -4576,7 +4549,7 @@ static void Update(void) {
         if (stop){ float k=1.0f/sqrtf(holeR2); g_pos.x=H->pos.x+ex*k*ax; g_pos.z=H->pos.z+ez*k*az; holeR2=1.0f;
             if (!g_grounded){ g_eyeSmooth+=lipEye-g_pos.y; g_pos.y=lipEye; g_vy=0.0f; g_grounded=1; } }
         else if (g_grounded && g_pos.y<lipEye-1.5f){                                                        // on the bottom, in the light
-            if (!g_godMode) g_playerHp-=25.0f;
+            if (!g_godMode) g_playerHp-=25.0f*PLAYER_DMG_K;
             float dx=g_pos.x-H->pos.x, dz=g_pos.z-H->pos.z; int e=(fabsf(dx)/H->hx>fabsf(dz)/H->hz)?(dx<0?0:1):(dz<0?2:3);
             g_pos.x=H->pos.x+kEdgeNX[e]*(H->hx+0.6f)+(kEdgeNX[e]==0?dx*0.5f:0.0f); g_pos.z=H->pos.z+kEdgeNZ[e]*(H->hz+0.6f)+(kEdgeNZ[e]==0?dz*0.5f:0.0f);
             g_pos.y=lipEye; g_vy=0.0f; g_eyeSmooth=0.0f; inHole=-1;
@@ -4656,124 +4629,21 @@ static void Update(void) {
 
     // overlay + inspect + reset
 #if defined(C2_GLES)
-    const int devKeys=0;                                   // browser build: no dev overlay, inspect or orient mode (N would also clear the field mid-run)
+    const int devKeys=0;                                   // browser and phone builds: no dev keys at all
 #else
     const int devKeys=1;
 #endif
-    if (devKeys && (IsKeyPressed(KEY_GRAVE) || IsKeyPressed(KEY_TAB))) g_devOverlay=!g_devOverlay;
-    if (devKeys && IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
+    // (The dev readout and its ` / TAB toggle, V's weapon-inspect view and F's fly-through-walls are gone. G stays, on the desktop build only.)
     if (devKeys && IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode){ g_playerHp=100.0f; g_cheatUsed=1; }   // refill on re-enable; the run is tagged
         DebugLog("mode","\"godMode\":%s", g_godMode?"true":"false"); }
-    if (devKeys && IsKeyPressed(KEY_F) && g_hasMap){ g_noclip=!g_noclip; g_vy=0.0f; if (g_noclip) g_cheatUsed=1;   // map: fly/noclip <-> walk. Not in the browser build: F is beside the movement keys, and a player who brushed it flew through the walls. The run is tagged
-        DebugLog("mode","\"noclip\":%s", g_noclip?"true":"false"); }
-    if (devKeys && IsKeyPressed(KEY_N)){               // N: toggle orient mode (no enemies, weapon-aim tuning)
-        g_noEnemies=!g_noEnemies;
-        for (int i=0;i<MAX_ENEMIES;i++) g_enemies[i].state=0;   // clear the field
-        for (int c=0;c<MAX_CORPSES;c++) g_corpses[c].active=0;  // and clear corpses
-        g_playerHp=100.0f; PickupsReset();             // full health (clears a leftover YOU DIED)
-        if (!g_noEnemies){ g_wave=0; g_waveBreather=0.0f; }     // restart the wave director from wave 1
-        DebugLog("mode","\"noEnemies\":%s", g_noEnemies?"true":"false");
-    }
     // Number keys -> weapon slots. Custom order so the two showpieces lead: 1=minigun,
     // 2=flamethrower, 3=grenade launcher, then the rest. (g_weapons indices: 0 grenade
     // launcher,1 remington,2 minigun,3 LMG,4 AK,5 flamethrower.)
     static const int kSlotForKey[4]={2,5,0,1};        // 1 minigun, 2 flamethrower, 3 grenade launcher, 4 Remington
     for (int k=0;k<4;k++) if (IsKeyPressed(KEY_ONE+k)) SwitchWeapon(kSlotForKey[k]);
-    if (IsKeyPressed(KEY_ZERO)){ Weapon *w=&g_weapons[g_curWeapon]; g_vmOff=w->off0; g_vmScale=w->scale0; g_vmYaw=w->yaw0; g_vmPitch=w->pitch0; g_vmRoll=w->roll0; }
-    // Save: ENTER (or F5). On Mac F5 is a system key (dictation/keyboard light)
-    // and gets eaten by the OS, so ENTER is the reliable bind. g_savedMsg flashes
-    // an on-screen confirmation so you KNOW it wrote.
-    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_F5)){
-        StashActiveTuning();
-        SaveTune(g_weapons[g_curWeapon].trimPath,g_vmOff,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll,g_weapons[g_curWeapon].idleHold);
-        { Weapon *w=&g_weapons[g_curWeapon]; SavePin(w->tunePath,w->pinOff,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll,w->armsROff,w->armsLOff); }   // grip/hand tunes save for every weapon
-        g_savedMsg=2.0f;   // seconds to show "SAVED"
-        DebugLog("vmsave","\"slot\":%d,\"label\":\"%s\",\"path\":\"%s\",\"saved\":true",
-                 g_curWeapon, g_weapons[g_curWeapon].label, g_weapons[g_curWeapon].trimPath);
-    }
-    if (g_savedMsg>0) g_savedMsg-=GetFrameTime();
-    // H ("home"): remember the current spot+facing as the player spawn (written to
-    // spawn.txt, loaded at startup). Press it where you want to start next launch.
-    // (F2 also works, but macOS eats the function keys, so H is the real bind.)
-    if (IsKeyPressed(KEY_H) || IsKeyPressed(KEY_F2)){
-        SaveSpawn(g_pos,g_yaw,g_pitch); g_spawnMsg=2.0f;
-        DebugLog("spawnsave","\"pos\":[%.2f,%.2f,%.2f],\"yaw\":%.3f,\"pitch\":%.3f", g_pos.x,g_pos.y,g_pos.z,g_yaw,g_pitch);
-    }
-    if (g_spawnMsg>0) g_spawnMsg-=GetFrameTime();
-
-    // live viewmodel tuning (faster in orient mode so a mispositioned weapon is
-    // easy to sweep back into frame)
-    // Fine steps by default; hold SHIFT for coarse (5x). The same base feeds the
-    // hands-manager nudges, so their net speeds are unchanged by this slowdown.
-    float fine=(IsKeyDown(KEY_LEFT_SHIFT)||IsKeyDown(KEY_RIGHT_SHIFT))?5.0f:1.0f;
-    float ns=dt*(g_noEnemies?0.9f:0.15f)*fine;
-    float rs=dt*(g_noEnemies?36.0f:18.0f)*fine;
-    float ss=(g_noEnemies?0.9f:0.3f)*fine;
-    Weapon *cwp=&g_weapons[g_curWeapon];
-    int bStates = cwp->pinGun ? 2 : 3;   // pinned gun: VIEWMODEL/GUN GRIP; every other weapon: VIEWMODEL/LEFT HAND/RIGHT HAND ("hands manager")
-    if (IsKeyPressed(KEY_B) && bStates>1) g_tuneTarget=(g_tuneTarget+1)%bStates;
-    if (g_tuneTarget>=bStates) g_tuneTarget=0;
-    if (g_tuneTarget>=1 && !cwp->pinGun){                                        // hands manager: nudge ONE hand (1=left, 2=right), baked into the verts
-        Weapon *w=cwp;
-        int side = (g_tuneTarget==2) ? 1 : -1;
-        int bone = (side==1) ? w->handBone : w->handBoneL;
-        float np=ns/fmaxf(g_vmScale*cwp->vmBase,1e-9f)*0.0667f;   // SHIFT-coarse comes via ns
-        Vector3 dv={0,0,0};
-        if (IsKeyDown(KEY_I)) dv.y+=np;  if (IsKeyDown(KEY_K)) dv.y-=np;
-        if (IsKeyDown(KEY_L)) dv.x+=np;  if (IsKeyDown(KEY_J)) dv.x-=np;
-        if (IsKeyDown(KEY_O)) dv.z+=np;  if (IsKeyDown(KEY_U)) dv.z-=np;
-        if (fabsf(dv.x)+fabsf(dv.y)+fabsf(dv.z)>0.0f){
-            dv=NudgeToBindSpace(w, bone, dv);          // keys track view axes even on held-frame rigs
-            ApplyArmsSideDelta(w, dv, side);
-            if (side==1) w->armsROff=Vector3Add(w->armsROff,dv);
-            else         w->armsLOff=Vector3Add(w->armsLOff,dv);
-        }
-    } else if (g_tuneTarget==1){                                                 // pinned gun: tune the gun's grip on the hand bone
-        Weapon *w=cwp;
-        float np=ns/fmaxf(g_vmScale*cwp->vmBase,1e-9f)*0.0667f;   // model-unit step; SHIFT-coarse comes via ns, net speed unchanged
-        if (IsKeyDown(KEY_I)) w->pinOff.y+=np;  if (IsKeyDown(KEY_K)) w->pinOff.y-=np;
-        if (IsKeyDown(KEY_L)) w->pinOff.x+=np;  if (IsKeyDown(KEY_J)) w->pinOff.x-=np;
-        if (IsKeyDown(KEY_O)) w->pinOff.z+=np;  if (IsKeyDown(KEY_U)) w->pinOff.z-=np;
-        if (IsKeyDown(KEY_EQUAL)) w->pinScale*=(1.0f+dt*ss);  if (IsKeyDown(KEY_MINUS)) w->pinScale*=(1.0f-dt*ss);
-        if (IsKeyDown(KEY_RIGHT_BRACKET)) w->pinYaw+=rs;  if (IsKeyDown(KEY_LEFT_BRACKET)) w->pinYaw-=rs;
-        if (IsKeyDown(KEY_APOSTROPHE)) w->pinPitch+=rs;   if (IsKeyDown(KEY_SEMICOLON)) w->pinPitch-=rs;
-        if (IsKeyDown(KEY_PERIOD)) w->pinRoll+=rs;        if (IsKeyDown(KEY_COMMA)) w->pinRoll-=rs;
-    } else {
-        if (IsKeyDown(KEY_I)) g_vmOff.y+=ns;  if (IsKeyDown(KEY_K)) g_vmOff.y-=ns;
-        if (IsKeyDown(KEY_L)) g_vmOff.x+=ns;  if (IsKeyDown(KEY_J)) g_vmOff.x-=ns;
-        if (IsKeyDown(KEY_O)) g_vmOff.z+=ns;  if (IsKeyDown(KEY_U)) g_vmOff.z-=ns;
-        if (IsKeyDown(KEY_EQUAL)) g_vmScale*=(1.0f+dt*ss);  if (IsKeyDown(KEY_MINUS)) g_vmScale*=(1.0f-dt*ss);
-        if (IsKeyDown(KEY_RIGHT_BRACKET)) g_vmYaw+=rs;  if (IsKeyDown(KEY_LEFT_BRACKET)) g_vmYaw-=rs;
-        if (IsKeyDown(KEY_APOSTROPHE)) g_vmPitch+=rs;   if (IsKeyDown(KEY_SEMICOLON)) g_vmPitch-=rs;
-        if (IsKeyDown(KEY_PERIOD)) g_vmRoll+=rs;        if (IsKeyDown(KEY_COMMA)) g_vmRoll-=rs;
-    }
-    // Z / X scrub the ready-pose HOLD frame for the current weapon (find the frame where
-    // the hands grip the gun). SHIFT = coarse (x10). Held key auto-repeats. ENTER saves it.
-    {
-        int xup=(IsKeyPressed(KEY_X)||IsKeyPressedRepeat(KEY_X)), xdn=(IsKeyPressed(KEY_Z)||IsKeyPressedRepeat(KEY_Z));
-        if (xup||xdn){
-            Weapon *w=&g_weapons[g_curWeapon];
-            int clip = w->grenade ? 0 : g_aIdle;
-            int maxf = (g_gunAnimN>0 && clip<g_gunAnimN) ? ANIM_FRAMES(g_gunAnim[clip]) : 1;
-            if (w->idleHold<0) w->idleHold = w->grenade ? GL_IDLE_FRAME : (maxf>0?maxf-1:0);
-            int step=(IsKeyDown(KEY_LEFT_SHIFT)||IsKeyDown(KEY_RIGHT_SHIFT))?10:1;
-            w->idleHold += xup?step:-step;
-            if (w->idleHold<0) w->idleHold=0;  if (maxf>0 && w->idleHold>=maxf) w->idleHold=maxf-1;
-            DebugLog("idlehold","\"slot\":%d,\"frame\":%d,\"maxf\":%d", g_curWeapon, w->idleHold, maxf);
-        }
-    }
-    if (IsKeyPressed(KEY_P))
-        DebugLog("vmxform","\"off\":[%.3f,%.3f,%.3f],\"scale\":%.4f,\"yaw\":%.1f,\"pitch\":%.1f,\"roll\":%.1f",
-                 g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);
-    if (g_noEnemies){   // orient mode: log the selected weapon + orientation whenever it changes
-        static float lo[7]={1e9f,0,0,0,0,0,0};
-        float cur[7]={g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll};
-        int changed=0; for(int k=0;k<7;k++) if(fabsf(cur[k]-lo[k])>1e-4f) changed=1;
-        if (changed){ for(int k=0;k<7;k++) lo[k]=cur[k];
-            DebugLog("orient","\"weapon\":\"%s\",\"off\":[%.3f,%.3f,%.3f],\"scale\":%.5f,\"yaw\":%.1f,\"pitch\":%.1f,\"roll\":%.1f",
-                     g_weapons[g_curWeapon].label,g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);
-        }
-    }
+    // (The keys that moved, turned, scaled and saved the gun in the hand are gone: the guns are set, and a player who
+    // brushed I J K L, the brackets or ENTER was re-posing them, and writing the result to disk.)
+    // (H / F2, which wrote where you stood as the next launch's spawn, is gone with them. A spawn file already saved is still read.)
 
     EffectsUpdate(dt);                                     // tracers fade, blood/sparks fly and settle
 
@@ -5645,19 +5515,15 @@ static void DrawHUD(void) {
       if (g_speedT>0){ DrawText(TextFormat("SPEED %d",(int)g_speedT+1),W-170,y,24,(Color){90,240,255,255}); }
       if (g_pkMsgT>0){ int fs=28, tw=MeasureText(g_pkMsg,fs); unsigned char a=(unsigned char)(255*fminf(1.0f,g_pkMsgT/0.5f));
           DrawText(g_pkMsg,W/2-tw/2+2,H/2+92,fs,(Color){0,0,0,a}); DrawText(g_pkMsg,W/2-tw/2,H/2+90,fs,(Color){140,255,140,a}); } }
-    if (g_devOverlay) DrawFPS(W-90,10);
-    else { static float sm=0; float f=(float)GetFPS(); sm=(sm<=0)?f:sm+(f-sm)*0.1f; const char *t=TextFormat("%d FPS",(int)(sm+0.5f));   // the frame rate, always there (smoothed, so it can be read)
+    static int cleanHud=-1; if (cleanHud<0) cleanHud=getenv("CHERNOBYL_CLEAN_HUD")?1:0;    // dev: stills for the store page (a simulator draws 2 frames a second, and says so) -- no frame rate, no MUTED, no GOD
+    if (!cleanHud){ static float sm=0; float f=(float)GetFPS(); sm=(sm<=0)?f:sm+(f-sm)*0.1f; const char *t=TextFormat("%d FPS",(int)(sm+0.5f));   // the frame rate, always there (smoothed, so it can be read)
         Color c=(sm>=55.0f)?(Color){120,230,130,220}:(sm>=30.0f)?(Color){235,200,90,230}:(Color){240,90,70,240};
         DrawText(t,13,11+HudTop(),18,(Color){0,0,0,170}); DrawText(t,12,10+HudTop(),18,c); }
     // kills + headshots + player health
     DrawMinimap(W, H);
-    if (g_userMute) DrawText("MUTED  (M)", W-160, 84, 16, (Color){200,200,210,255});
+    if (g_userMute && !cleanHud) DrawText("MUTED  (M)", W-160, 84, 16, (Color){200,200,210,255});
     DrawText(TextFormat("KILLS %d", g_kills), W-160, 36, 22, (Color){255,230,120,255});
     DrawText(TextFormat("HEADSHOTS %d", g_headshots), W-160, 60, 18, (Color){255,140,50,255});
-    if (g_spawnMsg>0){                                 // F2 confirmation
-        const char *t="SPAWN SET"; int fs=26, tw=MeasureText(t,fs);
-        DrawText(t, W/2-tw/2, H/2+70, fs, (Color){120,220,255,255});
-    }
     if (g_hitMark>0 || g_killMark>0){                       // hit marker: four ticks round the crosshair, red and wider on a kill
         int kill=g_killMark>0; float k=kill?fminf(1.0f,g_killMark/0.16f):fminf(1.0f,g_hitMark/0.07f);
         float r0=kill?9.0f+(1.0f-k)*6.0f:7.0f, r1=r0+(kill?11.0f:8.0f);
@@ -5676,7 +5542,7 @@ static void DrawHUD(void) {
     DrawRectangle(22, H-42, (int)(220*fminf(g_playerHp,100.0f)/100.0f), 20, (Color){200,40,40,255});
     if (g_playerHp>100.0f) DrawRectangle(22, H-42, (int)(220*(g_playerHp-100.0f)/100.0f), 20, (Color){60,120,255,230});   // mega-health overcharge
     DrawText(TextFormat("HP %d", (int)g_playerHp), 28, H-40, 16, RAYWHITE);
-    if (g_godMode) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (cheat)
+    if (g_godMode && !cleanHud) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (cheat)
     // ammo (bottom-right): mag / reserve for the active weapon
     { Weapon *hw=&g_weapons[g_curWeapon];
       if (hw->magSize>0){
@@ -5737,41 +5603,6 @@ static void DrawHUD(void) {
     // intentionally floats the gun in front of you; press V to get back to FP.
     if (g_inspect)
         DrawText("INSPECT MODE - press V for first-person", W/2-220, 30, 24, (Color){255,180,40,255});
-    if (g_devOverlay){
-        DrawRectangle(0,0,380,90,(Color){0,0,0,150});
-        DrawText("CHERNOBYL 2  (LMB fire, R reload)",6,6,12,GRAY);
-        DrawText(TextFormat("%s  [%s]  1-4=weapon N=mode V=inspect G=god 0=reset", g_inspect?"INSPECT":"FP", g_weapons[g_curWeapon].label),8,22,16,LIME);
-        if (g_noEnemies){   // orient mode panel - bigger + drop-shadowed for legibility
-            DrawRectangle(6,96,600,430,(Color){0,0,0,215});
-            DrawRectangleLines(6,96,600,430,(Color){255,210,60,255});
-            TextSh("ORIENT MODE  (N = back to play)",18,104,28,YELLOW);
-            TextSh(TextFormat("weapon:  %s",g_weapons[g_curWeapon].label),18,142,24,(Color){120,230,255,255});
-            TextSh(TextFormat("off [%.2f %.2f %.2f]  scale %.5f",g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale),18,176,20,RAYWHITE);
-            TextSh(TextFormat("yaw %.1f  pitch %.1f  roll %.1f",g_vmYaw,g_vmPitch,g_vmRoll),18,202,20,RAYWHITE);
-            Color kc=(Color){235,235,140,255};
-            TextSh("J / L      move left / right",18,236,20,kc);
-            TextSh("K / I      move down / up",18,262,20,kc);
-            TextSh("U / O      move back / forward",18,288,20,kc);
-            TextSh("- / =      scale  smaller / bigger",18,314,20,kc);
-            TextSh("[ / ]      yaw    left / right",18,340,20,kc);
-            TextSh("; / '      pitch  down / up",18,366,20,kc);
-            TextSh(", / .      roll   twist left / right",18,392,20,kc);
-            TextSh(TextFormat("Z / X      pose-hold frame: %d  (SHIFT=x10)", g_weapons[g_curWeapon].idleHold), 18,410,19,(Color){255,200,120,255});
-            {   // hands manager: B cycles what the tuning keys drive, on every weapon
-                Weapon *w=&g_weapons[g_curWeapon];
-                const char *what = (g_tuneTarget==2) ? "RIGHT HAND" : (g_tuneTarget==1 ? (w->pinGun?"GUN GRIP":"LEFT HAND") : "VIEWMODEL");
-                TextSh(TextFormat("B          tuning: %s   %s", what, g_tuneTarget?"(IJKL/UO move)":""), 18,432,19,(Color){120,230,255,255});
-                if (g_tuneTarget==1 && w->pinGun) TextSh(TextFormat("   off %.2f %.2f %.2f  scale %.2f  yaw %.0f pit %.0f rol %.0f", w->pinOff.x,w->pinOff.y,w->pinOff.z,w->pinScale,w->pinYaw,w->pinPitch,w->pinRoll), 18,452,18,(Color){200,220,255,255});
-                if (g_tuneTarget==1 && !w->pinGun) TextSh(TextFormat("   left-hand off %.3f %.3f %.3f", w->armsLOff.x,w->armsLOff.y,w->armsLOff.z), 18,452,18,(Color){200,220,255,255});
-                if (g_tuneTarget==2) TextSh(TextFormat("   right-hand off %.3f %.3f %.3f", w->armsROff.x,w->armsROff.y,w->armsROff.z), 18,452,18,(Color){200,220,255,255});
-            }
-            TextSh("0 reset      ENTER save  (or F5)",18,474,19,(Color){170,255,170,255});
-            if (g_savedMsg>0) TextSh(TextFormat("SAVED  ->  %s",g_weapons[g_curWeapon].trimPath),18,498,20,(Color){90,255,90,255});
-        }
-        DrawText(TextFormat("vm off %.2f %.2f %.2f  scale %.5f  yaw %.0f pit %.0f",
-                 g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch),8,42,13,RAYWHITE);
-        DrawText("IJKL/UO move  -/= scale  [/] yaw  ;/' pitch  P log",8,60,12,GRAY);
-    }
 }
 
 // Sunset-gradient sky behind the world. The .map's sky surfaces (skies/*) are
@@ -6593,7 +6424,7 @@ static void StartSelectedMap(void){
             DebugLog("spawnface","\"yaw\":%.1f", g_yaw*57.29578f); }
         MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
         { const char *at=getenv("CHERNOBYL_AT"); float ax=0, az=0;                                     // dev: stand here instead (metres, map x z) -- map stills
-          if (at && sscanf(at,"%f %f",&ax,&az)==2){ g_pos.x=ax; g_pos.z=az; g_devOverlay=0; g_noEnemies=!getenv("CHERNOBYL_AT_PLAY"); } }   // (CHERNOBYL_AT_PLAY=1: stand there AND keep the enemies -- tests of how they reach a spot)
+          if (at && sscanf(at,"%f %f",&ax,&az)==2){ g_pos.x=ax; g_pos.z=az; g_noEnemies=!getenv("CHERNOBYL_AT_PLAY"); } }   // (CHERNOBYL_AT_PLAY=1: stand there AND keep the enemies -- tests of how they reach a spot)
         if (g_holeView>=0 && g_holeView<g_nMapHoles){                                                 // dev: stand off a side they do NOT climb over, looking in
             const MapHole *h=&g_mapHoles[g_holeView]; static const float nx[4]={-1,1,0,0}, nz[4]={0,0,-1,1}; int best=-1; float bestD=0;
             for (int e=0;e<4;e++){
@@ -6602,7 +6433,7 @@ static void StartSelectedMap(void){
             bestD=MapRayNearest((Vector3){h->pos.x,h->pos.y+1.5f,h->pos.z},(Vector3){nx[best],0,nz[best]},9.0f); if (!(bestD>0.0f)) bestD=9.0f;
             float dist=fminf(bestD-0.8f, (nx[best]!=0?h->hx:h->hz)+4.6f);
             g_pos.x=h->pos.x+nx[best]*dist; g_pos.z=h->pos.z+nz[best]*dist;
-            g_yaw=atan2f(-nx[best],-nz[best]); g_pitch=-0.42f; g_devOverlay=0; }
+            g_yaw=atan2f(-nx[best],-nz[best]); g_pitch=-0.42f; }
         DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d,\"holes\":%d", g_navNX, g_navNZ, g_navCount, g_navOK, g_nMapHoles);
         g_spawnResetPos=g_pos; g_voidY=-12.0f;        // below the lowest floor (normalised to y=0) -> fell off
     } else { g_pos=(Vector3){0,EYE_H,6}; g_voidY=-1e9f; }
@@ -7272,8 +7103,10 @@ int main(int argc, char **argv) {
 void ChernobylGameSetBundleDir(const char *path){ (void)path; }
 void ChernobylGameInit(void){
     chdir(C2BundleDir());                       // assets/ and maps/ are read by relative path
-    static char *av[]={ (char*)"chernobyl2", NULL };
-    C2Main(1, av);
+    static char *av[16]={ (char*)"chernobyl2", NULL }; int ac=1;
+    { const char *e=getenv("CHERNOBYL_ARGS");   // dev/test: the desktop's flags (--god, --kite, --seed N ...), as the browser's ?args= -- e.g. SIMCTL_CHILD_CHERNOBYL_ARGS="--kite" xcrun simctl launch ...
+      if (e && *e){ static char buf[256]; strlcpy(buf,e,sizeof buf); for (char *t=strtok(buf," "); t && ac<15; t=strtok(NULL," ")) av[ac++]=t; av[ac]=NULL; } }
+    C2Main(ac, av);
 }
 void ChernobylGameStep(void){
     Frame();
