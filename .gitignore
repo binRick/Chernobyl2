@@ -22,3 +22,5 @@ spawn*.txt
 vendor/raylib-ios/
 ios/Chernobyl2.xcodeproj/
 *.bake
+logs/
+sounds_off.txt

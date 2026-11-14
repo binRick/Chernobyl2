@@ -25,4 +25,4 @@ if [[ -n $2 && ! $2 =~ ^[1-8]$ ]]; then
 fi
 make -s all >/dev/null || { echo "build failed: run 'make' to see why" >&2; exit 1; }
 [[ -n $1 ]] && export CHERNOBYL_GALLERY_START="$1${2:+:$2}"
-exec ./build/chernobyl2 --viewer all
+exec tools/with-log.sh enemies ./build/chernobyl2 --viewer all

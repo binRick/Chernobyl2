@@ -1,0 +1,8 @@
+arm assets/traps/sound_arm.mp3
+steam assets/traps/sound_steam.mp3
+plate assets/traps/sound_plate.mp3
+surge assets/traps/sound_surge.mp3
+crane assets/traps/sound_crane.mp3
+slam assets/traps/sound_slam.mp3
+spill assets/traps/sound_spill.mp3
+ignite assets/traps/sound_ignite.mp3

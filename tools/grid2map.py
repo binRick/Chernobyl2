@@ -83,6 +83,16 @@ HOLES = [(14.0, 7.0, 1.5, 1.3, 3.5, "torn", 11, 3, (0.80, 0.30, 0.6, 0.5, 0.3), 
          (98.0, 20.0, 0.8, 2.0, 2.6, "split", 21, 2, (0.60, 0.35, 0.2, 1.0, 0.3), 0),
          (98.0, 51.0, 2.25, 2.25, 6.0, "torn", 22, 3, (1.00, 0.50, 1.0, 1.0, 1.0), 1),
          (106.0, 28.0, 1.6, 1.3, 3.8, "sunk", 23, 3, (0.75, 0.15, 0.9, 0.5, 0.6), 0)]
+# Traps the player can set off (src/traps.h; the game reads each as an "info_trap"): (kind, x, y, turned (degrees), breach it vents).
+# kind: 0 steam main, 1 live plate, 2 fire hose, 3 breach surge, 4 crane drop, 5 blast door, 6 coolant spill, 7 turbine.
+TRAPS = [(0, 24.0, 40.0, 180, -1),     # steam across the main corridor, west of the stairs
+         (1, 30.0, 52.0, 90, -1),      # the live plate in the turbine hall's south room
+         (2, 52.0, 73.5, 90, -1),      # a fire point's hose down the south corridor
+         (3, 60.0, 51.0, 90, 7),       # the control post that vents the breach in the control zone's south room
+         (4, 30.0, 8.0, 180, -1),      # the crane over the turbine hall's north room
+         (5, 50.0, 46.0, 90, -1),      # a blast door in the doorway south of the main corridor
+         (6, 90.0, 29.0, 90, -1),      # the coolant tank on the reactor side
+         (7, 10.0, 72.0, 180, -1)]     # the turbine at the west end of the south corridor, its mouth down the corridor
 PANELS = []                # filled by station(): one point per control post
 HOLE_SIDES = {"-x": ((-1, 0), (0, 1), 1), "+x": ((1, 0), (0, 1), 2), "-y": ((0, -1), (1, 0), 4), "+y": ((0, 1), (1, 0), 8)}
 REACTOR_AT = (129.0, 40.0, -6.0)          # where the game's live glow, light and embers come from (info_reactor)
@@ -581,7 +591,7 @@ def main():
         random.Random(seed * 7 + 1).shuffle(ok); edges = ok[:nedge]
         assert edges, f"hole at {cx},{cy} has no side to climb out over"
         nhole += hole(out, h, edges, "floor_" + zone(int(cx // CELL)))
-        hole_ents.append((h, sum(HOLE_SIDES[s_][2] for s_ in edges)))
+        hole_ents.append((h, sum(HOLE_SIDES[s_][2] for s_ in edges), list(edges)))
     # signs: on wall faces that look onto open floor, a fixed-seed pick, spread out, each zone its own set
     import random
     rnd = random.Random(1986); spots = []
@@ -710,11 +720,50 @@ def main():
         if col is None: continue
         light((cx + 0.5) * CELL, (cz + 0.5) * CELL, WALL_H - 0.35, col, radius); nlit += 1
     for col, radius, (lx, ly, lz) in PIT_LIGHTS: light(lx, ly, lz, col, radius)
-    for (cx, cy, hx, hy, dp, style, seed, nedge, fx, boss), bits in hole_ents:
+    for (cx, cy, hx, hy, dp, style, seed, nedge, fx, boss), bits, _edges in hole_ents:
         tint = fx[1]; col = tuple(round(a + (b - a) * tint, 3) for a, b in zip((0.22, 0.48, 1.0), (0.55, 0.86, 1.0)))
         light(cx, cy, -min(1.4, dp * 0.4), col, 7.0 + 6.0 * fx[0])
         out.append('{\n"classname" "info_hole"\n' f'"origin" "{cx * U:g} {cy * U:g} 0"\n"_size" "{hx:g} {hy:g} {dp:g}"\n"_edges" "{bits}"\n'
                    f'"_fx" "{fx[0]:g} {fx[1]:g} {fx[2]:g} {fx[3]:g} {fx[4]:g}"\n"_seed" "{seed}"\n"_boss" "{boss}"\n}}\n')
+    # A trap beside every breach, laid across the way out of it (the first climbing side it fits on), so what comes up walks
+    # into it. Each breach is offered a different kind first -- live plate, fire hose, coolant spill, steam main -- and takes
+    # the first that has the floor it needs; where none fits (or to vent the breach itself) it gets a surge post.
+    traps = list(TRAPS)
+    def clear_of_holes(x, y, skip):
+        return all(i == skip or abs(x - H[0]) > H[2] + 0.4 or abs(y - H[1]) > H[3] + 0.4 for i, H in enumerate(HOLES))
+    def fits(cx_, cy_, a_, pts, skip):
+        tv = (math.sin(a_), -math.cos(a_)); rv = (math.cos(a_), math.sin(a_))
+        for (lx, lz) in pts:
+            x, y = cx_ + tv[0] * lx + rv[0] * lz, cy_ + tv[1] * lx + rv[1] * lz
+            if not open_floor(x, y) or not clear_of_holes(x, y, skip): return False
+        return all(k_ == 3 or math.hypot(cx_ - tx_, cy_ - ty_) > 7.5 for (k_, tx_, ty_, _a, _h) in traps)
+    NEED = {1: [(x, z) for x in (-2.7, 0, 2.7) for z in (-2.7, 0, 2.7)] + [(3.6, 0)],                               # plate: its 5 m square, the switch
+            2: [(x, z) for x in (-4.8, -3.5, -1.0, 2.0, 5.0, 7.5) for z in (-0.5, 0.6)],                             # hose: the cabinet, the length of the jet
+            6: [(-3.6, 0.9), (-4.4, 0.9), (-3.6, 1.9), (-3.6, -0.1)] + [(-1 + 3.0 * math.cos(q * 0.785), 3.0 * math.sin(q * 0.785)) for q in range(8)],   # spill: the tank, the pool
+            0: [(x, z) for x in (-3.5, -1.7, 0, 1.7, 3.5) for z in (-1.0, 1.0)]}                                       # steam: both posts, the bay between
+    PLACE = {1: lambda half: (half + 2.9, 0.0), 2: lambda half: (half + 1.3, -2.0), 6: lambda half: (half + 2.4, 1.0), 0: lambda half: (half + 2.0, 0.0)}   # (out from the breach's centre, along its side)
+    ORDER = (1, 2, 6, 0)
+    for hi, (h, bits, edges) in enumerate(hole_ents):
+        cx, cy, hx, hy = h[:4]
+        if any(th_ == hi for (_k, _x, _y, _a, th_) in traps): continue
+        done = False
+        for q in range(4):
+            kind = ORDER[(hi + q) % 4]
+            for s_ in edges:
+                n, _t, _b = HOLE_SIDES[s_]; half = hx if s_[1] == "x" else hy; a_ = math.atan2(n[1], n[0]); tv = (math.sin(a_), -math.cos(a_))
+                out_, along = PLACE[kind](half); tx_, ty_ = cx + n[0] * out_ + tv[0] * along, cy + n[1] * out_ + tv[1] * along
+                if fits(tx_, ty_, a_, NEED[kind], hi): traps.append((kind, round(tx_, 2), round(ty_, 2), round(math.degrees(a_)), -1)); done = True; break
+            if done: break
+        if not done:                                                                # a surge post: on a side they do not climb out over, if there is one with floor for it
+            sides = [s_ for s_ in HOLE_SIDES if s_ not in edges] + list(edges)
+            for s_ in sides:
+                n = HOLE_SIDES[s_][0]; a_ = math.atan2(-n[0], n[1])                 # turned so its switch (3.6 m along its 'across' axis) stands off that side
+                tv = (math.sin(a_), -math.cos(a_))
+                if open_floor(cx + tv[0] * 3.6, cy + tv[1] * 3.6) and clear_of_holes(cx + tv[0] * 3.6, cy + tv[1] * 3.6, -1): traps.append((3, cx, cy, round(math.degrees(a_)), hi)); break
+    print("traps:", " ".join(f"{('steam','plate','hose','surge','crane','door','spill','turbine')[k_]}@{tx_:g},{ty_:g}" for (k_, tx_, ty_, _a, _h) in traps[len(TRAPS):]))
+    for (k_, tx_, ty_, ta_, th_) in traps:
+        if th_ >= 0: assert abs(HOLES[th_][0] - tx_) < 0.01 and abs(HOLES[th_][1] - ty_) < 0.01, "a surge sits on the breach it vents"
+        out.append('{\n"classname" "info_trap"\n' f'"origin" "{tx_ * U:g} {ty_ * U:g} 0"\n"_kind" "{k_}"\n"_ang" "{ta_}"\n"_hole" "{th_}"\n}}\n')
     for (px_, py_, pz_) in PANELS: out.append('{\n"classname" "info_panel"\n' f'"origin" "{px_ * U:g} {py_ * U:g} {pz_ * U:g}"\n}}\n')
     out.append('{\n"classname" "info_reactor"\n' f'"origin" "{REACTOR_AT[0] * U:g} {REACTOR_AT[1] * U:g} {REACTOR_AT[2] * U:g}"\n}}\n')
     open(OUT, "w").write("".join(out))

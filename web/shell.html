@@ -73,10 +73,11 @@
     // title card with the controls and PRESS ANY KEY -- all while the game downloads behind it.
     // The picture follows the music's clock, as on desktop. Stages: 0 none, 1 montage, 2 title, 3 leaving.
     var music=null, stage=0, stageAt=0, tStamp=55.0, tEnd=59.0, introOK=false;
+    var soundOn=false;      // the music is playing. A browser lets a page start sound only on a click or a key; the PICTURE needs neither (the video is muted), so it starts at once and the music joins on the first input
     if (wantIntro){
       vid.src='intro.mp4'; music=new Audio('intro_music.mp3'); music.preload='auto'; music.loop=true;
       $('ititle').src='intro_title.jpg'; ictl.src='intro_controls.png'; ipress.src='intro_press.png';
-      vid.addEventListener('loadedmetadata', function(){ introOK=true; refreshGate(); });
+      vid.addEventListener('loadedmetadata', function(){ introOK=true; refreshGate(); if (stage===0) startIntro(); });   // as soon as it can play, it plays: no click to see it (as the desktop game opens)
       vid.addEventListener('error', function(){ introOK=false; wantIntro=false; refreshGate(); });
       fetch('intro_times.txt').then(function(r){ return r.ok ? r.text() : ''; }).then(function(t){
         var m; if ((m=t.match(/stamp\s+([\d.]+)/))) tStamp=parseFloat(m[1]); if ((m=t.match(/end\s+([\d.]+)/))) tEnd=parseFloat(m[1]); }).catch(function(){});
@@ -91,17 +92,18 @@
     }
     function startIntro(){
       gate.style.display='none'; intro.style.display='flex'; setStage(1);
-      var p=music.play(); if (p && p.catch) p.catch(function(){});
+      var p=music.play();
+      if (p && p.then) p.then(function(){ soundOn=true; console.log('intro: playing, with sound'); }).catch(function(){ soundOn=false; console.log('intro: playing, silent until a click or key'); });
       p=vid.play(); if (p && p.catch) p.catch(function(){ toTitle(false); });
       requestAnimationFrame(tick);
     }
     function tick(){
       if (stage===0 || stage===3) return;
       if (stage===1){
-        var c=music.currentTime;
-        if (Math.abs(vid.currentTime-c)>0.25 && vid.readyState>=2 && c<vid.duration-0.3){ try { vid.currentTime=c; } catch(e){} }   // the picture follows the music
+        var c=soundOn ? music.currentTime : vid.currentTime;                     // (silent so far: the picture keeps its own time)
+        if (soundOn && Math.abs(vid.currentTime-c)>0.25 && vid.readyState>=2 && c<vid.duration-0.3){ try { vid.currentTime=c; } catch(e){} }   // the picture follows the music
         if (vid.ended || c>=tEnd-0.05) toTitle(false);
-        note.textContent = ready ? '' : 'loading '+pct+'%';
+        note.textContent = (soundOn ? '' : 'click or press a key for sound') + ((!soundOn && !ready) ? '   ·   ' : '') + (ready ? '' : 'loading '+pct+'%');
       } else if (stage===2){
         var t=now()-stageAt; note.textContent='';
         if (t>0.9 && ready){ ipress.className='on'; iload.textContent=''; }
@@ -123,6 +125,11 @@
       }, 1250);
     }
     function introInput(e){
+      if (!soundOn && music && (stage===1 || stage===2)){                        // the first input: the music comes in, in step with the picture (and is not a skip)
+        try { music.currentTime = (stage===1) ? vid.currentTime : Math.max(0,tStamp+Math.min(4,now()-stageAt)); } catch(x){}
+        var p=music.play(); soundOn=true; if (p && p.catch) p.catch(function(){ soundOn=false; });
+        if (stage===1) return;
+      }
       if (stage===1){ if (now()-stageAt>1.5) toTitle(true); }
       else if (stage===2) leaveIntro();
     }

@@ -263,6 +263,8 @@ static int     g_hasHall = 0;           //   so scenery built beyond the walls (
 // floor level; hx/hz = half-extents, depth, all metres; edges = the sides they can come out over (1 -x, 2 +x, 4 -z, 8 +z);
 // fx = strength, tint, smoke, motes, shafts of its light (0..1); busy[e] = who is on that edge now (enemy index+1), busyT = when it was last taken.
 typedef struct { Vector3 pos; float hx, hz, depth; int edges; float fx[5]; int seed, boss; int busy[4]; double busyT[4]; } MapHole;
+typedef struct { Vector3 pos; int kind, hole; float ang; } MapTrap;                    // "info_trap": a trap the player can set off (traps.h): which, where, how turned, and the breach a surge vents
+static MapTrap g_mapTraps[32]; static int g_nMapTraps = 0;
 #define MAX_MAPPANELS 96
 static Vector3 g_mapPanels[MAX_MAPPANELS]; static int g_nMapPanels = 0;   // "info_panel": a control post (the game plays a control-panel sound near each)
 #define MAX_MAPHOLES 24
@@ -534,8 +536,11 @@ static void MapNavBuild(Vector3 seed){
             // THIS surface (~nh) is already a layer here -- otherwise it's a new storey to add.
             int dup=0; for (int l=0;l<g_navNL[nci];l++) if (fabsf(g_navFloor[nci*NAV_MAXL+l]-nh)<NAV_LAYEREPS){ dup=1; break; }
             if (dup || g_navNL[nci]>=NAV_MAXL) continue;
-            if (MapSphereHitsWall((Vector3){wx,nh+0.9f,wz},NAV_WALLR)) continue;          // cell in a wall
-            if (MapSphereHitsWall((Vector3){(ox+wx)*0.5f,(h+nh)*0.5f+0.9f,(oz+wz)*0.5f},NAV_WALLR)) continue; // wall between
+            // Walls are tested from STEP height up (0.7 m, as the enemies move): at 0.9 m the sphere's underside caught the top edge
+            // of the next stair riser, so the cells against every riser were thrown out and a flight of stairs was cut off from the
+            // floor below it -- the flow led round the stairs, never up them.
+            if (MapSphereHitsWall((Vector3){wx,nh+0.73f+NAV_WALLR,wz},NAV_WALLR)) continue;          // cell in a wall
+            if (MapSphereHitsWall((Vector3){(ox+wx)*0.5f,fmaxf(h,nh)+0.73f+NAV_WALLR,(oz+wz)*0.5f},NAV_WALLR)) continue; // wall between
             float hd=MapRayNearest((Vector3){wx,nh+0.15f,wz},(Vector3){0,1,0},NAV_CLEAR);  // ceiling / stair underside above?
             if (hd>0.0f) continue;                                                         // too little headroom: an enemy wouldn't fit
             int nl=g_navNL[nci]++; g_navFloor[nci*NAV_MAXL+nl]=nh; g_navQueue[tail++]=nci*NAV_MAXL+nl;
@@ -662,17 +667,18 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     int curSpawn=0, curLight=0, haveOrig=0, spawnSet=0; float entLi=300.0f;
     int curFlick=0, curReactor=0, reactorSet=0, orgSet=0; Vector3 reactorQ={0,0,0}, orgQ={0,0,0};
     int hallSet=0; float hallQ[4]={0,0,0,0};
-    int curHole=0, curPanel=0; MapHole holeQ; memset(&holeQ,0,sizeof holeQ); g_nMapHoles=0; g_nMapPanels=0;
+    int curHole=0, curPanel=0, curTrap=0; MapTrap trapQ={{0,0,0},0,-1,0}; g_nMapTraps=0; MapHole holeQ; memset(&holeQ,0,sizeof holeQ); g_nMapHoles=0; g_nMapPanels=0;
     float mpu=0.0f;     // worldspawn "_mpu" = metres per Quake unit: keep real scale (grid2map.py arenas)
     g_mapTessQ=0.0f;
     char line[2048];
     while (fgets(line,sizeof line,f)){
         const char *p=line; while (*p==' '||*p=='\t') p++;
-        if (*p=='{'){ if (sp==0){ curSpawn=curLight=curReactor=curFlick=haveOrig=curHole=curPanel=0; memset(&holeQ,0,sizeof holeQ); entLi=300.0f; entCol=(Vector3){1,1,1}; } if (sp<8) ctxN[sp]=0; sp++; }
+        if (*p=='{'){ if (sp==0){ curSpawn=curLight=curReactor=curFlick=haveOrig=curHole=curPanel=curTrap=0; trapQ=(MapTrap){{0,0,0},0,-1,0}; memset(&holeQ,0,sizeof holeQ); entLi=300.0f; entCol=(Vector3){1,1,1}; } if (sp<8) ctxN[sp]=0; sp++; }
         else if (*p=='}'){ sp--; if (sp>=0 && sp<8 && ctxN[sp]>=4) MapEmitBrush(&R,ctx[sp],ctxN[sp]);
             if (sp==0){
                 if (curSpawn && haveOrig && !spawnSet){ spawnQ=entO; spawnSet=1; }
                 if (curReactor && haveOrig){ reactorQ=entO; reactorSet=1; }
+                if (curTrap && haveOrig && g_nMapTraps<32){ trapQ.pos=entO; g_mapTraps[g_nMapTraps++]=trapQ; }
                 if (curPanel && haveOrig && g_nMapPanels<MAX_MAPPANELS) g_mapPanels[g_nMapPanels++]=entO;
                 if (curHole && haveOrig && holeQ.hx>0 && g_nMapHoles<MAX_MAPHOLES){ holeQ.pos=entO; g_mapHoles[g_nMapHoles++]=holeQ; }
                 if (curFlick && haveOrig && g_nMapFlick<MAP_MAXFLICK){ g_mapFlick[g_nMapFlick]=(MapLight){entO,entLi,entCol}; g_nMapFlick++; }
@@ -682,7 +688,10 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
                 }
             } }
         else if (*p=='"' && sp==1){                                // entity key/value
-            if (!strncmp(p,"\"classname\"",11)){ if (strstr(p,"info_player")) curSpawn=1; else if (strstr(p,"\"light\"")) curLight=1; else if (strstr(p,"info_reactor")) curReactor=1; else if (strstr(p,"info_flicker")) curFlick=1; else if (strstr(p,"info_hole")) curHole=1; else if (strstr(p,"info_panel")) curPanel=1; }
+            if (!strncmp(p,"\"classname\"",11)){ if (strstr(p,"info_player")) curSpawn=1; else if (strstr(p,"\"light\"")) curLight=1; else if (strstr(p,"info_reactor")) curReactor=1; else if (strstr(p,"info_flicker")) curFlick=1; else if (strstr(p,"info_hole")) curHole=1; else if (strstr(p,"info_panel")) curPanel=1; else if (strstr(p,"info_trap")) curTrap=1; }
+            else if (!strncmp(p,"\"_kind\"",7)) sscanf(p,"\"_kind\" \"%d\"",&trapQ.kind);
+            else if (!strncmp(p,"\"_ang\"",6)) sscanf(p,"\"_ang\" \"%f\"",&trapQ.ang);
+            else if (!strncmp(p,"\"_hole\"",7)) sscanf(p,"\"_hole\" \"%d\"",&trapQ.hole);
             else if (!strncmp(p,"\"_size\"",7)) sscanf(p,"\"_size\" \"%f %f %f\"",&holeQ.hx,&holeQ.hz,&holeQ.depth);
             else if (!strncmp(p,"\"_edges\"",8)) sscanf(p,"\"_edges\" \"%d\"",&holeQ.edges);
             else if (!strncmp(p,"\"_fx\"",5)) sscanf(p,"\"_fx\" \"%f %f %f %f %f\"",&holeQ.fx[0],&holeQ.fx[1],&holeQ.fx[2],&holeQ.fx[3],&holeQ.fx[4]);
@@ -731,6 +740,7 @@ static Model LoadQ3MapModel(const char *path, int *okOut){
     Vector3 L=Vector3Normalize((Vector3){0.45f,0.85f,0.30f});
     g_hasHall=0; if (hallSet){ g_mapHall[0]=(hallQ[0]-cx)*s; g_mapHall[1]=(hallQ[1]-cy)*s; g_mapHall[2]=(hallQ[2]-cx)*s; g_mapHall[3]=(hallQ[3]-cy)*s; g_hasHall=1; }
     g_hasReactor=0; if (reactorSet){ g_mapReactor=(Vector3){(reactorQ.x-cx)*s,(reactorQ.z-Mnz)*s,(reactorQ.y-cy)*s}; g_hasReactor=1; }
+    for (int h=0;h<g_nMapTraps;h++){ Vector3 q=g_mapTraps[h].pos; g_mapTraps[h].pos=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s}; }
     for (int h=0;h<g_nMapPanels;h++){ Vector3 q=g_mapPanels[h]; g_mapPanels[h]=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s}; }
     for (int h=0;h<g_nMapHoles;h++){ Vector3 q=g_mapHoles[h].pos; g_mapHoles[h].pos=(Vector3){(q.x-cx)*s,(q.z-Mnz)*s,(q.y-cy)*s}; }
     if (spawnSet){ g_mapSpawn=(Vector3){(spawnQ.x-cx)*s,(spawnQ.z-Mnz)*s,(spawnQ.y-cy)*s}; g_hasSpawn=1; }

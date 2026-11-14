@@ -58,7 +58,15 @@ EM_JS(int, WebPointerLocked, (void), { return document.pointerLockElement ? 1 : 
 EM_JS(void, WebMouseInit, (void), {
     window.__c2_mx = 0; window.__c2_my = 0;
     document.addEventListener('mousemove', function(e){ if (document.pointerLockElement){ window.__c2_mx += e.movementX || 0; window.__c2_my += e.movementY || 0; } });
+    // The lock is lost whenever the tab or the window is left (alt-tab), and raylib, which still believes it has it, will not
+    // ask again: back in the game the pointer just moved over the picture. So the page asks, on the click itself (a browser
+    // grants it only inside one) -- whenever the game wants the mouse (not in its menu) and does not have it.
+    document.addEventListener('mousedown', function(e){
+        var c = document.getElementById('canvas');
+        if (window.__c2_go && window.__c2_wantLock && c && document.pointerLockElement !== c){ try { c.focus(); c.requestPointerLock(); } catch(x){} }
+    }, true);
 });
+EM_JS(void, WebWantLock, (int want), { window.__c2_wantLock = want; });
 EM_JS(double, WebMouseTakeX, (void), { var v = window.__c2_mx || 0; window.__c2_mx = 0; return v; });
 EM_JS(double, WebMouseTakeY, (void), { var v = window.__c2_my || 0; window.__c2_my = 0; return v; });
 #define MouseCaptured() WebPointerLocked()
@@ -311,6 +319,15 @@ static int             g_burstLeft = 0;         // rounds remaining in the curre
 static float           g_spin = 0.0f;           // minigun barrel-spin rate 0..1
 static float           g_mgSpinT = 0.0f;         // minigun: seconds the trigger's been held (spin-up timer)
 static float           g_shake = 0.0f;           // 0..1 minigun "brain shake": screen jitter + edge vignette
+// Sounds for events that had none, chosen on the dev sound board (a candidate applied there is copied to
+// assets/extra/<key>.mp3). Each plays only if its file is there: the pickups' own sound, a blade landing on the player,
+// the flamethrower catching, a weapon drawn, an enemy coming up, a body going down, enemies' walking feet.
+enum { EX_PICKUP, EX_MELEE, EX_FLAME, EX_SWITCH, EX_RISE, EX_BODY, EX_STEPS, EX_LOWAMMO, EX_RANK, EX_N };
+static const char *kExtraKey[EX_N]={"pickup-health-mega-quad-speed","melee-weapon-hits-the-player","flamethrower-ignite-shut-off","weapon-switch-draw","rising-from-the-floor","body-hits-the-floor","walking-footsteps","low-ammo-warning","leaderboard-rank"};
+static Sound g_extraSnd[EX_N]; static int g_hasExtra[EX_N];
+static void ExtraLoad(int k){ const char *p=TextFormat("assets/extra/%s.mp3",kExtraKey[k]); g_hasExtra[k]=0; if (FileExists(p)){ g_extraSnd[k]=LoadSound(p); g_hasExtra[k]=(g_extraSnd[k].frameCount>0); } }
+static void ExtraPlay(int k, float vol);
+static void ExtraAt(int k, Vector3 at, float vol);
 static float           g_flameHeat = 0.0f;        // flamethrower warm-up: seconds the trigger's been held; below FLAME_WARMUP it spits raw fuel, above it ignites
 #define FLAME_WARMUP 0.55f                         // warm-up before the flame catches: spray unignited liquid until then
 #define MG_SPINUP 0.333f                          // barrel spins up for 1/3 s before bullets actually fire
@@ -464,6 +481,7 @@ static Sound  g_heartSnd; static int g_hasHeartSnd = 0;   // low-health heartbea
 static Sound  g_appearSnd, g_dieSnd, g_shellSnd; static int g_hasAppearSnd=0, g_hasDieSnd=0, g_hasShellSnd=0;   // hostiles come into view / the player's death scream / a shell pushed into the tube
 static int    g_seenNow = 0, g_seenPrev = 0; static float g_appearCd = 0.0f;   // hostiles on screen this frame / last frame; sting cooldown
 #define WAVE_BG_VOL 0.42f
+static int g_waveBg4 = 0;             // a fourth track is loaded: it plays from wave 4 on (the first three stop cycling)
 static Music  g_waveBg[4]; static int g_nWaveBg = 0; static float g_waveBgVol[4]={0,0,0,0};   // each wave's background track (looped, cross-faded)
 static Sound  g_glSnd[3]; static int g_hasGlSnd[3]={0,0,0};      // grenade launcher reload: drum open, a grenade in, drum shut (cuts of one recording)
 static Sound  g_drySnd; static int g_hasDrySnd = 0;              // trigger on an empty gun
@@ -724,6 +742,7 @@ static void ActivateWeapon(int n){
 }
 static void SwitchWeapon(int n){
     if (n<0 || n>=g_numWeapons || n==g_curWeapon || !g_weapons[n].has) return;
+    { static int first=1; if (!first) ExtraPlay(EX_SWITCH,0.6f); first=0; }   // (not the draw at load)
     // silence the weapon we're holstering so its loop doesn't bleed past the swap
     if (g_audio && g_weapons[g_curWeapon].hasSnd){ StopSound(g_weapons[g_curWeapon].fireSnd); if (g_weapons[g_curWeapon].sndLoop) StopSound(g_weapons[g_curWeapon].fireSnd2); }
     g_loopOn=0;
@@ -2094,6 +2113,7 @@ static void EnemyClimbIn(int i, int h, int ed){
     e->climbWait=EdgeBusy(h,ed)?1.2f:0.0f;                                                 // someone is still on this side: he hangs below a moment
     H->busy[ed]=i+1; H->busyT[ed]=GetTime(); e->poseOK=e->fromOK=0; e->blendT=0;
     DebugLog("climb","\"i\":%d,\"hole\":%d,\"edge\":%d,\"clip\":%d,\"wait\":%.1f,\"t\":%.2f", i, h, ed, k, e->climbWait, e->climbT);
+    ExtraAt(EX_RISE,e->pos,0.8f);
     if (e->climbT>0) EnemyClimbTick(i,0.0f);            // pose him and place his hit box NOW: he is spawned after this frame's enemy update, and would stand on the lip for a frame
 }
 // A spawn spot is good only if it's near the player's level, inside the player's
@@ -2344,6 +2364,7 @@ static void PickupsUpdate(float dt){
         k->active=0;
         if (msg){ snprintf(g_pkMsg,sizeof g_pkMsg,"%s",msg); g_pkMsgT=1.6f; }
         if (g_audio && k->type==PK_AMMO && g_hasPkAmmoSnd){ SetSoundVolume(g_pkAmmoSnd,0.7f); PlaySound(g_pkAmmoSnd); }
+        else if (g_audio && g_hasExtra[EX_PICKUP]) ExtraPlay(EX_PICKUP,0.8f);
         else if (g_audio && g_hasPkSnd) PlaySound(g_pkSnd);
         DebugLog("pickup","\"type\":%d,\"hp\":%.0f",k->type,g_playerHp);
     }
@@ -3064,7 +3085,9 @@ static void Fire(Camera3D cam) {
     if (cw->magSize>0 && cw->mag<=0){ g_fireCd=0.35f;                          // trigger on empty: the click, then a reload if there is anything to load
         if (g_audio && g_hasDrySnd && !g_reloading){ SetSoundVolume(g_drySnd,0.8f); PlaySound(g_drySnd); }
         TryReload(); return; }
-    if (cw->magSize>0) cw->mag--;
+    if (cw->magSize>0){ int low=(cw->magSize>=10)?(cw->magSize*15+99)/100:1;            // low ammo: once, as the magazine drops to its last 15% (its last round, for the small ones)
+        if (cw->mag>low && cw->mag-1<=low && cw->mag-1>0) ExtraPlay(EX_LOWAMMO,0.7f);
+        cw->mag--; }
     g_fireCd = (cw->fireCd>0.0f) ? cw->fireCd : 0.12f;   // per-weapon fire rate (slow shotguns etc.)
     // One-shot weapons (e.g. shotguns) sound their report here, per shot; auto
     // weapons loop in Update() instead.
@@ -3148,6 +3171,8 @@ static void Fire(Camera3D cam) {
 // test drives all enemy movement: they slide along walls, climb stairs, drop off
 // ledges toward the player, and still refuse bottomless edges.
 #define ENEMY_STEP    0.7f    // max riser an enemy can step up (matches the player's auto-step)
+static int g_trapDemo; static void TrapsUpdate(float dt); static void TrapsDraw(void); static void TrapsHud(void); static void TrapsInit(void);   // traps.h: the plant's traps (and --traps, their sandbox)
+static int TrapBlocked(float x, float z, float pad); static void TrapPushPlayer(void); static void TrapPushEnemy(int i); static int TrapMarks(Vector3 *pos, int *ready, int max);
 static int EnemyMoveOK(float x, float z, float curY){
     if (!g_mapCol.ready) return 1;
     if (HoleAt(x,z,0.30f)>=0) return 0;                 // a breach in the floor: round it, not into it
@@ -3156,7 +3181,10 @@ static int EnemyMoveOK(float x, float z, float curY){
     float ny=top-fd;                                   // destination floor height
     if (ny>curY+ENEMY_STEP)  return 0;                 // riser too tall to step up
     if (ny<curY-NAV_MAXFALL) return 0;                 // drop taller than a storey -> a cliff, don't leap
-    return !MapSphereHitsWall((Vector3){x,ny+0.9f,z},ENEMY_MOVE_R);  // clear where it'd stand
+    // Clear where he'd stand -- tested from STEP height up. The sphere used to sit at 0.9 m, its underside 0.42 m off the
+    // floor: on a stair it caught the top edge of the next riser (0.45 m) from 17 cm out, a band he could never cross a
+    // frame at a time -- so he ran in place against every flight, his body sunk in the step. What he can step over is not a wall.
+    return !MapSphereHitsWall((Vector3){x,ny+ENEMY_STEP+ENEMY_MOVE_R+0.03f,z},ENEMY_MOVE_R);
 }
 // Move enemy i by (mx,mz), per-axis -- nothing walks through walls OR off ledges. Both
 // the chase and the enemy-vs-enemy separation go through here.
@@ -3184,6 +3212,9 @@ static Sound g_eShotSnd, g_eBoltSnd, g_eRaiseSnd; static int g_hasEShot=0, g_has
 static float g_playerMoveAmt=0.0f;                   // 0..1 how fast the player is moving (spoils hitscan aim)
 // A sound that comes from somewhere: quieter with distance, panned to the side it is on, and
 // muffled to under half when a wall stands between it and the player.
+static void SfxAt(Sound snd, Vector3 at, float gain);
+static void ExtraPlay(int k, float vol){ if (g_audio && g_hasExtra[k]){ SetSoundPan(g_extraSnd[k],0.5f); SetSoundVolume(g_extraSnd[k],vol); PlaySound(g_extraSnd[k]); } }
+static void ExtraAt(int k, Vector3 at, float vol){ if (g_audio && g_hasExtra[k]) SfxAt(g_extraSnd[k],at,vol); }
 static void SfxAt(Sound snd, Vector3 at, float gain){
     if (!g_audio) return;
     Vector3 to=Vector3Subtract(at,g_cam.position); float d=Vector3Length(to);
@@ -3498,7 +3529,7 @@ static void UpdateEnemies(float dt){
             // impossible spot, e.g. clipping through a wall) it can never free itself ->
             // respawn it somewhere valid. Tracked independently of chase state, so it also
             // fires when the enemy is jammed in a wall right next to the player (attack range).
-            if (g_mapCol.ready && MapSphereHitsWall((Vector3){e->pos.x, e->pos.y+0.9f, e->pos.z}, 0.35f)){
+            if (g_mapCol.ready && MapSphereHitsWall((Vector3){e->pos.x, e->pos.y+ENEMY_STEP+0.38f, e->pos.z}, 0.35f)){   // (from step height up, as he moves: a stair's edge under him is not a wall he is in)
                 e->embedT += dt;
                 if (e->embedT > 0.8f){                              // relocate to a navigable cell -- same enemy, same hp (no free heal)
                     float keepHp=e->hp; int ty=e->type;
@@ -3706,6 +3737,7 @@ static void UpdateEnemies(float dt){
                     if (l>1e-4f) EnemyNudge(i, ox/l*e->spd*dt*0.6f, oz/l*e->spd*dt*0.6f);
                 }
             }
+            TrapPushEnemy(i);                                  // round a trap's posts, tank and casing (slid off them, not stopped dead by them)
             if (g_hasMap && g_mapCol.ready){                   // keep the enemy standing on the map floor
                 // look down from only a step above the feet, not 4m up -- otherwise the
                 // snap can grab an overhead landing and wedge the enemy under the stairs.
@@ -3746,6 +3778,7 @@ static void UpdateEnemies(float dt){
                     for (int k=0;k<ns && e->atkCd<=0;k++){ float strike=nf*fr[k];
                         if (prevT<strike && e->animT>=strike && d<=reach*1.15f && !g_godMode){
                             g_playerHp-=kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f);   // per-type swing damage
+                            ExtraAt(EX_MELEE,e->pos,0.9f);
                             DebugLog("melee","\"type\":\"%s\",\"blade\":%d,\"dmg\":%.1f,\"hp\":%.0f",kEnemy[e->type].name,k,kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f),g_playerHp);
                             e->atkCd = dual ? 0.25f : ATK_COOLDOWN;
                         }
@@ -3791,7 +3824,7 @@ static void UpdateEnemies(float dt){
                 cp->wN=e->wN; for (int k=0;k<e->wN;k++){ cp->wBone[k]=e->wBone[k]; cp->wOff[k]=e->wOff[k]; cp->wSz[k]=e->wSz[k]; cp->wDir[k]=e->wDir[k]; cp->wT0[k]=e->wT0[k]; }
                 cp->pos=e->pos; cp->yaw=yaw; cp->active=1; cp->type=e->type; cp->burnN=e->burnN;   // keep the soot marks it earned while alive
                 for (int k=0;k<e->burnN;k++){ cp->burnY[k]=e->burnY[k]; cp->burnR[k]=e->burnR[k]; }
-                g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
+                ExtraAt(EX_BODY,e->pos,0.8f); g_corpseNext=(g_corpseNext+1)%MAX_CORPSES;
                 e->state=0;                                // slot freed -- the wave director owns ALL spawning (no 1:1 respawn)
             }
             if (e->state==2) EnemyPoseBuild(e);
@@ -4077,6 +4110,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
             // (where the viewmodel barrel tip sits) and forward past the barrel, then the
             // jet flies out along the aim. Built from the camera basis so it tracks the gun.
             Vector3 muzzle=VmMuzzleWorld(g_pos, fwd, 0.95f);             // at the drawn nozzle tip
+            { static float prevHeat=0; if (prevHeat<FLAME_WARMUP && g_flameHeat>=FLAME_WARMUP) ExtraPlay(EX_FLAME,0.75f); prevHeat=g_flameHeat; }   // it catches
             if (g_flameHeat < FLAME_WARMUP){                             // NOT lit yet: spit raw fuel, no damage
                 for (int q=0;q<2;q++) SpawnLiquid(muzzle, fwd);
             } else {                                                     // ignited: flame + burn
@@ -4361,6 +4395,7 @@ static void Update(void) {
     // While P-paused, ANY of P / ESC / click resumes (handled here, before ESC would
     // otherwise open the options menu). Stays captured so play resumes seamlessly.
     if (g_paused){
+        if (IsKeyPressed(KEY_M)){ g_userMute=!g_userMute; SetMasterVolume(g_userMute?0.0f:1.0f); DebugLog("mute","\"on\":%d", g_userMute); }   // M works while paused too
         if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
             g_paused=0; g_swallowClick=IsMouseButtonDown(MOUSE_BUTTON_LEFT); DebugLog("pause","\"paused\":false");   // (the click that resumes is not a shot)
         }
@@ -4403,6 +4438,9 @@ static void Update(void) {
     // (a browser only grants pointer lock on a user gesture, and refuses for a while if it is asked
     // every frame: re-grab on the click that follows losing it, not continuously)
     if (!g_menu && !MouseCaptured() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) DisableCursor();
+#if defined(__EMSCRIPTEN__)
+    WebWantLock(!g_menu);
+#endif
 #else
     if (!g_menu && IsWindowFocused() && !IsCursorHidden()) DisableCursor();
 #endif
@@ -4527,6 +4565,7 @@ static void Update(void) {
     // corners are crossed without a check (the floor is held solid under him there). In the air nothing stops him: a jump
     // carries him over. Come down short and he catches the lip if it is within reach, else he goes down the shaft; at the
     // bottom the core burns him and he is thrown back out onto the lip.
+    TrapPushPlayer();
     int inHole=-1; float holeR2=0.0f;
     if (g_hasMap && !g_noclip && g_nMapHoles>0 && (inHole=HoleAt(g_pos.x,g_pos.z,0.0f))>=0){
         const MapHole *H=&g_mapHoles[inHole]; float ax=fmaxf(0.3f,H->hx-0.10f), az=fmaxf(0.3f,H->hz-0.10f), lipEye=H->pos.y+EYE_H;
@@ -4608,6 +4647,7 @@ static void Update(void) {
     WeaponTrigger(dt, fwd, !g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT), !g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
 
     UpdateEnemies(dt);
+    TrapsUpdate(dt);
     UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
     UpdateSmoke(dt);
     UpdateGrenades(dt);
@@ -4795,6 +4835,12 @@ static void Update(void) {
     }
     g_seenPrev=g_seenNow;
     for (int t=0;t<EN_NTYPES;t++) for (int c=0;c<EC_N;c++) if (g_eCueCd[t][c]>0) g_eCueCd[t][c]-=dt;
+    if (g_hasExtra[EX_STEPS]){                                 // walking feet: somebody on his feet within 9 m, moving at a walk
+        float near=1e9f; Vector3 at={0};
+        if (g_audio && !g_dead && !g_paused) for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i]; if (e->state!=1 || e->climbT>0 || e->knockT>0) continue;
+            float sp=Vector3Length(e->mv), d=Vector3Distance(e->pos,g_pos); if (sp>0.35f && sp<2.6f && d<9.0f && d<near){ near=d; at=e->pos; } }
+        if (near<9.0f){ if (!IsSoundPlaying(g_extraSnd[EX_STEPS])) SfxAt(g_extraSnd[EX_STEPS],at,0.55f); SetSoundVolume(g_extraSnd[EX_STEPS],0.55f*(1.0f-near/9.0f)+0.08f); }
+        else if (IsSoundPlaying(g_extraSnd[EX_STEPS])) StopSound(g_extraSnd[EX_STEPS]); }
     if (g_audio && g_hasRunSnd){                               // running feet: the nearest hostile actually running at him
         float best=1e9f; Vector3 at={0}; 
         if (!g_dead) for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i];
@@ -5577,6 +5623,14 @@ static void DrawMinimap(int W, int H){
         else if (far){ DrawCircle(px,py,3,Fade(col,0.85f)); DrawCircleLines(px,py,5,Fade(col,0.45f)); }      // (smaller, ringed: a bearing, not a position)
         else DrawCircle(px,py,e->riseT>0?3:4,e->riseT>0?Fade(col,0.55f):col);
     }
+    { Vector3 tp[32]; int tr[32], tn=TrapMarks(tp,tr,32);                                      // the traps, pinned to the rim when out of range like everything else
+      for (int i=0;i<tn;i++){ float wx=tp[i].x-g_pos.x, wz=tp[i].z-g_pos.z, sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp, d2=sx*sx+sy*sy, lim=(float)((R-5)*(R-5));
+          int far=(d2>=lim); if (far){ float k=sqrtf(lim/d2); sx*=k; sy*=k; }
+          // a DIAMOND, cyan (no hostile is), white-edged and bigger than any dot: filled and pulsing when it can be set off, hollow while it recharges
+          Vector2 p={(float)(cx+(int)sx),(float)(cy-(int)sy)}; float r=(far?6.0f:7.5f)+(tr[i]?1.2f*sinf((float)GetTime()*5.0f+i):0.0f);
+          DrawPoly(p,4,r+2.5f,0.0f,(Color){0,0,0,230});
+          DrawPoly(p,4,r,0.0f,(tr[i]==1)?(Color){40,225,255,255}:(tr[i]==2)?(Color){255,190,40,255}:(Color){30,60,70,255});         // cyan: can be armed; amber: armed, waiting; dark: going off / recharging
+          DrawPolyLinesEx(p,4,r+0.5f,0.0f,1.6f,tr[i]?(Color){255,255,255,255}:(Color){40,225,255,255}); } }
     if (rear){ float pu=0.5f+0.5f*sinf((float)GetTime()*6.0f); unsigned char a=(unsigned char)(40+60*pu);   // something close behind: the rear half glows
         for (int dy=0;dy<R;dy++){ int span=(int)sqrtf((float)(R*R-dy*dy)); DrawRectangle(cx-span,cy+dy,span*2,1,(Color){200,50,50,a}); } }
     DrawTriangle((Vector2){(float)cx,(float)(cy-9)},(Vector2){(float)(cx-6),(float)(cy+5)},(Vector2){(float)(cx+6),(float)(cy+5)},(Color){255,230,120,255});
@@ -5610,6 +5664,9 @@ static void DrawHUD(void) {
       if (g_pkMsgT>0){ int fs=28, tw=MeasureText(g_pkMsg,fs); unsigned char a=(unsigned char)(255*fminf(1.0f,g_pkMsgT/0.5f));
           DrawText(g_pkMsg,W/2-tw/2+2,H/2+92,fs,(Color){0,0,0,a}); DrawText(g_pkMsg,W/2-tw/2,H/2+90,fs,(Color){140,255,140,a}); } }
     if (g_devOverlay) DrawFPS(W-90,10);
+    else { static float sm=0; float f=(float)GetFPS(); sm=(sm<=0)?f:sm+(f-sm)*0.1f; const char *t=TextFormat("%d FPS",(int)(sm+0.5f));   // the frame rate, always there (smoothed, so it can be read)
+        Color c=(sm>=55.0f)?(Color){120,230,130,220}:(sm>=30.0f)?(Color){235,200,90,230}:(Color){240,90,70,240};
+        DrawText(t,13,11+HudTop(),18,(Color){0,0,0,170}); DrawText(t,12,10+HudTop(),18,c); }
     // kills + headshots + player health
     DrawMinimap(W, H);
     if (g_userMute) DrawText("MUTED  (M)", W-160, 84, 16, (Color){200,200,210,255});
@@ -5798,7 +5855,7 @@ static void DrawPaused(void){
     DrawRectangle(0,0,W,H,(Color){0,0,0,120});
     const char *t="PAUSED"; int ts=64, tw=MeasureText(t,ts);
     TextSh(t, W/2-tw/2, H/2-ts/2, ts, (Color){255,210,60,255});
-    const char *h="press P, ESC, or click to resume"; int hs=22, hw=MeasureText(h,hs);
+    const char *h=g_userMute?"press P, ESC, or click to resume      M: unmute":"press P, ESC, or click to resume      M: mute"; int hs=22, hw=MeasureText(h,hs);
     TextSh(h, W/2-hw/2, H/2+ts/2+12, hs, RAYWHITE);
 }
 
@@ -5937,7 +5994,7 @@ static void AudioBedUpdate(float dt){
         UpdateMusicStream(g_amb[0]); UpdateMusicStream(g_amb[1]);
     }
     if (g_nWaveBg>0){
-        int want=(g_wave>=1 && g_hasMap) ? (g_wave-1)%g_nWaveBg : -1;
+        int want=(g_wave>=1 && g_hasMap) ? ((g_waveBg4 && g_wave>=4) ? 3 : (g_wave-1)%(g_waveBg4?3:g_nWaveBg)) : -1;
         float level=WAVE_BG_VOL; if (g_dead || g_menu) level*=0.35f; if (g_hasBossSnd && IsSoundPlaying(g_bossSnd)) level*=0.40f;
         for (int k=0;k<g_nWaveBg;k++){
             float tgt=(k==want)?level:0.0f;
@@ -6203,6 +6260,7 @@ static void DrawHoleFX(void){
     }
     rlEnableDepthMask();
 }
+#include "traps.h"                      // the plant's traps + their sandbox (--traps)
 static void DrawScene(void){
     ClearBackground((Color){70,90,110,255});
     if (g_hasMap) DrawSky();                  // gradient sky shows through the map's sky openings
@@ -6216,10 +6274,12 @@ static void DrawScene(void){
         DrawHoleFX();
         DrawDust();
         DrawEnemies();
+        TrapsDraw();
         DrawPickups();
         DrawBolts();
         DrawSmoke(g_cam);                     // minigun muzzle smoke/steam (billboards, drawn last)
     EndMode3D();
+    TrapsHud();
     if (g_inspect && !g_noEnemies) DrawInspect();
     DrawViewmodel();
 }
@@ -6551,7 +6611,7 @@ static void StartSelectedMap(void){
             DebugLog("spawnface","\"yaw\":%.1f", g_yaw*57.29578f); }
         MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
         { const char *at=getenv("CHERNOBYL_AT"); float ax=0, az=0;                                     // dev: stand here instead (metres, map x z) -- map stills
-          if (at && sscanf(at,"%f %f",&ax,&az)==2){ g_pos.x=ax; g_pos.z=az; g_devOverlay=0; g_noEnemies=1; } }
+          if (at && sscanf(at,"%f %f",&ax,&az)==2){ g_pos.x=ax; g_pos.z=az; g_devOverlay=0; g_noEnemies=!getenv("CHERNOBYL_AT_PLAY"); } }   // (CHERNOBYL_AT_PLAY=1: stand there AND keep the enemies -- tests of how they reach a spot)
         if (g_holeView>=0 && g_holeView<g_nMapHoles){                                                 // dev: stand off a side they do NOT climb over, looking in
             const MapHole *h=&g_mapHoles[g_holeView]; static const float nx[4]={-1,1,0,0}, nz[4]={0,0,-1,1}; int best=-1; float bestD=0;
             for (int e=0;e<4;e++){
@@ -6666,15 +6726,21 @@ static void LoadGameAssets(void){
             const char *sp=FileExists(p1)?p1:(FileExists(p2)?p2:NULL);
             if (sp){ Sound s=LoadSound(sp); if (s.frameCount>0) g_deathSnd[g_nDeathSnd++]=s; }
         }
-        const char *ap="assets/enemy_attack.mp3";
-        if (!FileExists(ap)) ap="../assets/enemy_attack.mp3";
+        // The shared attack roar (assets/enemy_attack.mp3) is OUT: it read as a dinosaur and played on every lunge by every kind
+        // without a cry of his own. Those kinds now lunge without one until they are given theirs (dev sound board: candidates).
+        const char *ap="assets/enemy_attack_removed.mp3";
+        if (!FileExists(ap)) ap="../assets/enemy_attack_removed.mp3";
         if (FileExists(ap)){ g_attackSnd=LoadSound(ap); g_hasAttackSnd=(g_attackSnd.frameCount>0); }
         DebugLog("enemysnd","\"deaths\":%d,\"attack\":%s", g_nDeathSnd, g_hasAttackSnd?"true":"false");
         SynthInit();
+        TrapSoundsInit();
+        for (int k=0;k<EX_N;k++) ExtraLoad(k);
         EnemyVoiceLoad();
         { const char *bg[3]={"assets/wave1_bg.mp3","assets/wave2_bg.mp3","assets/wave3_bg.mp3"};
           for (int k=0;k<3;k++) if (FileExists(bg[k])){ Music m=LoadMusicStream(bg[k]); if (IsMusicValid(m)){ m.looping=true; SetMusicVolume(m,0.0f); g_waveBg[g_nWaveBg++]=m; } }
-          DebugLog("wavebg","\"tracks\":%d", g_nWaveBg); }
+          if (g_nWaveBg==3 && FileExists("assets/extra/background-for-wave-4-onward.mp3")){ Music m=LoadMusicStream("assets/extra/background-for-wave-4-onward.mp3");   // a fourth, chosen on the dev sound board: wave 4 and every wave after
+              if (IsMusicValid(m)){ m.looping=true; SetMusicVolume(m,0.0f); g_waveBg[g_nWaveBg++]=m; g_waveBg4=1; } }
+          DebugLog("wavebg","\"tracks\":%d,\"late\":%d", g_nWaveBg, g_waveBg4); }
         { const char *gl[3]={"assets/gl_open.wav","assets/gl_insert.wav","assets/gl_shut.wav"};
           for (int k=0;k<3;k++) if (FileExists(gl[k])){ g_glSnd[k]=LoadSound(gl[k]); g_hasGlSnd[k]=(g_glSnd[k].frameCount>0); } }
         if (FileExists("assets/pickup_ammo.mp3")){ g_pkAmmoSnd=LoadSound("assets/pickup_ammo.mp3"); g_hasPkAmmoSnd=(g_pkAmmoSnd.frameCount>0); }
@@ -6727,9 +6793,10 @@ static void LoadGameAssets(void){
         { const char *p="assets/wave_clear.wav";  if (!FileExists(p)) p="../assets/wave_clear.wav";
           if (FileExists(p)){ g_clearSnd=LoadSound(p); g_hasClearSnd=(g_clearSnd.frameCount>0); SetSoundVolume(g_clearSnd,0.7f); } }
         { const char *p="assets/ak74_fire_single.mp3"; if (FileExists(p)){ g_eShotSnd=LoadSound(p); g_hasEShot=(g_eShotSnd.frameCount>0); } }
-        if (g_hasSy){ g_eBoltSnd=LoadSoundAlias(g_sy[SY_BOLT]); g_hasEBolt=1; }                        // his own sound (it was the flamethrower's recording: a flamethrower heard with none in hand)
+        if (FileExists("assets/mutant_bolt.mp3")){ g_eBoltSnd=LoadSound("assets/mutant_bolt.mp3"); g_hasEBolt=(g_eBoltSnd.frameCount>0); }   // (a recording chosen on the dev sound board)
+        else if (g_hasSy){ g_eBoltSnd=LoadSoundAlias(g_sy[SY_BOLT]); g_hasEBolt=1; }                        // his own sound (it was the flamethrower's recording: a flamethrower heard with none in hand)
         else { const char *p="assets/flame_fire.mp3";  if (FileExists(p)){ g_eBoltSnd=LoadSound(p); g_hasEBolt=(g_eBoltSnd.frameCount>0); } }
-        { const char *p="assets/wave_start.wav";  if (FileExists(p)){ g_eRaiseSnd=LoadSound(p); g_hasERaise=(g_eRaiseSnd.frameCount>0); } }
+        { const char *p="assets/priest_raise.mp3"; if (!FileExists(p)) p="assets/wave_start.wav";  if (FileExists(p)){ g_eRaiseSnd=LoadSound(p); g_hasERaise=(g_eRaiseSnd.frameCount>0); } }
         { const char *p="assets/pickup.wav";      if (!FileExists(p)) p="../assets/pickup.wav";
           if (FileExists(p)){ g_pkSnd=LoadSound(p);    g_hasPkSnd   =(g_pkSnd.frameCount>0);  SetSoundVolume(g_pkSnd,0.6f); } }
     }
@@ -7009,6 +7076,7 @@ static int C2Main(int argc, char **argv) {       // the bridge is main() there; 
 int main(int argc, char **argv) {
 #endif
 
+    setvbuf(stdout,NULL,_IOLBF,0);                            // line by line even into a pipe: tools/with-log.sh keeps the console in logs/, and a block-buffered log stayed empty while the game ran
     unsigned int seedArg=0; int seedSet=0;                    // --seed N : deterministic runs
     int fpsOv=-1;                                             // --fps N : target-fps override (perf gate)
     for (int i=1;i<argc;i++){
@@ -7039,6 +7107,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
         else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
         else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain
+        else if (!strcmp(argv[i],"--traps")){ g_trapDemo=1; g_godMode=1; g_noIntro=1; }   // dev: the trap sandbox (traps.h) -- no map, every trap in a ring
         else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
         else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
         else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
@@ -7127,7 +7196,8 @@ int main(int argc, char **argv) {
     // Everything the game needs -- sounds, guns, the eleven enemies, the map -- is loaded by LoadGameAssets. With the
     // title intro about to play it loads on a thread of its own WHILE the intro runs (the intro shows a bar instead of
     // "press any key" if it is skipped before the loading is done); otherwise here, under the loading card.
-    if (!g_mapPath && !g_soundboard && !g_viewA && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
+    if (!g_mapPath && !g_soundboard && !g_viewA && !g_trapDemo && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
+    if (g_trapDemo) TrapsInit();
     g_loadMap = (g_mapPath && !g_soundboard && !g_viewA);
     int introQuit=0;
     g_stageLoad = (!g_soundboard && !g_viewA && g_forceEnemy==-1 && !g_devBoss && !g_stress && !getenv("CHERNOBYL_LOAD_ALL"));
@@ -7139,6 +7209,7 @@ int main(int argc, char **argv) {
         g_introPlayed=intro;
     } else LoadGameAssets();
     if (introQuit){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
+    if (!g_soundboard) SoundsApplyOff();                 // sounds switched off on the dev sound board stay off in the game
 
     if (g_soundboard){                  // --sounds: the sound board, no map, no game
         int r=RunSoundboard();
@@ -7152,13 +7223,13 @@ int main(int argc, char **argv) {
     }
 
 #if defined(__EMSCRIPTEN__)
-    if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
-    if (!g_mapPath){ char *p=RunMapSelect(); if (p) g_mapPath=p; }
+    if (!g_mapPath && !g_trapDemo && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
+    if (!g_mapPath && !g_trapDemo){ char *p=RunMapSelect(); if (p) g_mapPath=p; }
     StartSelectedMap();
     WebMouseInit();
     emscripten_set_main_loop(WebFrame,0,1);
 #elif defined(C2_IOS)
-    if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
+    if (!g_mapPath && !g_trapDemo && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
     StartSelectedMap();
     return 0;                                   // the display link calls ChernobylGameStep from here on
 #else
@@ -7168,8 +7239,8 @@ int main(int argc, char **argv) {
     // straight away; the picker is only a fallback if the arena file is missing. "Restart
     // Run" (ESC menu) and the death screen loop back here and reload it.
     for (;;){
-        if (!g_mapPath && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
-        if (!g_mapPath){
+        if (!g_mapPath && !g_trapDemo && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
+        if (!g_mapPath && !g_trapDemo){
             char *p=RunMapSelect();
             if (!p){ if (g_mapListN>0){ DebugLog("mapselect","\"quit\":true"); break; } } // user quit (no maps -> arena)
             else { g_mapPath=p; g_mapPathOwned=1; DebugLog("mapselect","\"path\":\"%s\"", JStr(g_mapPath)); }

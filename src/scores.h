@@ -191,7 +191,7 @@ static int LbDeadUpdate(void){
         if ((enter || autoGo) && g_lb.n>0){
             if (g_lb.busy) return 0;                      // the board fetch is still out: next frame
             if (!getenv("CHERNOBYL_SCORES_AUTO")){ strcpy(g_lbSaved,g_lb.ini); SaveOptions(); }   // (a test run's initials are not the player's)
-            g_lb.state=LB_POSTING; LbSpawn(1);
+            g_lb.state=LB_POSTING; LbSpawn(1); ExtraPlay(EX_RANK,0.8f);                      // the score goes up
             DebugLog("score","\"post\":\"%s\",\"score\":%d", g_lb.ini, g_lb.score);
             return 0; }
         return click;                                     // a click skips the board and plays again

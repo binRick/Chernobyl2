@@ -177,6 +177,8 @@ static int RunIntro(void){
                 float a=0.55f+0.45f*sinf((float)GetTime()*3.2f);
                 float sw=(float)GetScreenWidth(), sh=(float)GetScreenHeight();
                 float sc=sh/720.0f;
+                { Rectangle bk={sw*0.5f-pt2.width*sc*0.5f+190.0f*sc, sh*0.905f-pt2.height*sc*0.5f+2.0f*sc, pt2.width*sc-380.0f*sc, pt2.height*sc-14.0f*sc};   // a dark plate under it: the emblem's
+                  DrawRectangleRounded(bk,0.35f,10,(Color){0,0,0,205}); DrawRectangleRoundedLines(bk,0.35f,10,(Color){150,24,18,200}); }                    // handle runs through here, red under the red line
                 DrawTextureEx(pt2,(Vector2){sw*0.5f-pt2.width*sc*0.5f, sh*0.905f-pt2.height*sc*0.5f},0.0f,sc,
                               (Color){255,255,255,(unsigned char)(a*255)});
             }

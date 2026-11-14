@@ -124,6 +124,22 @@ def main():
         if f.endswith((".mp3", ".wav", ".txt")) or f == "icon.png":
             other += copy("assets/" + f)
     for f in sorted(os.listdir(os.path.join(REPO, "assets", "voice"))): other += copy("assets/voice/" + f)
+    # the traps (src/traps.h): their models as they are, their textures at 512 px as JPEG (the game looks for .jpg where
+    # there is no .png: 55 MB of PNG becomes about 2), any recordings applied to them; and the event sounds chosen on the
+    # dev sound board (assets/extra). assets/candidates is the board's holding folder: never packed.
+    td = os.path.join(REPO, "assets", "traps")
+    if os.path.isdir(td):
+        os.makedirs(os.path.join(OUT, "assets", "traps"), exist_ok=True)
+        for f in sorted(os.listdir(td)):
+            if f.endswith(".png"):
+                im = Image.open(os.path.join(td, f)).convert("RGB"); im.thumbnail((512, 512), Image.LANCZOS)
+                dst = os.path.join(OUT, "assets", "traps", f[:-4] + ".jpg"); im.save(dst, quality=88); other += os.path.getsize(dst)
+            elif f.endswith((".gltf", ".bin", ".txt", ".mp3", ".wav")): other += copy("assets/traps/" + f)
+    ed = os.path.join(REPO, "assets", "extra")
+    if os.path.isdir(ed):
+        os.makedirs(os.path.join(OUT, "assets", "extra"), exist_ok=True)
+        for f in sorted(os.listdir(ed)):
+            if f.endswith((".mp3", ".wav")): other += copy("assets/extra/" + f)
     # the default map + only the textures it names (any extension), capped at 1024 px
     other += copy("maps/chernobyl.map")
     if os.path.exists(os.path.join(REPO, "maps", "chernobyl.map.bake")): other += copy("maps/chernobyl.map.bake")   # the baked lighting (mapload.h keys it to the map's bytes: a stale one is ignored), so the browser need not bake
