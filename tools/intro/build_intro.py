@@ -163,8 +163,8 @@ KICK = [    # 40 beats from the kick; flashes on downbeats
     ("parade1990.mp4", 3355.0, 1, "glitch"),        # tanks on Red Square
     ("radiological.mp4", 89.0, 1, "shake"),         # the plant in fog
     ("pripyat_film_0426.mp4", 257.0, 1, "flash red"),
-    ("disaster2.mp4", 14.0, 8, "flash"),            # the Mi-8: its rotor takes the crane cable, the blades fly off, it falls
-    ("doc_subs.mp4", 22.0, 4, "slow"),              # SUB 4: "Any questions?" -- the wall goes up
+    ("disaster2.mp4", 13.9, 12, "flash"),           # the Mi-8: its rotor takes the crane cable, the blades fly off, it falls -- all the way
+                                                    # down, as the music thins (the owner's cut: the wall going up was here; SUB 4 stays, over the fall)
     ("BLACK", 0, 2, ""),                            # breath ...
 ]
 TITLE = [("aerial.mp4", 27.0, None, "slow title")]   # the sarcophagus-to-be, under the title
@@ -549,7 +549,9 @@ def main():
             tag, lines, ru = next(subs)
             p = os.path.join(ovl, f"{tag}.png"); sub_png(lines, p, ru)
             starts.append([t0 + 0.08, p])
-    starts[-1][0] -= 2 * P                       # "Any questions?" lands two beats earlier
+    tag, lines, ru = next(subs)                  # SUB 4, "Any questions?": its own shot is gone; it lands where it always did,
+    p = os.path.join(ovl, f"{tag}.png"); sub_png(lines, p, ru)          # eight beats before the title, over the falling helicopter
+    starts.append([T_TITLE - 8 * P + 0.08, p])
     for st in starts:                            # never on screen with the date card
         st[0] = max(st[0], DATE_END + 0.25)
     for k, (a, p) in enumerate(starts):          # hold ~5 s: readable, carried over the next shots
