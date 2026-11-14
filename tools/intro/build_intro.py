@@ -48,9 +48,9 @@ CROP = {
 
 # ------------------------------------------------------------------ music timing
 ANTHEM_IN = 1.0          # brass intro starts
-ANTHEM_LEN = 22.3        # anthem section length: the good times (the first cut was 14 s; the soldiers' dance and the disco were added, nothing taken out)
-GLITCH_LEN = 3.0         # the disaster transition
-STALL = 1.2              # last good shot stalls while the anthem tape-stops; then the blast
+ANTHEM_LEN = 21.8        # anthem section length: the good times (the first cut was 14 s; the soldiers' dance and the disco were added, nothing taken out)
+GLITCH_LEN = 3.8         # the disaster transition
+STALL = 2.0              # last good shot stalls while the anthem tape-stops; then the blast
 HM_KICK_SRC = 32.30      # Hell March: full band slams in here (measured)
 BUILD_BEATS = 36         # Hell March build-up before the kick
 KICK_BEATS = 48          # fast-cut section, then the title slam
@@ -84,7 +84,6 @@ ANTHEM = [
     ("parade1990.mp4", 183.0, 1.8, "zoom"),         # Red Square, Kremlin
     ("soldiers_dance.mp4", 26.0, 1.3, ""),          # two soldiers dance against the sky
     ("newsreel1961.mp4", 95.0, 1.6, ""),            # Khrushchev waves from the mausoleum
-    ("women.mp4", 88.3, 1.3, ""),                   # the disco: girls laughing as they dance
     ("parade1990.mp4", 2930.0, 1.6, ""),            # ranks goose-stepping
     ("soldiers_dance.mp4", 184.3, 1.1, ""),         # a leap into the splits, high over the hill
     ("mayday1958.mp4", 789.0, 1.2, "zoom"),         # Marx banner
@@ -97,9 +96,10 @@ ANTHEM = [
     ("pripyat_may86.mp4", 131.5, 1.0, ""),          # the Ferris wheel turning
     ("pripyat_may86.mp4", 236.0, 0.8, ""),          # waving girls
     ("aerial.mp4", 1.0, 1.0, "slow"),               # the plant, intact ... (pans toward unit 4)
+    ("aerial.mp4", 6.0, 0.8, "slow"),               # ... (this was the shot that stalled; the grin has that now, and the plant keeps its place)
 ]
 GLITCH = [  # good times -> disaster: stall, blast, strobe, black + date card (sums to GLITCH_LEN)
-    ("aerial.mp4", 6.0, STALL, "stall"),            # the intact plant slows, trembles, darkens
+    ("women.mp4", 88.75, STALL, "stall"),           # the last of the good times: a girl's grin at the disco slows, trembles and darkens as the anthem runs down (the owner's idea)
     ("WHITE", 0, 0.16, ""),                         # the blast: white-out
     ("aerial.mp4", 21.4, 0.12, "glitch red"),
     ("pd_compilation.ogv", 41.5, 0.10, "glitch"),
