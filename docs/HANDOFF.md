@@ -34,12 +34,11 @@ purpose.
 | Browser game | <https://chernobyl2.ximg.app/game/> | game repo `9f8aa09`, site repo `0f627071`, server fast-forwarded |
 | Intro as one video, with sound | <https://chernobyl2.ximg.app/intro.mp4> | the current cut; does not follow later recuts by itself |
 | YouTube | <https://youtu.be/OdMbkCDGKUA> | public, the current cut. The first upload was deleted at the owner's request |
-| Playcocola round | <https://app.playcocola.com/front/playtest_rounds/01m7c400hj3mvxr6rk0xrxteey> | **Draft**; see `docs/PLAYTESTING.md` |
+| Playcocola round | <https://app.playcocola.com/front/playtest_rounds/01m7c400hj3mvxr6rk0xrxteey> | **In review** since 2026-11-14 (Public, survey entered); see `docs/PLAYTESTING.md` |
 
 ## Waiting on the owner
 
-- **Playcocola:** Private or Public (either sends it to their review), and whether to enter and save the eight
-  survey questions. Nothing is typed into the survey editor.
+- **Playcocola:** decided on 2026-11-14: Public, with the eight survey questions entered. Waiting on their review.
 - **Bosses and traps:** whether a trap should kill a boss outright as well.
 - **Site pages:** the changelog and play pages are behind the game (no holes, traps, new intro, or the fixes of
   13 and 14 November; the play page still says the browser build skips the intro). Playtesters are sent to the
