@@ -3175,7 +3175,7 @@ static int g_trapDemo; static void TrapsUpdate(float dt); static void TrapsDraw(
 static int TrapBlocked(float x, float z, float pad); static void TrapPushPlayer(void); static void TrapPushEnemy(int i); static int TrapMarks(Vector3 *pos, int *ready, int max);
 static int EnemyMoveOK(float x, float z, float curY){
     if (!g_mapCol.ready) return 1;
-    if (HoleAt(x,z,0.30f)>=0) return 0;                 // a breach in the floor: round it, not into it
+    if (HoleAt(x,z,HOLE_KEEPOUT)>=0) return 0;          // a breach in the floor: round it, not into it
     float top=curY+ENEMY_STEP, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
     if (fd<=0) return 0;                                // no floor under the spot -> the void
     float ny=top-fd;                                   // destination floor height
@@ -4664,7 +4664,7 @@ static void Update(void) {
     if (devKeys && IsKeyPressed(KEY_V)) g_inspect=!g_inspect;
     if (IsKeyPressed(KEY_G)){ g_godMode=!g_godMode; if (g_godMode){ g_playerHp=100.0f; g_cheatUsed=1; }   // refill on re-enable; the run is tagged
         DebugLog("mode","\"godMode\":%s", g_godMode?"true":"false"); }
-    if (IsKeyPressed(KEY_F) && g_hasMap){ g_noclip=!g_noclip; g_vy=0.0f;   // map: fly/noclip <-> walk
+    if (devKeys && IsKeyPressed(KEY_F) && g_hasMap){ g_noclip=!g_noclip; g_vy=0.0f; if (g_noclip) g_cheatUsed=1;   // map: fly/noclip <-> walk. Not in the browser build: F is beside the movement keys, and a player who brushed it flew through the walls. The run is tagged
         DebugLog("mode","\"noclip\":%s", g_noclip?"true":"false"); }
     if (devKeys && IsKeyPressed(KEY_N)){               // N: toggle orient mode (no enemies, weapon-aim tuning)
         g_noEnemies=!g_noEnemies;
@@ -5585,7 +5585,7 @@ static void DrawViewmodel(void){
 // hostiles are dots in their kind's colour (the boss larger, ringed), pickups are small
 // squares and the power-ups pulse. When something is close BEHIND you the lower half glows red.
 static void DrawMinimap(int W, int H){
-    (void)H; if (!g_hasMap || !g_navOK || g_dead) return;
+    (void)H; (void)TrapMarks; if (!g_hasMap || !g_navOK || g_dead) return;      // (TrapMarks: the traps were on the dial once; kept for the day they return)
     const int cx=W-96, cy=196, R=78; const float mpp=0.34f;        // metres per pixel: the disc shows ~26 m around you
     Vector3 fw=Vector3Subtract(g_cam.target,g_cam.position); float fl=sqrtf(fw.x*fw.x+fw.z*fw.z);
     if (fl<1e-4f) return; float fx=fw.x/fl, fz=fw.z/fl, rx=-fz, rz=fx;
@@ -5602,35 +5602,17 @@ static void DrawMinimap(int W, int H){
         DrawRectangle(cx+(int)sx-cs/2, cy-(int)sy-cs/2, cs, cs, (Color){86,52,38,235});
     }
     int rear=0;
-    for (int i=0;i<MAX_PICKUPS;i++){ const Pickup *k=&g_pk[i]; if (!k->active) continue;
-        float wx=k->pos.x-g_pos.x, wz=k->pos.z-g_pos.z, sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp;
-        if (sx*sx+sy*sy>=(float)((R-4)*(R-4))) continue;
-        int px=cx+(int)sx, py=cy-(int)sy;
-        Color col = k->type==PK_QUAD ? (Color){220,80,230,255} : k->type==PK_SPEED ? (Color){60,210,255,255}
-                  : k->type==PK_AMMO ? (Color){230,190,50,255} : (Color){230,60,60,255};
-        DrawRectangle(px-3,py-3,6,6,col);
-        if (k->type==PK_QUAD || k->type==PK_SPEED || k->type==PK_MEGA){ float pu=0.6f+0.4f*sinf((float)GetTime()*5.0f+(float)i); DrawCircleLines(px,py,6+3*pu,Fade(col,0.85f)); }
-    }
+    // Only the hostiles are marked (the owner's call: pickups and traps on the dial made it hard to tell what was what).
     for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i]; if (e->state!=1) continue;
         float wx=e->pos.x-g_pos.x, wz=e->pos.z-g_pos.z, sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp;
         if (sy<0 && wx*wx+wz*wz<12.0f*12.0f) rear=1;
         float d2=sx*sx+sy*sy, lim=(float)((R-4)*(R-4));
         int far=(d2>=lim); if (far){ float k=sqrtf(lim/d2); sx*=k; sy*=k; }   // beyond the dial's reach: pinned to its rim, in his direction -- every hostile left can be found
-        static const Color kDot[EN_NTYPES]={ {235,230,220,255},{235,230,220,255},{200,120,110,255},{200,200,150,255},{255,200,80,255},
-                                             {120,175,85,255},{120,175,85,255},{150,235,90,255},{175,95,210,255},{255,135,45,255},{225,60,95,255} };
-        Color col=kDot[e->type]; int px=cx+(int)sx, py=cy-(int)sy;
-        if (e->boss){ DrawCircle(px,py,7,(Color){255,200,80,255}); DrawCircleLines(px,py,10,(Color){255,90,70,255}); }
+        const Color col={255,40,34,255}; int px=cx+(int)sx, py=cy-(int)sy;                   // every hostile is RED (one colour to read at a glance; a dark edge keeps it off the brown walls and the rear glow)
+        if (e->boss){ DrawCircle(px,py,8,(Color){0,0,0,230}); DrawCircle(px,py,7,col); DrawCircleLines(px,py,10,(Color){255,200,80,255}); }
         else if (far){ DrawCircle(px,py,3,Fade(col,0.85f)); DrawCircleLines(px,py,5,Fade(col,0.45f)); }      // (smaller, ringed: a bearing, not a position)
-        else DrawCircle(px,py,e->riseT>0?3:4,e->riseT>0?Fade(col,0.55f):col);
+        else { int r=e->riseT>0?3:4; DrawCircle(px,py,r+1,(Color){0,0,0,200}); DrawCircle(px,py,r,e->riseT>0?Fade(col,0.6f):col); }
     }
-    { Vector3 tp[32]; int tr[32], tn=TrapMarks(tp,tr,32);                                      // the traps, pinned to the rim when out of range like everything else
-      for (int i=0;i<tn;i++){ float wx=tp[i].x-g_pos.x, wz=tp[i].z-g_pos.z, sx=(wx*rx+wz*rz)/mpp, sy=(wx*fx+wz*fz)/mpp, d2=sx*sx+sy*sy, lim=(float)((R-5)*(R-5));
-          int far=(d2>=lim); if (far){ float k=sqrtf(lim/d2); sx*=k; sy*=k; }
-          // a DIAMOND, cyan (no hostile is), white-edged and bigger than any dot: filled and pulsing when it can be set off, hollow while it recharges
-          Vector2 p={(float)(cx+(int)sx),(float)(cy-(int)sy)}; float r=(far?6.0f:7.5f)+(tr[i]?1.2f*sinf((float)GetTime()*5.0f+i):0.0f);
-          DrawPoly(p,4,r+2.5f,0.0f,(Color){0,0,0,230});
-          DrawPoly(p,4,r,0.0f,(tr[i]==1)?(Color){40,225,255,255}:(tr[i]==2)?(Color){255,190,40,255}:(Color){30,60,70,255});         // cyan: can be armed; amber: armed, waiting; dark: going off / recharging
-          DrawPolyLinesEx(p,4,r+0.5f,0.0f,1.6f,tr[i]?(Color){255,255,255,255}:(Color){40,225,255,255}); } }
     if (rear){ float pu=0.5f+0.5f*sinf((float)GetTime()*6.0f); unsigned char a=(unsigned char)(40+60*pu);   // something close behind: the rear half glows
         for (int dy=0;dy<R;dy++){ int span=(int)sqrtf((float)(R*R-dy*dy)); DrawRectangle(cx-span,cy+dy,span*2,1,(Color){200,50,50,a}); } }
     DrawTriangle((Vector2){(float)cx,(float)(cy-9)},(Vector2){(float)(cx-6),(float)(cy+5)},(Vector2){(float)(cx+6),(float)(cy+5)},(Color){255,230,120,255});

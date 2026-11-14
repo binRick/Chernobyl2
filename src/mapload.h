@@ -497,6 +497,11 @@ static int MapSphereHitsWall(Vector3 c, float radius){
 // Build the walkable nav grid: flood-fill outward along the floor from `seed`,
 // stepping to a neighbour cell only when there's floor within step range there
 // and no wall in the way. Done once after the map+spawn are known.
+#define HOLE_KEEPOUT 0.30f     // how far back from a breach's mouth an enemy's feet stay. The route grid and the move test (EnemyMoveOK) must agree on it
+static int NavInHole(float x, float z){
+    for (int h=0;h<g_nMapHoles;h++) if (fabsf(x-g_mapHoles[h].pos.x)<g_mapHoles[h].hx+HOLE_KEEPOUT && fabsf(z-g_mapHoles[h].pos.z)<g_mapHoles[h].hz+HOLE_KEEPOUT) return 1;
+    return 0;
+}
 static void MapNavBuild(Vector3 seed){
     g_navOK=0; if (!g_mapCol.ready) return;
     AOGrid *g=&g_mapCol.grid;
@@ -528,7 +533,16 @@ static void MapNavBuild(Vector3 seed){
             if (nx<0||nz<0||nx>=g_navNX||nz>=g_navNZ) continue;
             int nci=nz*g_navNX+nx;
             float wx=g_navMn.x+(nx+0.5f)*g_navCS, wz=g_navMn.z+(nz+0.5f)*g_navCS;
+            // A breach in the floor is not a way through. Its mouth is cut ragged, so there is floor inside the box the enemies
+            // are kept out of; left on the grid, the flow ran straight over it and an enemy across a breach from the player
+            // walked at its edge for ever instead of going round.
+            if (NavInHole(wx,wz)) continue;
+            // The probe for the floor is tried a hair to the side as well: a ray dropped exactly on the seam between two floor slabs
+            // hits neither, and a seam that falls on a line of cell centres (x=38 did, the length of the hall) reads as a crack
+            // the whole grid is cut along.
             float t=h+NAV_STEPUP, dd=MapRayNearest((Vector3){wx,t,wz},(Vector3){0,-1,0},NAV_STEPUP+NAV_STEPDOWN);
+            if (dd<=0) dd=MapRayNearest((Vector3){wx+0.07f,t,wz+0.05f},(Vector3){0,-1,0},NAV_STEPUP+NAV_STEPDOWN);
+            if (dd<=0) dd=MapRayNearest((Vector3){wx-0.05f,t,wz-0.07f},(Vector3){0,-1,0},NAV_STEPUP+NAV_STEPDOWN);
             if (dd<=0) continue; float nh=t-dd;
             if (nh<h-NAV_STEPDOWN || nh>h+NAV_STEPUP) continue;            // too big a step
             // Multi-storey: a column can hold several layers, so DON'T reject it just because
@@ -630,8 +644,20 @@ static int MapNavSteer(Vector3 from, Vector3 *dir){
     if (!g_navOK) return 0;
     int cx=(int)((from.x-g_navMn.x)/g_navCS), cz=(int)((from.z-g_navMn.z)/g_navCS);
     if (cx<0||cz<0||cx>=g_navNX||cz>=g_navNZ) return 0;
-    int ci=cz*g_navNX+cx; int l=NavLayer(ci,from.y); if (l<0) return 0;   // match the enemy's storey
-    int node=ci*NAV_MAXL+l; if (g_navDist[node]<0) return 0;
+    int ci=cz*g_navNX+cx; int l=NavLayer(ci,from.y);                      // match the enemy's storey
+    if (l<0 || g_navDist[ci*NAV_MAXL+l]<0){                               // standing just off the grid (a breach's lip, hard against a wall): make for the
+        int best=-1; float bx=0, bz=0;                                    // nearest cell that IS on it -- a beeline from here goes into what he is beside
+        for (int dz=-2;dz<=2;dz++) for (int dx=-2;dx<=2;dx++){
+            int x=cx+dx, z=cz+dz; if (x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
+            int c=z*g_navNX+x, k=NavLayer(c,from.y); if (k<0) continue;
+            int d=g_navDist[c*NAV_MAXL+k]; if (d<0) continue;
+            d=d*4+dx*dx+dz*dz;                                            // (nearer the player first, then nearer him)
+            if (best<0 || d<best){ best=d; bx=g_navMn.x+(x+0.5f)*g_navCS-from.x; bz=g_navMn.z+(z+0.5f)*g_navCS-from.z; }
+        }
+        float bl=sqrtf(bx*bx+bz*bz); if (best<0 || bl<1e-4f) return 0;
+        *dir=(Vector3){bx/bl,0,bz/bl}; return 1;
+    }
+    int node=ci*NAV_MAXL+l;
     float h=g_navFloor[node], wall=(float)g_navDist[node]+NAV_WALLPUSH, eps=g_navCS;
     float e=MapNavCostAt(from.x+eps,from.z,h,wall), w=MapNavCostAt(from.x-eps,from.z,h,wall);
     float s=MapNavCostAt(from.x,from.z+eps,h,wall), n=MapNavCostAt(from.x,from.z-eps,h,wall);
