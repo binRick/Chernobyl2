@@ -170,7 +170,8 @@
     window.__c2_hold=true;                       // this page starts the game itself (see WebFrame)
     if (autostart) window.__c2_go=true;
     window.__c2_ready=function(){ setReady(); if (autostart) gate.style.display='none'; };
-    var argm=qs.match(/[?&]args=([^&]*)/);                         // dev: ?args=--god,--kite passes game flags
+    var local=/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+    var argm=local ? qs.match(/[?&]args=([^&]*)/) : null;          // dev: ?args=--god,--kite passes game flags -- from this machine only: on the public site they were cheats in the address bar
     // Every file of a build is asked for under that build's number. A browser that kept an old index.js would otherwise pair
     // it with the new .wasm and stop dead ("ASM_CONSTS[code] is not a function"); a new build is a new address for all of it.
     var BUILD='__C2_BUILD__'; window.__c2_v=parseInt(BUILD,10)||0;
