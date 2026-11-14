@@ -7027,7 +7027,7 @@ static void WebMiss(const char *f){ int t=WebTypeOf(f); if (t<0) return;
 static void WebFetchLater(void){
     static const char *suf[4]={".glb","_lod.glb",".gait",".climb"};
     for (int k=0;k<g_nDefer;k++){ int t=g_defer[k]; g_webPend[t]=4;
-        for (int q=0;q<4;q++){ char p[96]; snprintf(p,sizeof p,"assets/%s%s",kEnemy[t].name,suf[q]); emscripten_async_wget(p,p,WebGot,WebMiss); } }
+        for (int q=0;q<4;q++){ char p[96], u[128]; snprintf(p,sizeof p,"assets/%s%s",kEnemy[t].name,suf[q]); snprintf(u,sizeof u,"%s?v=%d",p,EM_ASM_INT({ return window.__c2_v|0; })); emscripten_async_wget(u,p,WebGot,WebMiss); } }   // (asked for under this build's number, like the rest: never a cached copy from another build)
 }
 #endif
 // Once a frame: take in whatever enemy has finished loading. Threaded: the loader's finished rig is copied into place and its

@@ -161,7 +161,11 @@
     if (autostart) window.__c2_go=true;
     window.__c2_ready=function(){ setReady(); if (autostart) gate.style.display='none'; };
     var argm=qs.match(/[?&]args=([^&]*)/);                         // dev: ?args=--god,--kite passes game flags
+    // Every file of a build is asked for under that build's number. A browser that kept an old index.js would otherwise pair
+    // it with the new .wasm and stop dead ("ASM_CONSTS[code] is not a function"); a new build is a new address for all of it.
+    var BUILD='__C2_BUILD__'; window.__c2_v=parseInt(BUILD,10)||0;
     var Module = {
+      locateFile: function(p){ return p+'?v='+BUILD; },
       arguments: argm ? decodeURIComponent(argm[1]).split(',') : [],
       canvas: canvas,
       print: function(t){ console.log(t); },
