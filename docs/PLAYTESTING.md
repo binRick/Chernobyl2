@@ -11,7 +11,7 @@ voice when they think aloud, while they play; the developer watches the sessions
 |---|---|
 | Round | [Chernobyl 2: LIQUIDATOR](https://app.playcocola.com/front/playtest_rounds/01m7c400hj3mvxr6rk0xrxteey) (developer sign-in needed) |
 | Created | 2026-11-14 |
-| Status | **In review.** Set to Public and sent to Playcocola's review on 2026-11-14 (usually within 2 working days). Nothing is published until they approve it; once approved it is listed and announced once to every Playcocola playtester. |
+| Status | **Approved and live, Public** (approved 2026-11-14, the same day it was sent). Listed for every Playcocola playtester and announced to them. Invitation link to share: <https://app.playcocola.com/i/01m7c400hj3mvxr6rk0xrxteey>. Playcocola's founder offered, at no cost, to send a request to their community for playtesters; not yet answered. |
 | Open until | 2026-11-29 (15 days, the most the site allows) |
 | Cost | Free. Money is only spent if a Bounty (paid sessions) is created. None has been. |
 | Build tested | The browser build at <https://chernobyl2.ximg.app/game/>, commit `a1e19b6`. No download was uploaded. |
@@ -73,7 +73,7 @@ soon after they arrive.
 Known gap: the site's changelog and play pages are behind the game (no holes, traps, new intro or the fixes of
 13 and 14 November), and testers are pointed at the changelog after their session.
 
-### Survey (entered, in review with the round)
+### Survey (live)
 
 Asked in the recording client right after a tester clicks Finish; eight questions is the limit. Entered in the
 site's survey editor and saved on 2026-11-14, then read back from the survey page: all eight match the table.
