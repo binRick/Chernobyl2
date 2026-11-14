@@ -33,6 +33,8 @@
   #card #ipress { inset:auto; left:50%; top:90.5%; width:59.4%; height:auto; transform:translate(-50%,-50%); opacity:0; }
   #card #ipress.on { animation:pulse 1.96s ease-in-out infinite; opacity:1; }
   #iload { position:absolute; left:0; right:0; top:90.5%; transform:translateY(-50%); text-align:center; color:#aaa69c; font-size:min(2.2vw,16px); letter-spacing:2px; }
+  #snd { position:absolute; left:50%; top:7%; transform:translateX(-50%); display:none; padding:12px 26px; background:rgba(0,0,0,.78); border:1px solid #c0392b; color:#f1ead8; font-size:20px; letter-spacing:3px; white-space:nowrap; cursor:pointer; animation:sndp 1.3s ease-in-out infinite; }
+  @keyframes sndp { 0%,100% { opacity:.55 } 50% { opacity:1 } }
   #note { position:absolute; right:14px; bottom:10px; color:#8d8980; font-size:12px; letter-spacing:1px; text-shadow:0 0 4px #000; }
   #fade { position:fixed; inset:0; background:#000; opacity:0; z-index:30; pointer-events:none; transition:opacity 1.2s linear; }
   @keyframes flicker { 0% { filter:brightness(.93); } 33% { filter:brightness(1); } 66% { filter:brightness(.96); } }
@@ -57,6 +59,7 @@
       <img id="ititle" alt=""><img id="ictl" alt=""><img id="ipress" alt="">
       <div id="iload"></div>
     </div>
+    <div id="snd">&#9834; &nbsp;CLICK OR PRESS ANY KEY FOR SOUND</div>
     <div id="note"></div>
   </div>
   <div id="fade"></div>
@@ -73,6 +76,7 @@
     // title card with the controls and PRESS ANY KEY -- all while the game downloads behind it.
     // The picture follows the music's clock, as on desktop. Stages: 0 none, 1 montage, 2 title, 3 leaving.
     var music=null, stage=0, stageAt=0, tStamp=55.0, tEnd=59.0, introOK=false;
+    var inStep=false;       // the music has been set to the picture's time (until then the picture must not follow it)
     var soundOn=false;      // the music is playing. A browser lets a page start sound only on a click or a key; the PICTURE needs neither (the video is muted), so it starts at once and the music joins on the first input
     if (wantIntro){
       vid.src='intro.mp4'; music=new Audio('intro_music.mp3'); music.preload='auto'; music.loop=true;
@@ -93,17 +97,18 @@
     function startIntro(){
       gate.style.display='none'; intro.style.display='flex'; setStage(1);
       var p=music.play();
-      if (p && p.then) p.then(function(){ soundOn=true; console.log('intro: playing, with sound'); }).catch(function(){ soundOn=false; console.log('intro: playing, silent until a click or key'); });
+      if (p && p.then) p.then(function(){ soundOn=true; inStep=true; console.log('intro: playing, with sound'); }).catch(function(){ soundOn=false; console.log('intro: playing, silent until a click or key'); });
       p=vid.play(); if (p && p.catch) p.catch(function(){ toTitle(false); });
       requestAnimationFrame(tick);
     }
     function tick(){
       if (stage===0 || stage===3) return;
+      $('snd').style.display = (!soundOn && stage===1) ? 'block' : 'none';       // a browser will not start sound unasked: say so, plainly, until it has been asked
       if (stage===1){
-        var c=soundOn ? music.currentTime : vid.currentTime;                     // (silent so far: the picture keeps its own time)
-        if (soundOn && Math.abs(vid.currentTime-c)>0.25 && vid.readyState>=2 && c<vid.duration-0.3){ try { vid.currentTime=c; } catch(e){} }   // the picture follows the music
+        var c=(soundOn && inStep) ? music.currentTime : vid.currentTime;                     // (silent so far: the picture keeps its own time)
+        if (soundOn && inStep && Math.abs(vid.currentTime-c)>0.25 && vid.readyState>=2 && c<vid.duration-0.3){ try { vid.currentTime=c; } catch(e){} }   // the picture follows the music
         if (vid.ended || c>=tEnd-0.05) toTitle(false);
-        note.textContent = (soundOn ? '' : 'click or press a key for sound') + ((!soundOn && !ready) ? '   ·   ' : '') + (ready ? '' : 'loading '+pct+'%');
+        note.textContent = ready ? '' : 'loading '+pct+'%';
       } else if (stage===2){
         var t=now()-stageAt; note.textContent='';
         if (t>0.9 && ready){ ipress.className='on'; iload.textContent=''; }
@@ -126,8 +131,12 @@
     }
     function introInput(e){
       if (!soundOn && music && (stage===1 || stage===2)){                        // the first input: the music comes in, in step with the picture (and is not a skip)
-        try { music.currentTime = (stage===1) ? vid.currentTime : Math.max(0,tStamp+Math.min(4,now()-stageAt)); } catch(x){}
-        var p=music.play(); soundOn=true; if (p && p.catch) p.catch(function(){ soundOn=false; });
+        var at = (stage===1) ? vid.currentTime : Math.max(0,tStamp+Math.min(4,now()-stageAt));
+        music.muted=false; music.volume=1;
+        var p=music.play(); soundOn=true;
+        var seek=function(){ try { if (Math.abs(music.currentTime-at)>0.3) music.currentTime=at+(now()-t0); } catch(x){} inStep=true; }, t0=now();
+        if (music.readyState>=1) seek(); else music.addEventListener('loadedmetadata', seek, {once:true});      // (not loaded far enough to seek yet: as soon as it is)
+        if (p && p.then) p.then(function(){ console.log('intro: sound on at '+at.toFixed(1)+'s'); }).catch(function(e){ soundOn=false; console.log('intro: sound refused: '+e); });
         if (stage===1) return;
       }
       if (stage===1){ if (now()-stageAt>1.5) toTitle(true); }
@@ -139,6 +148,7 @@
       e.preventDefault(); introInput(e);
     }, true);
     intro.addEventListener('mousedown', introInput);
+    intro.addEventListener('touchend', function(e){ e.preventDefault(); introInput(e); }, {passive:false});
     // ---- the gate: before anything -----------------------------------------------------------
     // With the intro: clickable at once (a browser only lets sound start on a click), and the
     // download carries on under the montage. Without it: as before, click once the game is loaded.
