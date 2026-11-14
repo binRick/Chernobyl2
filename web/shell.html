@@ -69,6 +69,7 @@
     var gate=$('gate'), fill=$('fill'), cta=$('cta'), sub=$('sub'), canvas=$('canvas');
     var intro=$('intro'), vid=$('ivid'), card=$('card'), ictl=$('ictl'), ipress=$('ipress'), iload=$('iload'), note=$('note'), fade=$('fade');
     var ready=false, pct=0;                       // the game has loaded / how far along the download is
+    var BUILD='__C2_BUILD__', V='?v='+BUILD;       // this build's number: every file is asked for under it (see Module.locateFile), the intro's too -- an old video kept by a browser would play against the new music and timings
     var qs=location.search, autostart=/[?&]autostart=1/.test(qs);      // dev: no gate, no intro (headless screenshots)
     var wantIntro=!autostart && !/[?&]nointro=1/.test(qs);
     // ---- the title intro ------------------------------------------------------------------
@@ -79,11 +80,11 @@
     var inStep=false;       // the music has been set to the picture's time (until then the picture must not follow it)
     var soundOn=false;      // the music is playing. A browser lets a page start sound only on a click or a key; the PICTURE needs neither (the video is muted), so it starts at once and the music joins on the first input
     if (wantIntro){
-      vid.src='intro.mp4'; music=new Audio('intro_music.mp3'); music.preload='auto'; music.loop=true;
-      $('ititle').src='intro_title.jpg'; ictl.src='intro_controls.png'; ipress.src='intro_press.png';
+      vid.src='intro.mp4'+V; music=new Audio('intro_music.mp3'+V); music.preload='auto'; music.loop=true;
+      $('ititle').src='intro_title.jpg'+V; ictl.src='intro_controls.png'+V; ipress.src='intro_press.png'+V;
       vid.addEventListener('loadedmetadata', function(){ introOK=true; refreshGate(); if (stage===0) startIntro(); });   // as soon as it can play, it plays: no click to see it (as the desktop game opens)
       vid.addEventListener('error', function(){ introOK=false; wantIntro=false; refreshGate(); });
-      fetch('intro_times.txt').then(function(r){ return r.ok ? r.text() : ''; }).then(function(t){
+      fetch('intro_times.txt'+V).then(function(r){ return r.ok ? r.text() : ''; }).then(function(t){
         var m; if ((m=t.match(/stamp\s+([\d.]+)/))) tStamp=parseFloat(m[1]); if ((m=t.match(/end\s+([\d.]+)/))) tEnd=parseFloat(m[1]); }).catch(function(){});
     }
     function now(){ return performance.now()/1000; }
@@ -174,7 +175,7 @@
     var argm=local ? qs.match(/[?&]args=([^&]*)/) : null;          // dev: ?args=--god,--kite passes game flags -- from this machine only: on the public site they were cheats in the address bar
     // Every file of a build is asked for under that build's number. A browser that kept an old index.js would otherwise pair
     // it with the new .wasm and stop dead ("ASM_CONSTS[code] is not a function"); a new build is a new address for all of it.
-    var BUILD='__C2_BUILD__'; window.__c2_v=parseInt(BUILD,10)||0;
+    window.__c2_v=parseInt(BUILD,10)||0;
     var Module = {
       locateFile: function(p){ return p+'?v='+BUILD; },
       arguments: argm ? decodeURIComponent(argm[1]).split(',') : [],
