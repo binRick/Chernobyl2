@@ -30,8 +30,24 @@ xcodebuild archive -project ios/Chernobyl2.xcodeproj -scheme Chernobyl2 -configu
     -allowProvisioningUpdates CURRENT_PROJECT_VERSION="$BUILD" -quiet
 
 echo "==> Exporting"
+# With an ASC API key, hand it to xcodebuild too: automatic signing can then
+# fetch the distribution certificate and profile without an Apple account
+# being signed in to Xcode on this machine. Needs an Admin key - an App
+# Manager key is refused ("Cloud signing permission error").
+EXPORT_AUTH=()
+if [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
+    ASC_KEY_FILE="${ASC_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8}"
+    if [[ -f "$ASC_KEY_FILE" ]]; then
+        EXPORT_AUTH=(-authenticationKeyPath "$ASC_KEY_FILE"
+                     -authenticationKeyID "$ASC_KEY_ID"
+                     -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+    else
+        echo "WARNING: $ASC_KEY_FILE not found - export will rely on an Xcode account" >&2
+    fi
+fi
 xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportPath "$OUT" \
-    -exportOptionsPlist ios/ExportOptions-AppStore.plist -allowProvisioningUpdates | tail -2
+    -exportOptionsPlist ios/ExportOptions-AppStore.plist -allowProvisioningUpdates \
+    ${EXPORT_AUTH[@]+"${EXPORT_AUTH[@]}"} | tail -2
 IPA="$(ls "$OUT"/*.ipa | head -1)"      # named after the product ("Chernobyl 2.ipa")
 echo "    $IPA"
 
