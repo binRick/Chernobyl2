@@ -11,7 +11,7 @@ voice when they think aloud, while they play; the developer watches the sessions
 |---|---|
 | Round | [Chernobyl 2: LIQUIDATOR](https://app.playcocola.com/front/playtest_rounds/01m7c400hj3mvxr6rk0xrxteey) (developer sign-in needed) |
 | Created | 2026-11-14 |
-| Status | **Approved and live, Public** (approved 2026-11-14, the same day it was sent). Listed for every Playcocola playtester and announced to them. Invitation link to share: <https://app.playcocola.com/i/01m7c400hj3mvxr6rk0xrxteey>. Playcocola's founder offered, at no cost, to send a request to their community for playtesters; not yet answered. |
+| Status | **Approved and live, Public** (approved 2026-11-14, the same day it was sent). Listed for every Playcocola playtester and announced to them. Invitation link to share: <https://app.playcocola.com/i/01m7c400hj3mvxr6rk0xrxteey>. Playcocola's founder offered, at no cost, to send a request to their community for playtesters; accepted the same day, and the request went out on 2026-11-15. He suggested a Bounty of 4-5 EUR per 20-minute session if sessions are slow to come; not required. |
 | Open until | 2026-11-29 (15 days, the most the site allows) |
 | Cost | Free. Money is only spent if a Bounty (paid sessions) is created. None has been. |
 | Build tested | The browser build at <https://chernobyl2.ximg.app/game/>, commit `a1e19b6`. No download was uploaded. |

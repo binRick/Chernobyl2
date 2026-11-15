@@ -38,6 +38,7 @@ static void IntroBlit(Texture2D t, Color tint){
 // presses "a key" itself, so the intro can be exercised without a human at the keyboard.
 static float g_introAuto[2]={-1,-1}, g_introWall=0.0f;
 static float g_introFocusT=0.0f, g_introShot=-1.0f;          // seconds the window has been focused
+static int g_introKey=0;                                     // the key that last counted (the title reads M: multiplayer)
 static int IntroAnyInput(void){
     for (int i=0;i<2;i++) if (g_introAuto[i]>=0 && g_introWall>=g_introAuto[i]){ g_introAuto[i]=-1; return 1; }
     // A key only counts if it was meant for the game. Cmd+Tab (and every other system chord) used
@@ -54,6 +55,7 @@ static int IntroAnyInput(void){
     int click=IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
     // the click that focuses the window (or anything in the first moments) is not a skip
     if (g_introWall<1.5f || g_introFocusT<0.6f || !IsWindowFocused() || chord) return 0;
+    g_introKey=k;
     return k!=0 || click;
 }
 
@@ -155,7 +157,7 @@ static int RunIntro(void){
         } else if (stage==1){
             loadedT = g_loadFinished ? loadedT+dt : 0.0f;
             int key=IntroAnyInput();                      // (asked every frame: a key pressed during the loading is dropped, not saved up)
-            if (stageT>1.0f && loadedT>0.35f && key){ stage=2; stageT=0.0f; }
+            if (stageT>1.0f && loadedT>0.35f && key){ stage=2; stageT=0.0f; if (g_introKey==KEY_M) g_mpOpenAtStart=1; }   // M: to the multiplayer screen
         } else if (stage==2){
             float k=1.0f-stageT/1.2f; if (k<0) k=0;
             if (hasMu){ INTRO_MU_LOCK(); SetMusicVolume(mu,k); INTRO_MU_UNLOCK(); }
@@ -181,6 +183,8 @@ static int RunIntro(void){
                   DrawRectangleRounded(bk,0.35f,10,(Color){0,0,0,205}); DrawRectangleRoundedLines(bk,0.35f,10,(Color){150,24,18,200}); }                    // handle runs through here, red under the red line
                 DrawTextureEx(pt2,(Vector2){sw*0.5f-pt2.width*sc*0.5f, sh*0.905f-pt2.height*sc*0.5f},0.0f,sc,
                               (Color){255,255,255,(unsigned char)(a*255)});
+                { const char *mt="M   -   MULTIPLAYER, UP TO 8 PLAYERS"; int fs=(int)(17*sc), mw=MeasureText(mt,fs);              // the other way in
+                  DrawText(mt,(int)(sw*0.5f-mw*0.5f)+1,(int)(sh*0.962f)+1,fs,(Color){0,0,0,220}); DrawText(mt,(int)(sw*0.5f-mw*0.5f),(int)(sh*0.962f),fs,(Color){214,200,170,235}); }
             }
             if (stage==2){ float k=stageT/1.2f; if (k>1) k=1; DrawRectangle(0,0,GetScreenWidth(),GetScreenHeight(),(Color){0,0,0,(unsigned char)(k*255)}); }
         }

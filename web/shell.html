@@ -32,6 +32,7 @@
   #card #ictl { opacity:0; transition:opacity .6s linear; }
   #card #ipress { inset:auto; left:50%; top:90.5%; width:59.4%; height:auto; transform:translate(-50%,-50%); opacity:0; }
   #card #ipress.on { animation:pulse 1.96s ease-in-out infinite; opacity:1; }
+  #imp { position:absolute; left:0; right:0; top:96.4%; transform:translateY(-50%); text-align:center; color:#d6c8aa; font-size:min(1.9vw,15px); letter-spacing:2px; text-shadow:0 0 5px #000; display:none; }
   #iload { position:absolute; left:0; right:0; top:90.5%; transform:translateY(-50%); text-align:center; color:#aaa69c; font-size:min(2.2vw,16px); letter-spacing:2px; }
   #snd { position:absolute; left:50%; top:7%; transform:translateX(-50%); display:none; padding:12px 26px; background:rgba(0,0,0,.78); border:1px solid #c0392b; color:#f1ead8; font-size:20px; letter-spacing:3px; white-space:nowrap; cursor:pointer; animation:sndp 1.3s ease-in-out infinite; }
   @keyframes sndp { 0%,100% { opacity:.55 } 50% { opacity:1 } }
@@ -58,6 +59,7 @@
     <div id="card">
       <img id="ititle" alt=""><img id="ictl" alt=""><img id="ipress" alt="">
       <div id="iload"></div>
+      <div id="imp">M &nbsp; - &nbsp; MULTIPLAYER, UP TO 8 PLAYERS</div>
     </div>
     <div id="snd">&#9834; &nbsp;CLICK OR PRESS ANY KEY FOR SOUND</div>
     <div id="note"></div>
@@ -112,7 +114,7 @@
         note.textContent = ready ? '' : 'loading '+pct+'%';
       } else if (stage===2){
         var t=now()-stageAt; note.textContent='';
-        if (t>0.9 && ready){ ipress.className='on'; iload.textContent=''; }
+        if (t>0.9 && ready){ ipress.className='on'; iload.textContent=''; $('imp').style.display='block'; }
         else { ipress.className=''; iload.textContent = (t>0.9 && !ready) ? 'LOADING '+pct+'%' : ''; }
       }
       requestAnimationFrame(tick);
@@ -146,6 +148,7 @@
     document.addEventListener('keydown', function(e){
       if (stage!==1 && stage!==2) return;
       if (e.metaKey || e.ctrlKey || e.altKey || /^(Shift|Control|Alt|Meta|CapsLock|ContextMenu)$/.test(e.key)) return;   // system chords are not a skip
+      if (stage===2 && (e.key==='m' || e.key==='M')) window.__c2_mp=true;   // M on the title: the game opens its multiplayer screen first
       e.preventDefault(); introInput(e);
     }, true);
     intro.addEventListener('mousedown', introInput);

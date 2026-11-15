@@ -17,6 +17,7 @@ LIBS       := $(RAYLIB_DIR)/lib/libraylib.a
 
 ifeq ($(UNAME_S),Darwin)
   SRC  += src/macicon.m          # Objective-C: sets the Dock / Cmd-Tab icon
+  SRC  += src/net_mac.m          # Objective-C: the multiplayer connection (a WebSocket through URLSession)
   LIBS += -framework OpenGL -framework Cocoa -framework IOKit \
           -framework CoreVideo -framework CoreAudio
 endif

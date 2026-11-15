@@ -119,6 +119,7 @@ static bool C2KeyPressed(int k){
     if (g_touchPlaying){
         if (k==KEY_SPACE) return TouchOverlayJumpPressed();
         if (k==KEY_R) return TouchOverlayReloadPressed();
+        if (k==KEY_E) return TouchOverlayUsePressed();
         if (k==KEY_ESCAPE) return TouchOverlayPausePressed();
         if (k>=KEY_ONE && k<=KEY_FOUR) return TouchOverlayWeaponPressed()==k-KEY_ONE;
     }
@@ -142,6 +143,22 @@ static Vector2 C2MousePos(void){ return g_tapPos; }
 const char *C2BundleDir(void); const char *C2DocsDir(void);
 int C2HttpRequest(const char *url, const char *jsonBody, char *out, int outSz);
 #endif
+
+// A multiplayer game cannot stop for one player: with his menu open, or dead and watching, the world runs on and
+// only his keys and mouse are taken away (g_inOff, set in Update). Everything the game asks of them goes through here.
+static int g_inOff=0;
+static bool GKeyDown(int k){ return !g_inOff && IsKeyDown(k); }
+static bool GKeyPressed(int k){ return !g_inOff && IsKeyPressed(k); }
+static bool GMouseDown(int b){ return !g_inOff && IsMouseButtonDown(b); }
+static bool GMousePressed(int b){ return !g_inOff && IsMouseButtonPressed(b); }
+#undef IsKeyDown
+#undef IsKeyPressed
+#undef IsMouseButtonDown
+#undef IsMouseButtonPressed
+#define IsKeyDown            GKeyDown
+#define IsKeyPressed         GKeyPressed
+#define IsMouseButtonDown    GMouseDown
+#define IsMouseButtonPressed GMousePressed
 
 #if defined(C2_MAC)
 void MacSetDockIcon(const char *path);   // macicon.m: Dock / Cmd-Tab icon (SetWindowIcon is a no-op on macOS)
@@ -1450,6 +1467,9 @@ typedef struct { Vector3 pos; float yaw; int active; int type; float burnY[MAX_B
                  int wN; int wBone[MAX_WOUNDS]; Vector3 wOff[MAX_WOUNDS]; float wSz[MAX_WOUNDS]; Vector3 wDir[MAX_WOUNDS]; float wT0[MAX_WOUNDS]; } Corpse;   // lasting dead bodies, posed at the death-anim end; carries the soot marks from when it was alive
 static Corpse          g_corpses[MAX_CORPSES];
 static int             g_corpseNext = 0;
+#define MP_PHASE 1
+#include "mp.h"                       // multiplayer: the few things the enemy and damage code need (the rest is included further down)
+#undef MP_PHASE
 // Enemy rigs. Clips are addressed by ROLE (CL_*), each rig maps a role to its own
 // animation index, so models with different clip orders/frame counts coexist.
 enum { CL_WALK=0, CL_IDLE, CL_RUN, CL_HIT, CL_ATTACK, CL_DEATH, CL_CAST,
@@ -1997,6 +2017,7 @@ static int             g_returnToMenu = 0;         // ESC menu "Restart Run" / d
 
 static int g_wave;
 static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i to life at pos
+    g_mpGen[i]++; g_mpDirty[i]=1;                      // (multiplayer: a new enemy in this slot, and the host owes the others his arrival)
     int wv=(g_wave>1)?g_wave-1:0;                      // ../chernobyl scaling: +12% HP, +0.18 m/s per wave past the first
     g_enemies[i].maxHp=kEnemy[type].hp*(1.0f+0.12f*wv); g_enemies[i].spd=kEnemy[type].speed+0.18f*wv; g_enemies[i].boss=0;
     g_enemies[i].pos=pos; g_enemies[i].hp=g_enemies[i].maxHp; g_enemies[i].type=type; g_enemies[i].state=1;
@@ -2208,6 +2229,7 @@ static int g_roster[EN_NTYPES], g_rosterN = -1;                    // wave 1's g
 static int WaveAliveCapFor(int w){ int c=7+w; return c>16?16:c; }  // trickle cap, well under MAX_ENEMIES
 static void StartWave(int w){
     g_wave=w; g_waveBudget=WaveBudgetFor(w); g_aliveCap=WaveAliveCapFor(w);
+    if (g_mpRole==MP_HOST){ int n=MpCount(); g_waveBudget=(int)(g_waveBudget*(1.0f+0.6f*(n-1))); g_aliveCap+=2*(n-1); if (g_aliveCap>MAX_ENEMIES-2) g_aliveCap=MAX_ENEMIES-2; }   // more players, more of them
     g_spawnTick=0.0f; g_waveBreather=0.0f; g_bossThisWave=0; g_rosterN=-1;
     { void SeedWavePickups(void); SeedWavePickups(); }
     if (g_audio && w==1 && g_hasWave1Snd){ SetSoundVolume(g_wave1Snd,0.9f); PlaySound(g_wave1Snd); }
@@ -2383,6 +2405,7 @@ void SeedWavePickups(void){
 }
 static void UpdateWaves(float dt){
     if (!g_hasEnemy || g_noEnemies) return;
+    if (g_mpRole==MP_CLIENT) return;                   // multiplayer: the host's game is the wave director (mp.h tells this one what wave it is)
     int alive=0; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state!=0) alive++;  // dying bodies still hold the field
     if (g_stress){                                     // perf gate: saturate the field, no wave logic
         for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0) SpawnEnemyT(i,(g_forceEnemy>=0)?g_forceEnemy:(g_forceEnemy==-2?GetRandomValue(0,EN_NTYPES-1):EN_COOK),i&1);
@@ -2792,13 +2815,14 @@ static void DrawGibs(void){
         Color c=g->col; if (g->life<1.0f) c.a=(unsigned char)(255*g->life);
         DrawSphereEx(g->pos, g->size, 4, 6, c); }
 }
-static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, int blood){
+static void HurtEnemyCore(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, int blood){
     if (ei<0 || g_enemies[ei].state!=1) return;
     if (blood) SpawnBlood(hitPt, dir, head?1.9f:1.0f, g_enemies[ei].pos.y);
     if (blood && g_hurtCause==HC_BULLET) EnemyAddWound(&g_enemies[ei], hitPt, dir);
-    if (g_quadT>0.0f) dmg*=4.0f;                          // QUAD DAMAGE power-up
     g_enemies[ei].hp -= dmg;
-    if (head) g_hsFlash=1.1f;
+    if (g_mpCos && g_enemies[ei].hp<=0) g_enemies[ei].hp=1.0f;   // multiplayer, not the host: it shows, but only the host's word kills him
+    if (g_mpDeath) g_enemies[ei].hp=0.0f;                       // ...and this is the host's word
+    if (head && !g_mpRemote) g_hsFlash=1.1f;
     if (g_enemies[ei].hp<=0){
         g_enemies[ei].prevClip=g_enemies[ei].clip; g_enemies[ei].prevT=g_enemies[ei].animT; g_enemies[ei].blendT=ENEMY_BLEND;
         EnemyPoseSnap(&g_enemies[ei],1);                      // the fall eases out of whatever he was doing
@@ -2809,24 +2833,26 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
             e->climbT=0; e->hitOff=(Vector3){0,0,0}; }
         g_enemies[ei].state=2; g_enemies[ei].deathT=0; g_enemies[ei].animT=0; if (!g_noCredit) g_killMark=0.32f;
         { Enemy *e=&g_enemies[ei]; const Weapon *cw=&g_weapons[g_curWeapon];   // how he dies: by cause, then where it hit
-          e->deathYaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;   // facing the shooter
+          int wSpin=(g_hurtWpnF>=0)?(g_hurtWpnF&1):(cw->spinUp || cw->soundGated), wPel=(g_hurtWpnF>=0)?((g_hurtWpnF>>1)&1):(cw->pellets>1);   // the shooter's gun (another player's, in multiplayer)
+          e->deathYaw=atan2f(g_hurtShooter.x-e->pos.x, g_hurtShooter.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;   // facing the shooter
           e->pushV=(Vector3){0,0,0};
           if (g_hurtCause==HC_BLAST){ e->deathRole=CL_DEATH_BLAST; e->deathYaw=EnemyYawAway(e,g_hurtFrom);
               Vector3 a={e->pos.x-g_hurtFrom.x,0,e->pos.z-g_hurtFrom.z}; float al=Vector3Length(a);
               if (al>1e-3f) e->pushV=Vector3Scale(a, fminf(6.0f, 2.0f+dmg*0.03f)/al); }        // thrown clear of it
           else if (g_hurtCause==HC_BULLET && head) e->deathRole=CL_DEATH_HEAD;
           else if (g_hurtCause==HC_BULLET && HitZoneRole(e,0,dir,hitPt)==CL_HIT_LEG) e->deathRole=CL_DEATH_LEG;
-          else if (g_hurtCause==HC_BULLET && (cw->spinUp || cw->soundGated)) e->deathRole=CL_DEATH_RIDDLED;
+          else if (g_hurtCause==HC_BULLET && wSpin) e->deathRole=CL_DEATH_RIDDLED;
           else e->deathRole=CL_DEATH;
           if (g_hurtCause==HC_BULLET){                         // the round that kills him carries the body with it
               Vector3 pd={dir.x,0,dir.z}; float pl=Vector3Length(pd), mass=fmaxf(0.8f, kEnemy[e->type].hp/100.0f);
-              float shove=fminf(3.8f, (cw->pellets>1?2.6f:1.7f)+dmg*0.02f);          // thrown back off his feet, not dropped where he stood
+              float shove=fminf(3.8f, (wPel?2.6f:1.7f)+dmg*0.02f);          // thrown back off his feet, not dropped where he stood
               if (e->type==EN_RIFLEMAN || e->type==EN_GUNNER) shove*=1.45f;         // the soldiers go down hardest: shot DOWN
               if (pl>1e-3f) e->pushV=Vector3Scale(pd, shove/(pl*mass)); }
-          { float pd2=Vector3Distance(e->pos,g_pos);           // torn apart: the heart of a blast, or buckshot at arm's length
+          { float pd2=Vector3Distance(e->pos,g_hurtShooter);           // torn apart: the heart of a blast, or buckshot at arm's length
             int gib = !e->boss && e->type!=EN_HEADCHEF &&
-                      ((g_hurtCause==HC_BLAST && dmg>=GIB_BLAST_DMG && GetRandomValue(0,99)<65) || (g_hurtCause==HC_BULLET && cw->pellets>1 && pd2<3.2f && GetRandomValue(0,99)<45));
-            if (gib){
+                      ((g_hurtCause==HC_BLAST && dmg>=GIB_BLAST_DMG && GetRandomValue(0,99)<65) || (g_hurtCause==HC_BULLET && wPel && pd2<3.2f && GetRandomValue(0,99)<45));
+            if (g_mpGibForce>=0) gib=g_mpGibForce;                                    // (multiplayer: the host rolled this)
+            if (gib){ g_mpGibbed=1;
                 Vector3 c={e->pos.x, e->pos.y+ENEMY_HEIGHT*0.55f, e->pos.z}, aw=(g_hurtCause==HC_BLAST)?(Vector3){e->pos.x-g_hurtFrom.x,0,e->pos.z-g_hurtFrom.z}:(Vector3){dir.x,0,dir.z};
                 float al=Vector3Length(aw); aw=(al>1e-3f)?Vector3Scale(aw,1.0f/al):(Vector3){0,0,0};
                 SpawnGibs(c, aw, e->pos.y, (kEnemy[e->type].scale*e->sc));
@@ -2843,7 +2869,7 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
         if (g_enemies[ei].state==0){ g_gibKills++; }                                  // blown apart: nothing left to scream (the gib burst is his sound)
         else if (bossTheme){}
         else if (EnemyVoice(&g_enemies[ei], EC_DEATH, 1.0f, 0.0f)){}                  // his kind's own death, when it has one
-        else if (g_audio && g_hasSgDeathSnd && g_hurtCause==HC_BULLET && g_weapons[g_curWeapon].pellets>1 && GetRandomValue(0,99)<45)
+        else if (g_audio && g_hasSgDeathSnd && g_hurtCause==HC_BULLET && ((g_hurtWpnF>=0)?((g_hurtWpnF>>1)&1):(g_weapons[g_curWeapon].pellets>1)) && GetRandomValue(0,99)<45)
             SfxAt(g_sgDeathSnd, g_enemies[ei].pos, 1.0f);                             // killed by buckshot: sometimes this scream instead
         else if (g_audio && g_nDeathSnd>0){ SfxAt(g_deathSnd[GetRandomValue(0,g_nDeathSnd-1)], g_enemies[ei].pos, 1.0f); }
         if (g_audio && g_hasSy && !g_noCredit){ SetSoundPitch(g_sy[SY_KILL], 0.92f+GetRandomValue(0,16)/100.0f); SetSoundVolume(g_sy[SY_KILL],0.55f); PlaySound(g_sy[SY_KILL]); }   // the kill, confirmed
@@ -2892,6 +2918,15 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
             Enemy *e=&g_enemies[ei]; Vector3 a={e->pos.x-g_hurtFrom.x,0,e->pos.z-g_hurtFrom.z}; float al=Vector3Length(a);
             EnemyKnock(ei, al>1e-3f ? Vector3Scale(a, fminf(5.0f, 1.5f+dmg*0.03f)/al) : (Vector3){0,0,0}); }
     }
+}
+// Every hit on an enemy comes through here. Alone, it is simply dealt. In multiplayer only the host's game
+// takes health away: a client's hit is shown at once and sent to him (mp.h).
+static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, int blood){
+    if (ei<0 || g_enemies[ei].state!=1) return;
+    if (g_quadT>0.0f && !g_hurtWorld) dmg*=4.0f;          // QUAD DAMAGE power-up
+    if (MpActive()){ MpHurt(ei,dmg,head,dir,hitPt,blood); return; }
+    g_hurtShooter=g_pos; g_hurtWpnF=-1;
+    HurtEnemyCore(ei,dmg,head,dir,hitPt,blood);
 }
 
 // ---- Grenade launcher (slot 0) -- arcing projectile + radial explosion ----------
@@ -3115,6 +3150,7 @@ static void Fire(Camera3D cam) {
         lastEnd=end;
         for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){muzzle,end,0.05f}; break; }
     }
+    MpShot(g_curWeapon, muzzle, lastEnd);                              // (multiplayer: the others see the shot)
     if (pellets>1) for (int i=0;i<MAX_ENEMIES;i++)                     // a point-blank shotgun blast flattens him
         if (shotDmg[i]>=KNOCK_SHOT_DMG && g_enemies[i].state==1 && Vector3Distance(g_enemies[i].pos,cam.position)<=KNOCK_SHOT_DIST)
             EnemyKnock(i, Vector3Scale((Vector3){aim.x,0,aim.z}, 2.5f));
@@ -3202,7 +3238,7 @@ static void EnemySfx(Sound snd, int has, float d){
     SfxAt(snd, g_sfxAt, 1.0f);
 }
 static Vector3 EnemyMuzzle(const Enemy *e){            // gun/hand height, a little toward the player
-    Vector3 to=Vector3Subtract(g_pos,e->pos); to.y=0; float l=Vector3Length(to); if (l>1e-3f) to=Vector3Scale(to,1.0f/l);
+    Vector3 to=Vector3Subtract(g_tPos,e->pos); to.y=0; float l=Vector3Length(to); if (l>1e-3f) to=Vector3Scale(to,1.0f/l);
     float sc=(kEnemy[e->type].scale*e->sc);
     return (Vector3){ e->pos.x+to.x*0.55f, e->drawY+1.42f*sc, e->pos.z+to.z*0.55f };
 }
@@ -3212,7 +3248,7 @@ static Vector3 EnemyMuzzle(const Enemy *e){            // gun/hand height, a lit
 static Vector3 EnemyEye(const Enemy *e){ return (Vector3){ e->pos.x, e->drawY+1.45f*(kEnemy[e->type].scale*e->sc), e->pos.z }; }
 static int EnemyClearShot(const Enemy *e){              // fresh, uncached: eye -> player's eye
     if (!(g_hasMap && g_mapCol.ready)) return 1;
-    Vector3 a=EnemyEye(e), d=Vector3Subtract(g_cam.position,a); float L=Vector3Length(d);
+    Vector3 a=EnemyEye(e), d=Vector3Subtract(g_tEye,a); float L=Vector3Length(d);
     if (L<0.3f) return 1;
     float h=MapRayNearest(a,Vector3Scale(d,1.0f/L),L);
     return (h<=0.0f || h>=L-0.3f);
@@ -3233,17 +3269,17 @@ static Vector3 EnemyShotOrigin(const Enemy *e){
 static void EnemyHitscan(Enemy *e, float d){
     if (!EnemyClearShot(e)){ e->los=0; e->losT=0.25f; e->burstLeft=0; return; }   // lost sight since the cached check
     Vector3 m=EnemyShotOrigin(e);
-    float acc=0.86f-d*0.022f-0.30f*g_playerMoveAmt; if (acc<0.12f) acc=0.12f;
+    float acc=0.86f-d*0.022f-0.30f*g_tMove; if (acc<0.12f) acc=0.12f;
     if (e->type==EN_GUNNER) acc*=0.75f;                    // the hose sprays
     int hit = GetRandomValue(0,999) < (int)(acc*1000);
-    Vector3 tgt = Vector3Add(g_cam.position,(Vector3){0,-0.35f,0});
+    Vector3 tgt = Vector3Add(g_tEye,(Vector3){0,-0.35f,0});
     if (!hit){ tgt.x+=GetRandomValue(-150,150)/100.0f; tgt.y+=GetRandomValue(-60,90)/100.0f; tgt.z+=GetRandomValue(-150,150)/100.0f; }
     Vector3 dir=Vector3Normalize(Vector3Subtract(tgt,m)); float L=Vector3Distance(tgt,m)+(hit?0.0f:20.0f);
     if (g_hasMap && g_mapCol.ready){ float w=MapRayNearest(m,dir,L); if (w>0.0f && w<L){ L=w; if (hit && w<Vector3Distance(tgt,m)-0.3f) hit=0; } }
     Vector3 end=Vector3Add(m,Vector3Scale(dir,L));
     for (int i=0;i<MAX_TRACERS;i++) if (g_tracers[i].life<=0){ g_tracers[i]=(Tracer){m,end,0.06f}; break; }
     SpawnMuzzleFlash(m, dir);
-    if (hit && !g_godMode) g_playerHp-=kEnemy[e->type].shotDmg*PLAYER_DMG_K;
+    if (hit && !g_godMode && g_tMine) g_playerHp-=kEnemy[e->type].shotDmg*PLAYER_DMG_K;
     g_sfxAt=e->pos; EnemySfx(g_eShotSnd,g_hasEShot,d);
     DebugLog("eshot","\"type\":\"%s\",\"d\":%.1f,\"hit\":%d", kEnemy[e->type].name, d, hit);
 }
@@ -3272,7 +3308,7 @@ static Vector3 RigBoneWorld(int type, int clip, float frame, const char *bone, V
 // read as the fireball appearing behind his head on the side-on pitch). Falls back to the
 // usual origin if a wall stands between his eyes and his hand.
 static Vector3 EnemyBoltOrigin(const Enemy *e){
-    float yaw=atan2f(g_pos.x-e->pos.x, g_pos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
+    float yaw=atan2f(g_tPos.x-e->pos.x, g_tPos.z-e->pos.z)*RAD2DEG + ENEMY_YAW_OFFSET;
     Vector3 h; const EnemyRig *brg=RigOf(e->type);
     if (e->poseOK && brg->bHandR>=0)                         // the hand as posed (he may be turned / twisted)
         h=Vector3Add((Vector3){e->pos.x,e->drawY,e->pos.z}, Vector3RotateByAxisAngle(Vector3Scale(e->pose[brg->bHandR].translation,ENEMY_SCALE*(kEnemy[e->type].scale*e->sc)),(Vector3){0,1,0},e->yaw*DEG2RAD));
@@ -3283,7 +3319,7 @@ static Vector3 EnemyBoltOrigin(const Enemy *e){
 }
 static void EnemyBolt(Enemy *e, float d){
     if (!EnemyClearShot(e)){ e->los=0; e->losT=0.25f; return; }
-    Vector3 m=EnemyBoltOrigin(e), tgt=Vector3Add(g_cam.position,(Vector3){0,-0.3f,0});
+    Vector3 m=EnemyBoltOrigin(e), tgt=Vector3Add(g_tEye,(Vector3){0,-0.3f,0});
     Vector3 v=Vector3Scale(Vector3Normalize(Vector3Subtract(tgt,m)),13.0f);
     for (int i=0;i<MAX_BOLTS;i++) if (!g_bolts[i].active){ g_bolts[i]=(Bolt){m,v,3.0f,(e->boss && e->type==EN_PRIEST)?ARCH_BOLT_DMG:kEnemy[e->type].shotDmg,1,(int)(e-g_enemies)+1}; break; }
     DebugLog("ebolt","\"d\":%.1f,\"from\":[%.2f,%.2f,%.2f],\"enemy\":[%.2f,%.2f,%.2f]",d,m.x,m.y,m.z,e->pos.x,e->drawY,e->pos.z);
@@ -3330,13 +3366,13 @@ static void BoltsUpdate(float dt){
             if (struck>=0){
                 Vector3 dn=(sl>1e-5f)?Vector3Scale(step,1.0f/sl):(Vector3){0,0,1};
                 for (int q=0;q<10;q++) SpawnLiquid(b->pos,Vector3Negate(dn));
-                g_noCredit=1; HurtEnemy(struck, b->dmg*BOLT_FRIENDLY_MULT, 0, dn, b->pos, 1); g_noCredit=0;   // not the player's kill
+                g_noCredit=1; g_hurtWorld=1; HurtEnemy(struck, b->dmg*BOLT_FRIENDLY_MULT, 0, dn, b->pos, 1); g_hurtWorld=0; g_noCredit=0;   // not the player's kill
                 DebugLog("boltfriendly","\"victim\":\"%s\",\"dmg\":%.0f", kEnemy[g_enemies[struck].type].name, b->dmg*BOLT_FRIENDLY_MULT);
                 b->active=0; continue; }
         }
         Vector3 chest=Vector3Add(g_cam.position,(Vector3){0,-0.45f,0});
         if (Vector3Distance(b->pos,chest)<0.6f){
-            if (!g_godMode) g_playerHp-=b->dmg*PLAYER_DMG_K;
+            if (!g_godMode && !g_dead) g_playerHp-=b->dmg*PLAYER_DMG_K;
             DebugLog("bolthit","\"dmg\":%.0f",b->dmg);
             b->active=0;
         }
@@ -3378,7 +3414,8 @@ static int PriestRaise(int idx, float dt){
         for (int i=0;i<MAX_BEAMS;i++) if (g_beams[i].t<=0 || i==MAX_BEAMS-1){ g_beams[i]=(Beam){EnemyBoltOrigin(e),(Vector3){c->pos.x,c->pos.y+0.25f,c->pos.z},0.05f}; break; }   // from the hand he holds out, wherever the cast has it (it left from above his head when he bent to it)
         if (e->chanT<=0){
             int slot=-1; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ slot=i; break; }
-            if (slot>=0){
+            if (slot>=0 && g_mpRole==MP_CLIENT) c->active=0;                    // (multiplayer: the host's game raises him; here the body just goes)
+            else if (slot>=0){
                 EnemyArm(slot,c->pos,c->type);
                 g_enemies[slot].hp=g_enemies[slot].maxHp*0.6f;
                 c->active=0;
@@ -3427,7 +3464,7 @@ static void EnemyClimbTick(int i, float dt){
         if (stage==1 && g_audio && g_hasWallSnd){ SetSoundPitch(g_wallSnd,0.55f+GetRandomValue(0,15)/100.0f); SfxAt(g_wallSnd, lip, 0.45f); } }
     if (GetRandomValue(0,999)<(int)(2200*dt)) SpawnSmoke((Vector3){hipW.x+GetRandomValue(-30,30)/100.0f, fminf(hipW.y,H->pos.y+0.2f), hipW.z+GetRandomValue(-30,30)/100.0f}, 0);   // the shaft's smoke dragged up with him
     { static int killAt=-1; if (killAt<0){ const char *v=getenv("CHERNOBYL_CLIMB_KILL"); killAt=v?atoi(v):0; }   // dev: kill every climber N% of the way up (tests the drop back down the shaft)
-      if (killAt>0 && fr*100.0f>=(float)killAt){ HurtEnemy(i, 99999.0f, 0, (Vector3){0,-1,0}, hipW, 1); return; } }
+      if (killAt>0 && fr*100.0f>=(float)killAt){ g_hurtWorld=1; HurtEnemy(i, 99999.0f, 0, (Vector3){0,-1,0}, hipW, 1); g_hurtWorld=0; return; } }
     if (e->climbT<=0 || fr>=0.999f){                                                       // up
         e->climbT=0; e->hitOff=(Vector3){0,0,0}; if (H->busy[e->edge]==i+1) ((MapHole*)H)->busy[e->edge]=0;
         EnemyPoseSnap(e,1); e->prevClip=e->clip; e->prevT=e->animT; e->clip=g_eRun; e->animT=0; e->legW=0; e->loco=e->locoPrev=CL_IDLE; e->locoBlend=0;
@@ -3438,12 +3475,13 @@ static void EnemyClimbTick(int i, float dt){
 static void UpdateEnemies(float dt){
     if (!g_hasEnemy) return;
     int prevCell = g_navPlayerCell;
-    if (g_hasMap) MapNavUpdate(g_pos);                 // refresh the flow field if the player moved cells
+    if (g_hasMap) MpNavUpdate();                       // refresh the flow field if the player (any living player, in multiplayer) moved cells
     int flowChanged = (g_navPlayerCell != prevCell);   // player crossed into a new cell -> paths changed
     for (int i=0;i<MAX_ENEMIES;i++){
         Enemy *e=&g_enemies[i];
         if (e->state==1){
-            float dx=g_pos.x-e->pos.x, dz=g_pos.z-e->pos.z;
+            MpTarget(i);                                        // who he is after: the player, or in multiplayer whichever one the host says
+            float dx=g_tPos.x-e->pos.x, dz=g_tPos.z-e->pos.z;
             float d=sqrtf(dx*dx+dz*dz);
             if (e->hitT>0) e->hitT-=dt;
             if (e->roarT>0) e->roarT-=dt;
@@ -3469,6 +3507,7 @@ static void UpdateEnemies(float dt){
                 float fl=0.85f+GetRandomValue(0,30)/100.0f;                    // the lantern: green, then a guttering red
                 DynLightAdd((Vector3){e->pos.x,e->pos.y+1.3f,e->pos.z}, e->phase?(Vector3){1.7f*fl,0.30f*fl,0.15f*fl}:(Vector3){0.40f,1.30f,0.38f}, e->phase?11.0f:9.0f, 0.05f, 1);
                 e->sumT-=dt;
+                if (e->sumT<=0.0f && g_mpRole==MP_CLIENT) e->sumT=1.0f;        // (multiplayer: the host's game does the summoning)
                 if (e->sumT<=0.0f){                                            // no corpse to hand: call one up out of the floor beside him
                     int up=0, slot=-1, anyCorpse=0;
                     for (int k=0;k<MAX_ENEMIES;k++){ if (g_enemies[k].state==1 && k!=i) up++; if (g_enemies[k].state==0 && slot<0) slot=k; }
@@ -3503,7 +3542,7 @@ static void UpdateEnemies(float dt){
             // fires when the enemy is jammed in a wall right next to the player (attack range).
             if (g_mapCol.ready && MapSphereHitsWall((Vector3){e->pos.x, e->pos.y+ENEMY_STEP+0.38f, e->pos.z}, 0.35f)){   // (from step height up, as he moves: a stair's edge under him is not a wall he is in)
                 e->embedT += dt;
-                if (e->embedT > 0.8f){                              // relocate to a navigable cell -- same enemy, same hp (no free heal)
+                if (e->embedT > 0.8f && g_mpRole!=MP_CLIENT){       // relocate to a navigable cell -- same enemy, same hp (no free heal)
                     float keepHp=e->hp; int ty=e->type;
                     DebugLog("relocate","\"i\":%d,\"type\":\"%s\",\"from\":[%.2f,%.2f,%.2f],\"d\":%.2f",i,kEnemy[ty].name,e->pos.x,e->pos.y,e->pos.z,d);
                     SpawnEnemyT(i,ty,0); g_enemies[i].hp=keepHp; continue;
@@ -3731,7 +3770,7 @@ static void UpdateEnemies(float dt){
                 if (e->drawY < e->pos.y-0.03f) e->drawY = e->pos.y-0.03f;   // feet never sink into the stairs
             }
             if (g_meleeDrain){                                 // legacy A/B: untimed contact drain
-                if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode) g_playerHp-=ENEMY_TOUCH_DMG*PLAYER_DMG_K*dt;
+                if (e->clip==g_eAttack && e->hitT<=0 && !g_godMode && g_tMine) g_playerHp-=ENEMY_TOUCH_DMG*PLAYER_DMG_K*dt;
             } else if (e->atkCd>0) e->atkCd-=dt;
             if (RigOf(e->type)->animN>0){                      // advance the action clip
                 int nf=ANIM_FRAMES(*RigClip(e->type,e->clip));
@@ -3749,7 +3788,7 @@ static void UpdateEnemies(float dt){
                     const float fr[2]={ dual?DUAL_STRIKE_A:ATK_STRIKE_FRAC, DUAL_STRIKE_B };
                     for (int k=0;k<ns && e->atkCd<=0;k++){ float strike=nf*fr[k];
                         if (prevT<strike && e->animT>=strike && d<=reach*1.15f && !g_godMode){
-                            g_playerHp-=kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f)*PLAYER_DMG_K;   // per-type swing damage
+                            if (g_tMine) g_playerHp-=kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f)*PLAYER_DMG_K;   // per-type swing damage
                             ExtraAt(EX_MELEE,e->pos,0.9f);
                             DebugLog("melee","\"type\":\"%s\",\"blade\":%d,\"dmg\":%.1f,\"hp\":%.0f",kEnemy[e->type].name,k,kEnemy[e->type].meleeDmg*(dual?DUAL_DMG:1.0f),g_playerHp);
                             e->atkCd = dual ? 0.25f : ATK_COOLDOWN;
@@ -3937,7 +3976,13 @@ static void TryReload(void){
 
 // Options/pause menu: a vertical stack of buttons centred on screen. DrawMenu and
 // the click hit-test (in Update) both call MenuRect, so the layout can't drift.
-#define MENU_N 4
+#if defined(C2_IOS)
+#define MENU_N 4                           // (the phone has no multiplayer yet: no row for it)
+#define MENU_ID(i) ((i)==3?4:(i))
+#else
+#define MENU_N 5
+#define MENU_ID(i) (i)
+#endif
 static Rectangle MenuRect(int i){
     int W=GetScreenWidth(), H=GetScreenHeight();
     float bw=360, bh=54, gap=16, total=MENU_N*bh+(MENU_N-1)*gap;
@@ -4356,6 +4401,8 @@ static void EffectsUpdate(float dt){
 
 static void Update(void) {
     float dt=GetFrameTime(); if (dt>0.05f) dt=0.05f;
+    const int inMp=MpActive();                                          // in a multiplayer game: nothing here may stop the world
+    g_inOff=0; if (inMp) g_paused=0;
 #if defined(C2_IOS)
     g_touchPlaying = !g_menu && !g_dead && !g_paused;                 // the controls are up only in play
     TouchOverlayPoll(g_touchPlaying);
@@ -4386,19 +4433,21 @@ static void Update(void) {
     if (g_menu){
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)){
             Vector2 mp=GetMousePosition();
-            for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))){
+            for (int r=0;r<MENU_N;r++) if (CheckCollisionPointRec(mp,MenuRect(r))){ int i=MENU_ID(r);
                 if (g_audio && g_hasMenuSelSnd){ SetSoundVolume(g_menuSelSnd,0.6f); PlaySound(g_menuSelSnd); }
                 if (i==0){                                  // Fullscreen toggle
                     g_fullscreen=!g_fullscreen; ApplyFullscreen(g_fullscreen); SaveOptions();
                     EnableCursor();                         // the toggle can re-grab; keep it free for the menu
                     DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
-                } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Restart Run -> reload the arena from wave 1
-                    DebugLog("menu","\"selectMap\":true"); }
+                } else if (i==1){                                 // Restart Run -> reload the arena from wave 1 (multiplayer: the host's to do, and for everyone)
+                    if (g_mpRole==MP_CLIENT){ g_menu=0; DisableCursor(); MpNote("ONLY THE HOST CAN RESTART THE RUN"); }
+                    else { MpRestartAll(); g_returnToMenu=1; g_menu=0; DebugLog("menu","\"selectMap\":true"); } }
                 else if (i==2){ g_menu=0; DisableCursor(); }      // Resume
-                else if (i==3) g_quit=1;                          // Quit
+                else if (i==3){ g_menu=0; if (inMp){ DisableCursor(); MpStop("YOU LEFT THE GAME"); } else MpOpenLobby(); }   // Multiplayer / leave it
+                else if (i==4) g_quit=1;                          // Quit
             }
         }
-        return;
+        if (!inMp || g_returnToMenu) return;
     }
 
     // P pauses/unpauses the game: the gameplay update is skipped (early return) so
@@ -4416,10 +4465,10 @@ static void Update(void) {
 #else
     if (!g_menu && IsWindowFocused() && !IsCursorHidden()) DisableCursor();
 #endif
-    if (IsKeyPressed(KEY_M) && !g_dead && !g_menu){            // M: mute / unmute everything
+    if (IsKeyPressed(KEY_M) && (!g_dead || inMp) && !g_menu){            // M: mute / unmute everything
         g_userMute=!g_userMute; SetMasterVolume(g_userMute?0.0f:1.0f);
         DebugLog("mute","\"on\":%d", g_userMute); }
-    if (IsKeyPressed(KEY_P) && !g_dead){                       // not on the death / initials screen (P is a letter there)
+    if (IsKeyPressed(KEY_P) && !g_dead && !inMp){                // not on the death / initials screen (P is a letter there); not in multiplayer (the others play on)
         g_paused=!g_paused;
         DebugLog("pause","\"paused\":%s", g_paused?"true":"false");
     }
@@ -4427,7 +4476,10 @@ static void Update(void) {
 
     // Dead: the world is frozen (no move/fire, enemies stop too) behind the "YOU
     // DIED" overlay. After a short beat, ENTER or a click respawns you at spawn.
-    if (g_dead){
+    if (g_dead && inMp){                                          // multiplayer: the fight goes on; he watches it through a living player's eyes (mp.h)
+        g_deadT += dt;
+        MpSpectate(!g_menu && g_deadT>0.6f && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+    } else if (g_dead){
         g_deadT += dt;
         if (g_hurt>0) g_hurt=fmaxf(0.0f, g_hurt-dt*1.2f);
         if (g_deadT>1.0f && LbDeadUpdate()){            // initials / posting first; then ENTER or a click plays again
@@ -4437,6 +4489,7 @@ static void Update(void) {
         return;
     }
 
+    g_inOff = inMp && (g_menu || g_dead);                         // (multiplayer, menu open or dead: from here on the keys and mouse are nobody's)
     // --cycle (soak): step through every slot twice -- spending ammo on pass 1 --
     // logging the counts at each stop. The soak asserts pass 2 reads back pass 1's
     // spent values: any slot-state corruption around the ActivateWeapon /
@@ -4458,10 +4511,10 @@ static void Update(void) {
     // cursor whenever the window loses focus (Cmd-Tab, notifications, etc.), so
     // re-grab it the instant we have focus again and it's become visible.
 #if !defined(__EMSCRIPTEN__)
-    if (IsWindowFocused() && !IsCursorHidden()) DisableCursor();
+    if (!g_menu && IsWindowFocused() && !IsCursorHidden()) DisableCursor();
 #endif
 
-    if (IsWindowReady() && MouseCaptured()){
+    if (IsWindowReady() && MouseCaptured() && !g_inOff){
 #if defined(__EMSCRIPTEN__)
         Vector2 md={ (float)WebMouseTakeX(), (float)WebMouseTakeY() };
 #elif defined(C2_IOS)
@@ -4597,6 +4650,7 @@ static void Update(void) {
         DebugLog("void","\"fell\":true,\"died\":%s", g_godMode?"false":"true");
     }
     Collide();
+    if (inMp && g_dead) MpSpectate(0);                            // (watching: wherever the walking code put him, he is where the watched player is)
 
     // ease the step-smoothing offset back to 0 (~0.15s), then view from the
     // smoothed eye height so stairs glide instead of popping
@@ -4617,11 +4671,13 @@ static void Update(void) {
 
     // shooting / reload
     if (g_swallowClick && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_swallowClick=0;                // the button that un-paused has come up: the trigger is live again
-    WeaponTrigger(dt, fwd, !g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT), !g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+    if (!(inMp && g_dead)) WeaponTrigger(dt, fwd, !g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT), !g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+    g_mpFiring = !g_dead && ((!g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) || g_autoFire);
 
     UpdateEnemies(dt);
     TrapsUpdate(dt);
     UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
+    MpTick(dt);                                                                            // multiplayer: say where this player is; the host says where the enemies are
     UpdateSmoke(dt);
     UpdateGrenades(dt);
 
@@ -4765,9 +4821,10 @@ static void Update(void) {
         g_dead=1; g_deadT=0.0f;
         StopAllSfx();
         if (g_audio && g_hasDieSnd){ SetSoundVolume(g_dieSnd,0.9f); PlaySound(g_dieSnd); }
-        LbOnDeath(g_wave*100 + g_kills*10 + g_headshots*15, g_weapons[g_curWeapon].label);
+        if (!inMp) LbOnDeath(g_wave*100 + g_kills*10 + g_headshots*15, g_weapons[g_curWeapon].label);   // (a shared run is not a leaderboard run)
         DebugLog("death","\"kills\":%d,\"headshots\":%d,\"cheats\":%d", g_kills, g_headshots, g_cheatUsed);
     }
+    g_inOff=0;
 }
 
 // Tracers, sparks, blood (flying, spatter, pools), scorch and in-flight grenades. Inside BeginMode3D.
@@ -5000,6 +5057,7 @@ static void DrawEnemies(void){
         }
         }
     }
+    MpDrawPlayers();                                               // multiplayer: the other players
     DrawGroundBlobs();
 }
 
@@ -5567,7 +5625,7 @@ static void DrawHUD(void) {
     }
     // wave banner (top centre): current wave + field, breather countdown, or the
     // opening GET READY beat.
-    if (g_hasEnemy && !g_noEnemies && !g_stress && !g_dead && (g_wave>0 || g_waveBreather>0.0f)){
+    if (g_hasEnemy && !g_noEnemies && !g_stress && (!g_dead || MpActive()) && (g_wave>0 || g_waveBreather>0.0f)){
         char wb[64];
         if (g_wave==0)                snprintf(wb,sizeof wb,"GET READY");
         else if (g_waveBreather>0.0f) snprintf(wb,sizeof wb,"WAVE %d CLEARED  -  next in %d", g_wave, (int)g_waveBreather+1);
@@ -5579,7 +5637,8 @@ static void DrawHUD(void) {
         DrawText(wb, W/2-ww/2+2, 14+HudTop()+2, wfs, (Color){0,0,0,180});
         DrawText(wb, W/2-ww/2,   14+HudTop(),   wfs, (Color){255,210,60,255});
     }
-    if (g_dead){                                                   // run results: death ends the run
+    MpDrawHud(W,H);                                                // multiplayer: the roster, names over heads, the dead man's caption
+    if (g_dead && !MpActive()){                                    // run results: death ends the run
         const char *t="YOU DIED"; int fs=72, tw=MeasureText(t,fs);
         DrawText(t, W/2-tw/2+3, H/2-98+3, fs, (Color){0,0,0,200});
         DrawText(t, W/2-tw/2,   H/2-98,   fs, (Color){220,40,40,255});
@@ -5644,14 +5703,14 @@ static void DrawMenu(void){
     { int hv=-1; for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))) hv=i;      // rolled onto a new row: the tick
       if (hv>=0 && hv!=g_menuHover && g_audio && g_hasMenuSnd){ SetSoundVolume(g_menuSnd,0.5f); PlaySound(g_menuSnd); }
       g_menuHover=hv; }
-    const char *labels[MENU_N]={"FULLSCREEN","RESTART RUN","RESUME","QUIT"};
+    const char *labels[5]={"FULLSCREEN","RESTART RUN","RESUME",MpActive()?"LEAVE MULTIPLAYER":"MULTIPLAYER","QUIT"};
     for (int i=0;i<MENU_N;i++){
         Rectangle r=MenuRect(i); int hov=CheckCollisionPointRec(mp,r);
         DrawRectangleRec(r, hov?(Color){52,14,11,245}:(Color){22,20,20,235});
         DrawRectangle((int)r.x,(int)r.y,hov?8:3,(int)r.height, hov?red:(Color){110,34,28,255});
         DrawRectangle((int)r.x,(int)(r.y+r.height-1),(int)r.width,1,(Color){52,46,44,255});
         int fs=26;
-        DrawText(labels[i], (int)r.x+30, (int)(r.y+r.height/2-fs/2), fs, hov?(Color){255,250,240,255}:cream);
+        DrawText(labels[MENU_ID(i)], (int)r.x+30, (int)(r.y+r.height/2-fs/2), fs, hov?(Color){255,250,240,255}:cream);
         if (i==0){ const char *v=g_fullscreen?"ON":"OFF"; int vw=MeasureText(v,fs);              // the value sits at the right, as a setting
             DrawText(v, (int)(r.x+r.width-24-vw), (int)(r.y+r.height/2-fs/2), fs, g_fullscreen?(Color){255,210,60,255}:dim); }
         else if (hov){ const char *v=">"; DrawText(v, (int)(r.x+r.width-24-MeasureText(v,fs)), (int)(r.y+r.height/2-fs/2), fs, red); }
@@ -5701,7 +5760,7 @@ static void DrawDamageOverlay(void){
         DrawRectangleGradientV(0,0,W,bh, edge, clear);          // top
         DrawRectangleGradientV(0,H-bh,W,bh, clear, edge);       // bottom
     }
-    if (g_dead) DrawRectangle(0,0,W,H,(Color){45,0,0,(unsigned char)(fminf(1.0f,g_deadT*1.2f)*170.0f)});
+    if (g_dead) DrawRectangle(0,0,W,H,(Color){45,0,0,(unsigned char)(fminf(1.0f,g_deadT*1.2f)*(MpActive()?45.0f:170.0f))});
 }
 
 // Frame-time samples for the perf gate: collected under --debug (skipping the
@@ -6074,6 +6133,9 @@ static void DrawHoleFX(void){
     rlEnableDepthMask();
 }
 #include "traps.h"                      // the plant's traps + their sandbox (--traps)
+#define MP_PHASE 2
+#include "mp.h"                         // multiplayer: the relay connection, the other players, the screen to start or join a game
+#undef MP_PHASE
 static void DrawScene(void){
     ClearBackground((Color){70,90,110,255});
     if (g_hasMap) DrawSky();                  // gradient sky shows through the map's sky openings
@@ -6094,7 +6156,7 @@ static void DrawScene(void){
     EndMode3D();
     TrapsHud();
     if (g_inspect && !g_noEnemies) DrawInspect();
-    DrawViewmodel();
+    if (!(g_dead && MpActive())) DrawViewmodel();          // (dead and watching through another player's eyes: no gun of his own)
 }
 static void LoadPump(void);
 static void Frame(void) {
@@ -6102,7 +6164,8 @@ static void Frame(void) {
     if (g_debug && frameNo>30 && g_perfN<4096) g_perfDt[g_perfN++]=GetFrameTime();
     AudioBedUpdate(GetFrameTime());
     LoadPump();                                   // (staged loading: an enemy that has finished loading joins the game)
-    Update();
+    MpPump();                                     // multiplayer: what the relay has sent
+    if (g_mpScreen) MpLobbyUpdate(); else Update();   // (the multiplayer screen holds the game behind it, as the map picker does)
     g_fogOn=g_hasMap;
     int post=!g_postOff;
     if (post && (g_pp.w!=GetScreenWidth() || g_pp.h!=GetScreenHeight())) PostInit(GetScreenWidth(),GetScreenHeight());
@@ -6131,7 +6194,7 @@ static void Frame(void) {
         rlPushMatrix(); rlScalef(g_uis,g_uis,1.0f);                   // everything 2D from here is in virtual pixels
 #endif
         if (post){
-            float lowhp=(!g_godMode && !g_dead && g_playerHp>0 && g_playerHp<35.0f) ? (1.0f-g_playerHp/35.0f) : (g_dead?1.0f:0.0f);
+            float lowhp=(!g_godMode && !g_dead && g_playerHp>0 && g_playerHp<35.0f) ? (1.0f-g_playerHp/35.0f) : (g_dead?(MpActive()?0.25f:1.0f):0.0f);   // (dead and watching, in multiplayer: only a tinge -- there is a fight to see)
             float P[4]={g_hurt,lowhp,g_shake,0}, tm=(float)GetTime();
             ClearBackground(BLACK);
             BeginShaderMode(g_pp.comp);
@@ -6143,7 +6206,8 @@ static void Frame(void) {
         DrawVignette(g_shake);                    // minigun: blurred/darkened edges while it rips
         DrawDamageOverlay();                       // red edge flash on damage / low hp / death wash
         DrawHUD();
-        if (g_menu) DrawMenu();
+        if (g_mpScreen) MpLobbyDraw();
+        else if (g_menu) DrawMenu();
         else if (g_paused) DrawPaused();
 #if defined(C2_IOS)
         TouchOverlayDraw(g_touchPlaying);
@@ -6459,6 +6523,7 @@ static void StartSelectedMap(void){
     memset(g_dyn,0,sizeof g_dyn); RunResetExtras();
     g_hurt=0.0f; g_hitMark=g_killMark=0.0f; g_recoilRet=0.0f; g_painAcc=g_painCd=0.0f; g_seenPrev=g_seenNow=0; g_appearCd=g_mobCd=0.0f; g_ambTense=0.0f;
     // (no boot spawns -- the wave director trickles wave 1 in after a short grace)
+    MpAfterMapStart();
 }
 
 // Tear down the current map before loading another. The scroll shader is shared by
@@ -6497,7 +6562,8 @@ static void WebFrame(void){
         if (++n==3 || (go && n<3)){ n=3; EM_ASM({ if (window.__c2_ready) window.__c2_ready(); }); }   // loaded: the page can offer the start
         if (hold){
             BeginDrawing(); ClearBackground(BLACK); EndDrawing();
-            if (go){ SetMasterVolume(vol); while (GetKeyPressed()!=0) {} }       // the start key is not a game key
+            if (go){ SetMasterVolume(vol); while (GetKeyPressed()!=0) {}         // the start key is not a game key
+                     if (EM_ASM_INT({ return window.__c2_mp ? 1 : 0; })) g_mpOpenAtStart=1; }   // (M on the page's title: the multiplayer screen first)
             return;
         }
     }
@@ -6912,6 +6978,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--vm-hold") && i+1<argc) g_vmHoldDev=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
         else if (!strcmp(argv[i],"--kite")) g_kite=1;
+        else if (!strcmp(argv[i],"--mp")) g_mpOpenAtStart=1;              // straight to the multiplayer screen
         else if (!strcmp(argv[i],"--no-intro")) g_noIntro=1;                // skip the title intro
         else if (!strcmp(argv[i],"--no-lod")) g_noLod=1;                    // always draw full-detail enemies
         else if (!strcmp(argv[i],"--viewer") && i+1<argc) g_viewA=argv[++i];        // model viewer (see viewer.h)
@@ -6935,7 +7002,7 @@ int main(int argc, char **argv) {
     // Send the JSON event stream straight to a log file (not stdout/stderr, so
     // it stays clean of raylib's own warnings). Fresh file each run.
     if (g_debug){
-        g_dbg=fopen("chernobyl2-debug.log","w");
+        { const char *dl=getenv("CHERNOBYL_DEBUG_LOG"); g_dbg=fopen((dl && *dl)?dl:"chernobyl2-debug.log","w"); }   // (two games at once -- a multiplayer test -- each need their own)
         if (!g_dbg) g_dbg=stderr;   // fall back if the file can't be opened
     }
 
@@ -7051,6 +7118,7 @@ int main(int argc, char **argv) {
     // from ../chernobyl level 0 by tools/grid2map.py), so with no --map it loads that
     // straight away; the picker is only a fallback if the arena file is missing. "Restart
     // Run" (ESC menu) and the death screen loop back here and reload it.
+    int fc=0;
     for (;;){
         if (!g_mapPath && !g_trapDemo && FileExists(DEFAULT_MAP)) g_mapPath=DEFAULT_MAP;
         if (!g_mapPath && !g_trapDemo){
@@ -7060,9 +7128,8 @@ int main(int argc, char **argv) {
         }
         StartSelectedMap();
         g_returnToMenu=0;
-        int fc=0;
         while (!WindowShouldClose() && !g_quit && !g_returnToMenu){ Frame(); if (g_maxFrames>0 && ++fc>=g_maxFrames) break; }
-        if (WindowShouldClose() || g_quit || g_maxFrames>0) break;   // real exit (headless --frames always exits)
+        if (WindowShouldClose() || g_quit || (g_maxFrames>0 && fc>=g_maxFrames)) break;   // real exit (headless --frames: once its frames are spent; a restarted run -- a multiplayer game beginning -- counts on)
         EndCurrentMap();                                             // "Restart Run": tear down and reload
         if (g_mapPathOwned){ free((void*)g_mapPath); g_mapPathOwned=0; }
         g_mapPath=NULL;                                              // -> DEFAULT_MAP again (picker only if it's gone)

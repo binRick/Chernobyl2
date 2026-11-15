@@ -565,10 +565,9 @@ static void MapNavBuild(Vector3 seed){
 
 // Recompute the distance-to-player flow field (BFS) when the player changes
 // cell. Cheap; one solve feeds every enemy.
-static void MapNavUpdate(Vector3 player){
-    if (!g_navOK) return;
+static int MapNavNodeOf(Vector3 player){                    // the nav node a player stands on (-1: nowhere near the grid)
     int pcx=(int)((player.x-g_navMn.x)/g_navCS), pcz=(int)((player.z-g_navMn.z)/g_navCS);
-    if (pcx<0||pcz<0||pcx>=g_navNX||pcz>=g_navNZ) return;
+    if (pcx<0||pcz<0||pcx>=g_navNX||pcz>=g_navNZ) return -1;
     int pci=pcz*g_navNX+pcx;
     int pl = (g_navNL[pci]>0) ? NavLayer(pci, player.y) : -1;
     if (pl<0 && g_navNL[pci]>0) pl=0;                      // in the column but height didn't match a storey -> use its base layer
@@ -577,13 +576,23 @@ static void MapNavUpdate(Vector3 player){
         for (int r=1;r<=3 && found<0;r++) for (int dz=-r;dz<=r;dz++) for (int dx=-r;dx<=r;dx++){
             int x=pcx+dx,z=pcz+dz; if(x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
             int c=z*g_navNX+x; if (g_navNL[c]>0){ int dd=dx*dx+dz*dz; if(dd<br){br=dd;found=c;} } }
-        if (found<0) return; pci=found; pl=NavLayer(pci,player.y); if(pl<0)pl=0;
+        if (found<0) return -1; pci=found; pl=NavLayer(pci,player.y); if(pl<0)pl=0;
     }
-    int pnode=pci*NAV_MAXL+pl;
+    return pci*NAV_MAXL+pl;
+}
+// One player, or (multiplayer) several: the field then leads each enemy to whichever is nearest by the route.
+static void MapNavUpdateN(const Vector3 *players, int n){
+    if (!g_navOK) return;
+    int src[8], ns=0; unsigned int key=0;
+    for (int k=0;k<n && ns<8;k++){ int nd=MapNavNodeOf(players[k]); if (nd<0) continue;
+        int dup=0; for (int j=0;j<ns;j++) if (src[j]==nd) dup=1;
+        if (!dup){ src[ns++]=nd; key+=(unsigned int)nd*2654435761u+17u; } }
+    if (ns==0) return;
+    int pnode=(ns==1)?src[0]:(int)(key&0x3fffffff);        // (g_navPlayerCell: "has the field's target changed", and >=0 once there is a field)
     if (pnode==g_navPlayerCell) return;
     g_navPlayerCell=pnode;
     long nn=(long)g_navNX*g_navNZ*NAV_MAXL; for (long i=0;i<nn;i++) g_navDist[i]=-1;
-    int head=0,tail=0; g_navDist[pnode]=0; g_navQueue[tail++]=pnode;
+    int head=0,tail=0; for (int k=0;k<ns;k++){ g_navDist[src[k]]=0; g_navQueue[tail++]=src[k]; }
     const int DX[8]={1,-1,0,0,1,1,-1,-1}, DZ[8]={0,0,1,-1,1,-1,1,-1};
     while (head<tail){
         int node=g_navQueue[head++]; int ci=node/NAV_MAXL; int cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[node];

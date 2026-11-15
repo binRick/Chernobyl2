@@ -108,7 +108,9 @@
 
 - (void)tick
 {
-    for (int i = 0; i < 2; i++) if (_auto[i] >= 0 && CACurrentMediaTime() - _began >= _auto[i]) { _auto[i] = -1; [self tap]; }
+    for (int i = 0; i < 2; i++) if (_auto[i] >= 0 && CACurrentMediaTime() - _began >= _auto[i]) {
+        if (i == 1 && !(_stage == 2 && _loaded && CACurrentMediaTime() - _stageAt > 1.0)) continue;   // (the start waits for the loading: a slow simulator)
+        _auto[i] = -1; [self tap]; }
     if (_stage == 1) {
         double c = _music.isPlaying ? _music.currentTime : CMTimeGetSeconds(_video.currentTime);
         double vt = CMTimeGetSeconds(_video.currentTime), vd = CMTimeGetSeconds(_video.currentItem.duration);
