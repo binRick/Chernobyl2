@@ -1,7 +1,8 @@
 // Touch overlay -- the on-screen controls of the iPhone build. Brought over from ../Chernobyl
 // (src/touch_overlay.c, its iOS port), where they were tuned on real phones: a floating stick
 // under the left thumb, the right half of the screen as a look pad, FIRE (drag on it to keep
-// aiming), JUMP, PAUSE and the four weapons. This game adds RELOAD and an edge-triggered fire.
+// aiming), JUMP, PAUSE and the four weapons. This game adds RELOAD, an edge-triggered fire, and
+// a button for a trap's switch that is only up while he stands at one.
 // Included once from main.c, on iOS only.
 //
 //   TouchOverlayPoll(playing)  at the top of the frame, before any input is read
@@ -18,6 +19,7 @@ typedef enum {
     CTRL_JUMP,
     CTRL_PAUSE,
     CTRL_RELOAD,
+    CTRL_USE,        // a trap's switch: only there while he stands at one (g_useShow)
     CTRL_WPN,        // wpnIdx field selects which (0..3)
     CTRL_MENU_TAP,   // any-tap on non-gameplay screens
 } TouchCtrl;
@@ -39,6 +41,11 @@ static struct {
 static int g_currentWeapon = 0;
 static void TouchOverlaySetSelectedWeapon(int w) { g_currentWeapon = w; }
 
+// Set by the traps each frame: 0 no switch in reach (no button), 1 it can be armed, 2 it is armed
+// and can be sprung now. The keyboard's E.
+static int g_useShow = 0;
+static void TouchOverlaySetUse(int u) { g_useShow = u; }
+
 // ── Per-frame outputs (recomputed in TouchOverlayPoll) ─────────────────────
 static struct {
     bool  fwd, back, left, right;
@@ -47,6 +54,7 @@ static struct {
     bool  lookActive;     // a look/fire finger moved this frame (auto-aim backs off)
     bool  jumpPressed;
     bool  reloadPressed;
+    bool  usePressed;
     bool  firePressed;    // the frame a finger lands on FIRE
     bool  pausePressed;
     int   wpnPressed;     // -1 if no weapon button tapped this frame
@@ -61,6 +69,7 @@ static struct {
     Vector2 fireC;  float fireR;
     Vector2 jumpC;  float jumpR;
     Vector2 relC;   float relR;
+    Vector2 useC;   float useR;
     Vector2 pauseC; float pauseR;
     Vector2 wpnC[4]; float wpnR;
 } g_lay;
@@ -86,6 +95,9 @@ static void RecalcLayout(void) {
 
     g_lay.relC   = (Vector2){ W * 0.905f, H * 0.475f };    // above FIRE, a thumb's reach up (and clear of the minimap)
     g_lay.relR   = m * 0.06f;
+
+    g_lay.useC   = (Vector2){ W * 0.765f, H * 0.475f };    // above JUMP, beside RELOAD
+    g_lay.useR   = m * 0.07f;
 
     g_lay.pauseC = (Vector2){ W * 0.045f, H * 0.09f };     // top left: this game's top right is the kill count and the minimap
     g_lay.pauseR = m * 0.04f;
@@ -126,6 +138,7 @@ static TouchCtrl Classify(Vector2 p, int gs, int *wpnIdx) {
     if (InCircle(p, g_lay.fireC, g_lay.fireR))   return CTRL_FIRE;
     if (InCircle(p, g_lay.jumpC, g_lay.jumpR))   return CTRL_JUMP;
     if (InCircle(p, g_lay.relC, g_lay.relR))     return CTRL_RELOAD;
+    if (g_useShow && InCircle(p, g_lay.useC, g_lay.useR)) return CTRL_USE;
     // Dynamic stick — anywhere on the left half that didn't hit a
     // higher-priority widget becomes the stick anchor for this touch.
     // The slot's origin (set in Poll() when the slot is allocated)
@@ -183,7 +196,7 @@ static void TouchOverlayPoll(int gs) {
     // edge-triggered ones default off and fire on touch begin.
     g_out.fwd = g_out.back = g_out.left = g_out.right = false;
     g_out.jumpPressed = g_out.pausePressed = g_out.menuConfirm = false;
-    g_out.reloadPressed = g_out.firePressed = false;
+    g_out.reloadPressed = g_out.firePressed = g_out.usePressed = false;
     g_out.menuTapX = g_out.menuTapY = -1.f;
     g_out.wpnPressed = -1;
     g_out.lookDX = g_out.lookDY = 0.f;
@@ -207,6 +220,7 @@ static void TouchOverlayPoll(int gs) {
             switch (c) {
                 case CTRL_JUMP:     g_out.jumpPressed = true; break;
                 case CTRL_RELOAD:   g_out.reloadPressed = true; break;
+                case CTRL_USE:      g_out.usePressed = true; break;
                 case CTRL_FIRE:     g_out.firePressed = true; break;
                 case CTRL_PAUSE:    g_out.pausePressed = true; break;
                 case CTRL_WPN:      g_out.wpnPressed = wi; break;
@@ -257,6 +271,7 @@ static void TouchOverlayPoll(int gs) {
             switch (c) {
                 case CTRL_JUMP:     g_out.jumpPressed = true; break;
                 case CTRL_RELOAD:   g_out.reloadPressed = true; break;
+                case CTRL_USE:      g_out.usePressed = true; break;
                 case CTRL_FIRE:     g_out.firePressed = true; break;
                 case CTRL_PAUSE:    g_out.pausePressed = true; break;
                 case CTRL_WPN:      g_out.wpnPressed = wi; break;
@@ -399,6 +414,15 @@ static void TouchOverlayDraw(int gs) {
     { int rz = (int)(g_lay.relR * 0.5f); int rw = MeasureText("RELOAD", rz);
       DrawText("RELOAD", (int)g_lay.relC.x - rw/2, (int)g_lay.relC.y - rz/2, rz, textCol); }
 
+    // USE (a trap's switch in reach)
+    if (g_useShow) {
+        const char *ul = (g_useShow == 2) ? "SPRING" : "ARM";
+        DrawCircleV(g_lay.useC, g_lay.useR, Fade((Color){90,220,110,255}, IsCtrlHeld(CTRL_USE, 0) ? 0.85f : 0.50f));
+        DrawCircleLinesV(g_lay.useC, g_lay.useR, Fade((Color){255,220,110,255}, 0.95f));
+        int uz = (int)(g_lay.useR * 0.5f); int uw = MeasureText(ul, uz);
+        DrawText(ul, (int)g_lay.useC.x - uw/2, (int)g_lay.useC.y - uz/2, uz, textCol);
+    }
+
     // JUMP
     DrawCircleV(g_lay.jumpC, g_lay.jumpR, jumpFill);
     DrawCircleLinesV(g_lay.jumpC, g_lay.jumpR, baseLine);
@@ -444,6 +468,7 @@ static float TouchOverlayLookDY(void)       { return g_out.lookDY; }
 static bool  TouchOverlayFireDown(void)     { return g_out.fireDown; }
 static bool  TouchOverlayJumpPressed(void)  { return g_out.jumpPressed; }
 static bool  TouchOverlayReloadPressed(void){ return g_out.reloadPressed; }
+static bool  TouchOverlayUsePressed(void)   { return g_out.usePressed; }
 static bool  TouchOverlayFirePressed(void)  { return g_out.firePressed; }
 static bool  TouchOverlayPausePressed(void) { return g_out.pausePressed; }
 static int   TouchOverlayWeaponPressed(void){ return g_out.wpnPressed; }

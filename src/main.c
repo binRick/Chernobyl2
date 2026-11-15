@@ -119,6 +119,7 @@ static bool C2KeyPressed(int k){
     if (g_touchPlaying){
         if (k==KEY_SPACE) return TouchOverlayJumpPressed();
         if (k==KEY_R) return TouchOverlayReloadPressed();
+        if (k==KEY_E) return TouchOverlayUsePressed();
         if (k==KEY_ESCAPE) return TouchOverlayPausePressed();
         if (k>=KEY_ONE && k<=KEY_FOUR) return TouchOverlayWeaponPressed()==k-KEY_ONE;
     }

@@ -154,6 +154,11 @@ static void TrapsSync(void){                                                    
         t->rv=(Vector3){cosf(a),0,sinf(a)}; t->tv=(Vector3){sinf(a),0,-cosf(a)}; t->run=kTrapRun[t->kind]; }
     DebugLog("traps","\"placed\":%d",g_nTraps);
 }
+#if defined(C2_IOS)
+#define TRAP_KEY ""                                                                  // (the phone has a button for it, labelled)
+#else
+#define TRAP_KEY "E  "
+#endif
 static int TrapNear(void){ int near=-1; float bd=2.6f;                               // the switch post he is standing at, if any
     for (int k=0;k<g_nTraps;k++){ Vector3 p=TW(&g_traps[k],kTrapSwitchX[g_traps[k].kind],0,kTrapSwitchZ[g_traps[k].kind]); float d=hypotf(p.x-g_pos.x,p.z-g_pos.z);
         if (d<bd && fabsf((g_pos.y-EYE_H)-p.y)<2.5f){ bd=d; near=k; } }
@@ -196,9 +201,17 @@ static int TrapMarks(Vector3 *pos, int *ready, int max){ int n=0;               
     for (int i=0;i<g_nTraps && n<max;i++){ const Trap *t=&g_traps[i]; pos[n]=TW(t,kTrapSwitchX[t->kind],0,kTrapSwitchZ[t->kind]); ready[n]=(t->state==0)?1:(t->state==3)?2:0; n++; }   // 1 can be armed, 2 armed and waiting, 0 going off / recharging
     return n; }
 static void TrapsUpdate(float dt){
+#if defined(C2_IOS)
+    TouchOverlaySetUse(0);
+#endif
     TrapsSync(); if (g_nTraps<=0) return;
+    { static int atTrap=-2; if (atTrap==-2){ const char *e=getenv("CHERNOBYL_AT_TRAP"); atTrap=e?atoi(e):-1; }      // dev: CHERNOBYL_AT_TRAP=<n> stands him at trap n's switch (stills and tests of the prompt)
+      if (atTrap>=0 && atTrap<g_nTraps){ const Trap *t=&g_traps[atTrap]; Vector3 p=TW(t,kTrapSwitchX[t->kind],0,kTrapSwitchZ[t->kind]); g_pos.x=p.x+1.2f; g_pos.z=p.z; g_pos.y=p.y+EYE_H; atTrap=-1; } }
     { int near=TrapNear();                                                           // E at a switch (sandbox: T the next, Y the lot)
-      if (near>=0 && IsKeyPressed(KEY_E) && !g_dead) TrapFire(near);
+#if defined(C2_IOS)
+      if (near>=0 && !g_dead) TouchOverlaySetUse(g_traps[near].state==0?1:g_traps[near].state==3?2:0);   // the phone's E: a button, up only here
+#endif
+      if (near>=0 && IsKeyPressed(KEY_E) && !g_dead)TrapFire(near);
       if (g_trapDemo && IsKeyPressed(KEY_T)){ TrapSpring(g_trapNext); g_trapNext=(g_trapNext+1)%TR_N; }
       if (g_trapDemo && IsKeyPressed(KEY_Y)) for (int k=0;k<TR_N;k++) TrapSpring(k);
       { static float fireIn=-2.0f; static int fireK=-1;                             // dev: CHERNOBYL_TRAP_FIRE=<n> sets off trap n two seconds in (stills of a trap in the plant)
@@ -562,7 +575,7 @@ static void TrapsHud(void){
         Vector3 at=TW(t,kTrapSwitchX[k],2.0f,kTrapSwitchZ[k]), to=Vector3Subtract(at,g_cam.position), fw=Vector3Subtract(g_cam.target,g_cam.position);
         if (Vector3DotProduct(to,fw)<=0.2f) continue;
         Vector2 s=GetWorldToScreen(at,g_cam); const char *st=(t->state==0)?"READY":(t->state==3)?"ARMED  -  springs when they reach it":(t->state==1)?"ACTIVE":"recharging";
-        const char *l=g_trapDemo?TextFormat("%d  %s", k+1, kTrapName[k]):TextFormat("%s%s", (t->state==0)?"E  ARM  ":(t->state==3)?"E  SPRING NOW  ":"", kTrapName[k]); int fs=18, w=MeasureText(l,fs);
+        const char *l=g_trapDemo?TextFormat("%d  %s", k+1, kTrapName[k]):TextFormat("%s%s", (t->state==0)?TRAP_KEY "ARM  ":(t->state==3)?TRAP_KEY "SPRING NOW  ":"", kTrapName[k]); int fs=18, w=MeasureText(l,fs);
         DrawText(l,(int)s.x-w/2+1,(int)s.y-21,fs,(Color){0,0,0,200}); DrawText(l,(int)s.x-w/2,(int)s.y-22,fs,(Color){255,220,110,255});
         w=MeasureText(st,14); DrawText(st,(int)s.x-w/2,(int)s.y-2,14,(t->state==0)?(Color){90,235,110,255}:(t->state==3)?(Color){255,200,60,255}:(t->state==1)?(Color){255,110,80,255}:(Color){170,160,110,255}); }
     if (!g_trapDemo) return;
