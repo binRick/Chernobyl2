@@ -75,5 +75,6 @@ targets:
           src="$SRCROOT/../build/web/fs"
           test -d "$src/assets" || { echo "run: python3 tools/web/pack_web.py"; exit 1; }
           for d in assets maps; do rsync -a --delete "$src/$d/" "$dst/$d/"; done
-          # the title intro (ios/C2Intro.m plays it): the page's files, less the two cards that speak of a keyboard
-          rsync -a --delete --exclude intro_controls.png --exclude intro_press.png "$SRCROOT/../build/web/intro/" "$dst/intro/"
+          # No title montage on the phone: its archival footage and music are not cleared for the App Store
+          # (docs/LICENSES.md), so ios/C2Intro.m shows the plain title card instead. Desktop and browser keep it.
+          rm -rf "$dst/intro"

@@ -15,7 +15,7 @@
     AVPlayer      *_video;
     AVPlayerLayer *_videoLayer;
     AVAudioPlayer *_music;
-    UIImageView   *_title;
+    UIView        *_title;          // the picture title, or the title-only card
     UILabel       *_prompt;
     NSTimer       *_tick;
     int            _stage;          // 1 montage, 2 title, 3 leaving
@@ -32,10 +32,10 @@
     NSBundle *b = [NSBundle mainBundle];
     NSString *v = [b pathForResource:@"intro" ofType:@"mp4" inDirectory:@"intro"];
     NSString *t = [b pathForResource:@"intro_title" ofType:@"jpg" inDirectory:@"intro"];
-    if (!v || !t) return nil;                                  // built without the intro: straight to the game
     C2IntroView *me = [[C2IntroView alloc] initWithFrame:host.bounds];
     me.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [host addSubview:me];
+    if (!v || !t) { [me startTitleOnly]; return me; }          // built without the montage (the App Store build): the title alone
     [me startWithVideo:v title:t
                  music:[b pathForResource:@"intro_music" ofType:@"mp3" inDirectory:@"intro"]
                  times:[b pathForResource:@"intro_times" ofType:@"txt" inDirectory:@"intro"]];
@@ -95,11 +95,58 @@
     _tick = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *tm) { [weak tick]; }];
 }
 
+// The title with nothing of the montage in it: no archival picture, no music. The App Store build ships
+// this one (the montage's footage and music are not cleared for sale: docs/LICENSES.md).
+- (void)startTitleOnly
+{
+    self.backgroundColor = [UIColor blackColor];
+    self.multipleTouchEnabled = NO;
+    UIView *card = [[UIView alloc] init];
+    card.backgroundColor = [UIColor blackColor];
+    UILabel *name = [[UILabel alloc] init];
+    name.text = @"CHERNOBYL 2";
+    name.font = [UIFont systemFontOfSize:96 weight:UIFontWeightBlack];
+    name.adjustsFontSizeToFitWidth = YES; name.minimumScaleFactor = 0.3;
+    name.textAlignment = NSTextAlignmentCenter;
+    name.textColor = [UIColor colorWithRed:0.86 green:0.08 blue:0.06 alpha:1];
+    name.tag = 1;
+    UILabel *sub = [[UILabel alloc] init];
+    sub.text = @"L I Q U I D A T O R";
+    sub.font = [UIFont fontWithName:@"Courier-Bold" size:22] ?: [UIFont boldSystemFontOfSize:22];
+    sub.textAlignment = NSTextAlignmentCenter;
+    sub.textColor = [UIColor colorWithWhite:0.75 alpha:1];
+    sub.tag = 2;
+    [card addSubview:name]; [card addSubview:sub];
+    _title = card;
+    [self addSubview:card];
+
+    _prompt = [[UILabel alloc] init];
+    _prompt.font = [UIFont fontWithName:@"Courier-Bold" size:20] ?: [UIFont boldSystemFontOfSize:20];
+    _prompt.textColor = [UIColor colorWithWhite:0.93 alpha:1];
+    _prompt.textAlignment = NSTextAlignmentCenter;
+    _prompt.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+    _prompt.layer.cornerRadius = 8; _prompt.layer.masksToBounds = YES;
+    _prompt.layer.borderWidth = 1; _prompt.layer.borderColor = [UIColor colorWithRed:0.59 green:0.09 blue:0.07 alpha:0.8].CGColor;
+    _prompt.hidden = YES;
+    [self addSubview:_prompt];
+
+    _auto[0] = _auto[1] = -1;
+    { const char *au = getenv("CHERNOBYL_INTRO_AUTO"); if (au) sscanf(au, "%lf,%lf", &_auto[0], &_auto[1]); }
+    _auto[0] = -1;                                             // (nothing to skip)
+    _stage = 2; _stageAt = _began = CACurrentMediaTime();
+    __weak C2IntroView *weak = self;
+    _tick = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *tm) { [weak tick]; }];
+}
+
 - (void)layoutSubviews
 {
     [super layoutSubviews];
     CGRect r = self.bounds;
     _title.frame = r;
+    { UIView *n = [_title viewWithTag:1], *s = [_title viewWithTag:2];        // (the title-only card)
+      if (n && s && ![_title isKindOfClass:[UIImageView class]]) {
+          n.frame = CGRectMake(r.size.width * 0.08, r.size.height * 0.28, r.size.width * 0.84, r.size.height * 0.30);
+          s.frame = CGRectMake(0, r.size.height * 0.60, r.size.width, 30); } }
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     _videoLayer.frame = r;
     [CATransaction commit];
