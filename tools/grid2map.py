@@ -562,10 +562,17 @@ def main():
                 if grid[r][c] == "#": continue
                 ax0, ax1, ay0, ay1 = max(x0, c * CELL), min(x1, (c + 1) * CELL), max(z0, r * CELL), min(z1, (r + 1) * CELL)
                 if ax1 - ax0 < 0.01 or ay1 - ay0 < 0.01: continue
-                mx, my = (ax0 + ax1) / 2, (ay0 + ay1) / 2
-                side = lambda bx_, by_: "hide" if solid_beyond(bx_, by_, top) else "edge"
-                out.append(box(ax0, ay0, 0, ax1, ay1, top, {"-x": side(ax0 - 0.02, my), "+x": side(ax1 + 0.02, my), "-y": side(mx, ay0 - 0.02), "+y": side(mx, ay1 + 0.02), "-z": "hide", "+z": "deck"}))
-                npiece += 1
+                # cut the piece again wherever another deck's edge falls along it, so each side is wholly against that
+                # deck or wholly open: one test point then tells. (Tested at the middle alone, a side half against a
+                # neighbour was hidden whole, and the player saw into the deck -- tools/map/check_risers.py.)
+                cx_ = sorted({ax0, ax1} | {v for (px0, pz0, px1, pz1, _t) in plats for v in (px0, px1) if ax0 + 0.01 < v < ax1 - 0.01})
+                cy_ = sorted({ay0, ay1} | {v for (px0, pz0, px1, pz1, _t) in plats for v in (pz0, pz1) if ay0 + 0.01 < v < ay1 - 0.01})
+                for bx0, bx1 in zip(cx_, cx_[1:]):
+                    for by0, by1 in zip(cy_, cy_[1:]):
+                        mx, my = (bx0 + bx1) / 2, (by0 + by1) / 2
+                        side = lambda bx_, by_: "hide" if solid_beyond(bx_, by_, top) else "edge"
+                        out.append(box(bx0, by0, 0, bx1, by1, top, {"-x": side(bx0 - 0.02, my), "+x": side(bx1 + 0.02, my), "-y": side(mx, by0 - 0.02), "+y": side(mx, by1 + 0.02), "-z": "hide", "+z": "deck"}))
+                        npiece += 1
     # lamp fixtures: a panel hung just under the ceiling -- lit, or dead
     for (cx, cz, (tex, _, _)) in LAMPS:
         x, z = (cx + 0.5) * CELL, (cz + 0.5) * CELL
