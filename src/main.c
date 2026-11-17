@@ -6075,6 +6075,10 @@ static void DrawHoleFX(void){
     rlEnableDepthMask();
 }
 #include "traps.h"                      // the plant's traps + their sandbox (--traps)
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
+#include "record.h"                     // dev: --record <out.mp4> (demo videos)
+#endif
+static const char *g_recPath = NULL;
 static void DrawScene(void){
     ClearBackground((Color){70,90,110,255});
     if (g_hasMap) DrawSky();                  // gradient sky shows through the map's sky openings
@@ -6149,6 +6153,9 @@ static void Frame(void) {
 #if defined(C2_IOS)
         TouchOverlayDraw(g_touchPlaying);
         rlPopMatrix();
+#endif
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
+        RecordFrame();                             // dev: --record films the frame
 #endif
     EndDrawing();
     if (g_debug && (frameNo%30==0))
@@ -6924,6 +6931,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--traps")){ g_trapDemo=1; g_godMode=1; g_noIntro=1; }   // dev: the trap sandbox (traps.h) -- no map, every trap in a ring
         else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
         else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
+        else if (!strcmp(argv[i],"--record") && i+1<argc) g_recPath=argv[++i];   // dev: film the game to an mp4 (demo videos)
         else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
@@ -6977,7 +6985,9 @@ int main(int argc, char **argv) {
     // Everything renders off GetScreenWidth/Height + the framebuffer aspect, so
     // the HUD and 3D views adapt to whatever resolution we land on.
     LoadOptions();
-    if (g_fullscreen && g_shotFrame<=0){
+    if (g_recPath){                                  // dev: --record films a borderless 1920x1080 (16:9, may overhang the screen)
+        SetWindowState(FLAG_WINDOW_UNDECORATED); SetWindowSize(1920,1080); SetWindowPosition(0,0);
+    } else if (g_fullscreen && g_shotFrame<=0){
         ApplyFullscreen(1);
         DebugLog("window","\"borderless\":true,\"w\":%d,\"h\":%d,\"monitor\":%d",
                  GetScreenWidth(), GetScreenHeight(), GetCurrentMonitor());
@@ -7006,6 +7016,9 @@ int main(int argc, char **argv) {
     if (getenv("CHERNOBYL_NO_LOD")) g_noLod=1;
     g_audio = IsAudioDeviceReady();
     DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
+    if (g_recPath) RecordStart(g_recPath);
+#endif
 
     // Everything the game needs -- sounds, guns, the eleven enemies, the map -- is loaded by LoadGameAssets. With the
     // title intro about to play it loads on a thread of its own WHILE the intro runs (the intro shows a bar instead of
