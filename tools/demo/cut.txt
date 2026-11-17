@@ -1,0 +1,20 @@
+# take | in(s) | dur(s) | vo beat or - | vo start within the segment (s)
+cold-1      | 0.3  | 6.0 | cold   | 1.2
+first-1     | 9.0  | 4.5 | first  | 0.6
+first-2     | 9.6  | 2.2 | -      | 0
+swarm-1     | 10.4 | 4.6 | swarm  | 0.4
+gore-1      | 10.0 | 3.8 | -      | 0
+flame-1     | 7.6  | 3.4 | -      | 0
+grenade-1   | 11.4 | 2.0 | -      | 0
+grenade-2   | 10.4 | 2.4 | -      | 0
+reload-2-1  | 1.4  | 1.8 | reload | 0.2
+reload-0-1  | 1.6  | 3.2 | -      | 0
+gore-2      | 17.5 | 3.0 | -      | 0
+trap-0-1    | 6.6  | 3.6 | traps  | 0.3
+trap-2-1    | 6.4  | 3.6 | -      | 0
+trap-4-1    | 6.2  | 3.4 | -      | 0
+trap-6-1    | 8.8  | 4.0 | -      | 0
+trap-3-2    | 0.1  | 1.8 | -      | 0
+swarm-2     | 12.0 | 4.0 | -      | 0
+flame-2     | 9.6  | 2.8 | -      | 0
+death-2     | 9.0  | 7.5 | death  | 2.5
