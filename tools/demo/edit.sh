@@ -11,6 +11,7 @@ T=build/demo/takes; V=build/demo/vo; W=${W:-build/demo/edit}; OUT=${OUT:-build/d
 INTRO=4.5; END=6
 rm -rf $W; mkdir -p $W
 dur(){ ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
+vtrim(){ mkdir -p $W/vo; local o=$W/vo/$(basename "${1%.*}").wav; python3 tools/demo/vo-trim.py trim "$1" "$o" && echo "$o"; }   # cut ElevenLabs' stray tail
 
 # a card: black, three layers fading in at their times (and the intro fading out at its end), silent
 card(){  # card <name> <prefix> <len> <fadeout 0|1> <t0> <t1> <t2>
@@ -38,6 +39,7 @@ while IFS='|' read -r -u 3 take in len vo at; do
   echo "file '$(basename $s)'" >> $W/list.txt
   if [ "$vo" != "-" ] && [ -n "$vo" ]; then
     clip=$(ls $V/*-$vo.mp3 2>/dev/null | head -1); [ -n "$clip" ] || { echo "no vo for $vo" >&2; exit 1; }
+    clip=$(vtrim $clip) || exit 1
     echo "$clip $(awk -v a=$t -v b=$at 'BEGIN{printf "%.3f", a+b}')" >> $W/vo.txt
   fi
   t=$(awk -v a=$t -v b=$len 'BEGIN{print a+b}'); n=$((n+1))
@@ -45,7 +47,7 @@ done 3< <(grep -v '^#' tools/demo/cut.txt)
 
 card title title $END 0 0 0.6 1.6 || exit 1
 echo "file 'title.mov'" >> $W/list.txt
-tl=$(ls $V/*-title.mp3 2>/dev/null | head -1); [ -n "$tl" ] && echo "$tl $(awk -v a=$t 'BEGIN{printf "%.3f",a+1.2}')" >> $W/vo.txt
+tl=$(ls $V/*-title.mp3 2>/dev/null | head -1); [ -n "$tl" ] && tl=$(vtrim $tl) && echo "$tl $(awk -v a=$t 'BEGIN{printf "%.3f",a+1.2}')" >> $W/vo.txt
 total=$(awk -v a=$t -v e=$END 'BEGIN{print a+e}')
 ffmpeg -nostdin -v error -y -f concat -safe 0 -i $W/list.txt -c copy $W/body.mov || exit 1
 

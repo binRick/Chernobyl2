@@ -3,6 +3,7 @@
 # finds each stretch of voice, and checks it against where edit.sh placed each line and how long that line is.
 cd "$(dirname "$0")/../.." || exit 1
 W=build/demo/edit-check OUT=build/demo/vo-check.mp4 GAME_VOL=0 tools/demo/edit.sh >/dev/null || { echo "FAIL edit"; exit 1; }
+python3 tools/demo/vo-trim.py check $(awk '{print $1}' build/demo/edit-check/vo.txt) || { echo "FAIL (a narration clip ends in a stray fragment)"; exit 1; }
 ffmpeg -nostdin -v error -y -i build/demo/vo-check.mp4 -vn -ac 1 -ar 8000 -f s16le build/demo/vo-check.raw || exit 1
 python3 - build/demo/vo-check.raw build/demo/edit-check/vo.txt <<'PY'
 import array, subprocess, sys
