@@ -1,0 +1,8 @@
+# beat | narration line (draft, ~75 words; a liquidator's testimony)
+cold    | They sent six hundred thousand of us. They called us liquidators.
+first   | Nobody told us what was still alive down there.
+swarm   | So we held the line. Corridor by corridor.
+reload  | Every round counts. Every second in the dark costs you.
+traps   | Use the plant. Steam. Current. Fire. Whatever stops them.
+death   | You don't leave the zone. You just buy the next one a little more time.
+title   | Chernobyl Two. Liquidator.

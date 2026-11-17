@@ -1966,6 +1966,7 @@ static int             g_godMode = 0;           // invulnerable cheat; G toggles
 static int             g_cheatUsed = 0;         // god mode was enabled this run -> the results get tagged
 static int             g_meleeDrain = 0;        // --melee-drain: legacy untimed contact damage, kept for A/B
 static int             g_reloadAt = 0;          // --reload-at N: force a reload at update frame N (dev: inspect reload anims)
+static const char     *g_recPath = NULL;        // --record <out.mp4>: dev, film the game (record.h)
 static int             g_kite = 0;              // --kite: dev autopilot -- face the nearest enemy and backpedal (repro chase glitches)
 static int             g_shotEvery = 0;         // --shot-every K: numbered screenshot every K frames (dev)
 static int             g_devCorpses = 0;        // --corpses N: lay out N cook corpses at run start (dev: test the priest)
@@ -4013,8 +4014,17 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     if (g_fleshSndCd>0) g_fleshSndCd-=dt;
     if (g_hitMark>0) g_hitMark-=dt;
     if (g_killMark>0) g_killMark-=dt;
-    int lmb=held || g_autoFire;
-    int lmbP=pressed || (g_autoFire && g_fireCd<=0.0f);
+    int af=g_autoFire;
+    if (af && g_recPath){                                          // filmed (--record): shoot like a player -- only at an enemy ahead and in range,
+        static float hold=0; hold-=dt;                             // and ease off the minigun before its 5 s overheat lock
+        Vector3 ff=Vector3Normalize((Vector3){fwd.x,0,fwd.z});
+        for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1){
+            Vector3 d={g_enemies[k].pos.x-g_pos.x,0,g_enemies[k].pos.z-g_pos.z}; float L=Vector3Length(d);
+            if (L<22.0f && L>0.01f && Vector3DotProduct(ff,Vector3Scale(d,1.0f/L))>0.93f){ hold=0.5f; break; } }
+        af = hold>0 && g_mgHeat<4.3f;
+    }
+    int lmb=held || af;
+    int lmbP=pressed || (af && g_fireCd<=0.0f);
     { float k=fminf(1.0f,dt*9.0f);                                 // sway: chase the look delta, clamp big flicks
       Vector2 t={ fmaxf(-40.0f,fminf(40.0f,g_vmLook.x)), fmaxf(-40.0f,fminf(40.0f,g_vmLook.y)) };
       g_vmSway.x+=(t.x-g_vmSway.x)*k; g_vmSway.y+=(t.y-g_vmSway.y)*k; g_vmLook=(Vector2){0,0}; }
@@ -4507,10 +4517,15 @@ static void Update(void) {
       if (!init){ init=1; const char *v=getenv("CHERNOBYL_WALK"); if (v) sscanf(v,"%f %f %f",&wx,&wz,&jz); }
       if (wx!=0 || wz!=0){ wish=(Vector3){wx,0,wz}; moving=1;
           if (jz<1e8f && ((wz<0 && g_pos.z<=jz) || (wz>0 && g_pos.z>=jz))){ g_devJump=1; jz=1e9f; } } }
+    { static int init=0; static float rate=0, pitch=-0.02f;                 // dev: CHERNOBYL_TURN="deg/s [startYawDeg] [pitch]" -- a slow camera pan (demo shots)
+      if (!init){ init=1; const char *v=getenv("CHERNOBYL_TURN"); float y0=1e9f; if (v){ sscanf(v,"%f %f %f",&rate,&y0,&pitch); if (y0<1e8f) g_yaw=y0*DEG2RAD; } }
+      if (rate!=0){ g_yaw+=rate*DEG2RAD*dt; g_pitch=pitch; } }
     if (g_kite){                                        // dev autopilot: face the nearest enemy, back away
         float bd=1e9f; int bi=-1;
         for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1){ float dd=Vector3Distance(g_enemies[k].pos,g_pos); if (dd<bd){ bd=dd; bi=k; } }
-        if (bi>=0){ g_yaw=atan2f(g_enemies[bi].pos.x-g_pos.x, g_enemies[bi].pos.z-g_pos.z); g_pitch=-0.05f;
+        if (bi>=0){ float ty=atan2f(g_enemies[bi].pos.x-g_pos.x, g_enemies[bi].pos.z-g_pos.z);
+            if (g_recPath){ float d=ty-g_yaw; while (d>PI) d-=2*PI; while (d<-PI) d+=2*PI; g_yaw+=d*fminf(1.0f,dt*4.0f); }   // filmed: ease round like a hand on a mouse, not a snap
+            else g_yaw=ty; g_pitch=-0.05f;
             flat=(Vector3){sinf(g_yaw),0,cosf(g_yaw)}; right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
             wish=Vector3Subtract(wish,flat); if (((int)(GetTime()/3.0))&1) wish=Vector3Add(wish,Vector3Scale(right,0.6f)); moving=1; }
     }
@@ -6075,6 +6090,9 @@ static void DrawHoleFX(void){
     rlEnableDepthMask();
 }
 #include "traps.h"                      // the plant's traps + their sandbox (--traps)
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
+#include "record.h"                     // dev: --record <out.mp4> (demo videos)
+#endif
 static void DrawScene(void){
     ClearBackground((Color){70,90,110,255});
     if (g_hasMap) DrawSky();                  // gradient sky shows through the map's sky openings
@@ -6149,6 +6167,9 @@ static void Frame(void) {
 #if defined(C2_IOS)
         TouchOverlayDraw(g_touchPlaying);
         rlPopMatrix();
+#endif
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
+        RecordFrame();                             // dev: --record films the frame
 #endif
     EndDrawing();
     if (g_debug && (frameNo%30==0))
@@ -6924,6 +6945,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--traps")){ g_trapDemo=1; g_godMode=1; g_noIntro=1; }   // dev: the trap sandbox (traps.h) -- no map, every trap in a ring
         else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
         else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
+        else if (!strcmp(argv[i],"--record") && i+1<argc) g_recPath=argv[++i];   // dev: film the game to an mp4 (demo videos)
+#endif
         else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
@@ -6977,7 +7001,9 @@ int main(int argc, char **argv) {
     // Everything renders off GetScreenWidth/Height + the framebuffer aspect, so
     // the HUD and 3D views adapt to whatever resolution we land on.
     LoadOptions();
-    if (g_fullscreen && g_shotFrame<=0){
+    if (g_recPath){                                  // dev: --record films a borderless 1920x1080 (16:9, may overhang the screen)
+        SetWindowState(FLAG_WINDOW_UNDECORATED); SetWindowSize(1920,1080); SetWindowPosition(0,0);
+    } else if (g_fullscreen && g_shotFrame<=0){
         ApplyFullscreen(1);
         DebugLog("window","\"borderless\":true,\"w\":%d,\"h\":%d,\"monitor\":%d",
                  GetScreenWidth(), GetScreenHeight(), GetCurrentMonitor());
@@ -6985,6 +7011,7 @@ int main(int argc, char **argv) {
 
     SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
     if (fpsOv>=0) SetTargetFPS(fpsOv);   // --fps: perf-gate override (0 = uncapped, 30 = throttled dt check)
+    if (g_recPath && fpsOv<0) SetTargetFPS(60);   // --record: one game frame per film frame (at 120 the 60 fps film dropped and repeated frames: judder)
     DisableCursor();
 
     // window + Dock/Cmd-Tab icon
@@ -7006,6 +7033,9 @@ int main(int argc, char **argv) {
     if (getenv("CHERNOBYL_NO_LOD")) g_noLod=1;
     g_audio = IsAudioDeviceReady();
     DebugLog("audio","\"ready\":%s", g_audio?"true":"false");
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
+    if (g_recPath) RecordStart(g_recPath);
+#endif
 
     // Everything the game needs -- sounds, guns, the eleven enemies, the map -- is loaded by LoadGameAssets. With the
     // title intro about to play it loads on a thread of its own WHILE the intro runs (the intro shows a bar instead of

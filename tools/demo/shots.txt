@@ -1,0 +1,20 @@
+# name | frames | game flags | env (besides CHERNOBYL_BACKGROUND=1 CHERNOBYL_CLEAN_HUD=1); _ in an env value is a space
+cold      | 600  | --no-enemies --god                            | CHERNOBYL_TURN=14_0_-0.02
+first     | 1500 | --god --kite                                  | 
+swarm     | 1500 | --god --kite --autofire --stress --weapon 2   | 
+gore      | 1500 | --god --kite --autofire --stress --weapon 1   | 
+flame     | 1500 | --god --kite --autofire --stress --weapon 5   | 
+grenade   | 1500 | --god --kite --autofire --stress --weapon 0   | 
+reload-2  | 330  | --no-enemies --god --weapon 2 --reload-at 90  | CHERNOBYL_RELOAD_REAL=empty CHERNOBYL_TURN=0_100_-0.02
+reload-5  | 330  | --no-enemies --god --weapon 5 --reload-at 90  | CHERNOBYL_RELOAD_REAL=empty CHERNOBYL_TURN=0_100_-0.02
+reload-0  | 330  | --no-enemies --god --weapon 0 --reload-at 90  | CHERNOBYL_RELOAD_REAL=empty CHERNOBYL_TURN=0_100_-0.02
+reload-1  | 330  | --no-enemies --god --weapon 1 --reload-at 90  | CHERNOBYL_RELOAD_REAL=empty CHERNOBYL_TURN=0_100_-0.02
+trap-0    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=0 CHERNOBYL_TRAP_FIRE=0_near CHERNOBYL_AT_PLAY=1
+trap-1    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=1 CHERNOBYL_TRAP_FIRE=1_near CHERNOBYL_AT_PLAY=1
+trap-2    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=2 CHERNOBYL_TRAP_FIRE=2_near CHERNOBYL_AT_PLAY=1
+trap-3    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=3 CHERNOBYL_TRAP_FIRE=3_near CHERNOBYL_AT_PLAY=1
+trap-4    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=4 CHERNOBYL_TRAP_FIRE=4_near CHERNOBYL_AT_PLAY=1
+trap-5    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=5 CHERNOBYL_TRAP_FIRE=5_near CHERNOBYL_AT_PLAY=1
+trap-6    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=6 CHERNOBYL_TRAP_FIRE=6_near CHERNOBYL_AT_PLAY=1
+trap-7    | 1800 | --god --stress                                | CHERNOBYL_AT_TRAP=7 CHERNOBYL_TRAP_FIRE=7_near CHERNOBYL_AT_PLAY=1
+death     | 1800 | --kite --autofire --stress --weapon 2         | 
