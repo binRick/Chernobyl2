@@ -6,7 +6,7 @@ mkdir -p build/demo; rm -f build/demo/t.mp4 build/demo/t.wav build/demo/m.mp4 bu
 fail=0; ok(){ echo "ok   $1"; }; bad(){ echo "FAIL $1"; fail=1; }
 num(){ awk -v a="$1" -v lo="$2" -v hi="$3" 'BEGIN{exit !(a>=lo && a<=hi)}'; }
 
-CHERNOBYL_BACKGROUND=1 ./build/chernobyl2 --no-intro --god --autofire --frames 300 --record build/demo/t.mp4 >build/demo/t.log 2>&1
+CHERNOBYL_BACKGROUND=1 ./build/chernobyl2 --no-intro --mute --god --autofire --frames 300 --record build/demo/t.mp4 >build/demo/t.log 2>&1
 f=build/demo/t.mp4
 [ -s $f ] && ok "file written" || { bad "no $f"; exit 1; }
 wh=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 $f)
@@ -17,6 +17,9 @@ vd=$(ffprobe -v error -select_streams v:0 -show_entries stream=duration -of csv=
 ad=$(ffprobe -v error -select_streams a:0 -show_entries stream=duration -of csv=p=0 $f)
 num "$vd" 3 8 && ok "video ${vd}s" || bad "video duration '$vd'"
 num "$ad" 3 8 && ok "audio ${ad}s" || bad "audio duration '$ad'"
+wd=$(ffprobe -v error -show_entries format=duration -of csv=p=0 build/demo/t.wav)      # the raw sound vs the picture: equal
+w=$(awk -v a="$vd" -v b="$wd" 'BEGIN{d=a-b; if(d<0)d=-d; print d}')                     # unless the sound began before the
+num "$w" 0 0.15 && ok "sound starts with the picture (wav ${wd}s)" || bad "sound and picture start apart: wav ${wd}s vs video ${vd}s"   # first frame
 d=$(awk -v a="$vd" -v b="$ad" 'BEGIN{d=a-b; if(d<0)d=-d; print d}')
 num "$d" 0 0.1 && ok "A/V differ ${d}s" || bad "A/V differ ${d}s"
 y=$(ffmpeg -v error -i $f -vf "select=gte(t\,2),signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-" -frames:v 1 -f null - 2>/dev/null | awk -F= '/YAVG/{print $2; exit}')
@@ -27,8 +30,10 @@ num "${mv:--99}" -40 1 && ok "sound present (${mv} dB)" || bad "sound silent ('$
 
 CHERNOBYL_BACKGROUND=1 ./build/chernobyl2 --no-intro --mute --frames 120 --record build/demo/m.mp4 >build/demo/m.log 2>&1
 [ $? -eq 0 ] && [ -s build/demo/m.mp4 ] && ok "--mute: video, no crash" || bad "--mute run"
+mm=$(ffmpeg -v info -i build/demo/m.mp4 -vn -af volumedetect -f null - 2>&1 | awk '/max_volume/{print $5}')
+num "${mm:--99}" -40 1 && ok "--mute still films the game's sound (${mm} dB)" || bad "--mute film is silent ('${mm}')"
 
-CHERNOBYL_BACKGROUND=1 PATH=/usr/bin:/bin ./build/chernobyl2 --no-intro --frames 120 --record build/demo/n.mp4 >build/demo/n.log 2>&1
+CHERNOBYL_BACKGROUND=1 PATH=/usr/bin:/bin ./build/chernobyl2 --no-intro --mute --frames 120 --record build/demo/n.mp4 >build/demo/n.log 2>&1
 [ $? -eq 0 ] && ok "no ffmpeg: game exits cleanly" || bad "no ffmpeg run exit $?"
 grep -q "record:" build/demo/n.log && ok "no ffmpeg: one error logged" || bad "no ffmpeg: nothing logged"
 

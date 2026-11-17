@@ -6945,7 +6945,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--traps")){ g_trapDemo=1; g_godMode=1; g_noIntro=1; }   // dev: the trap sandbox (traps.h) -- no map, every trap in a ring
         else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
         else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
+#if !defined(C2_IOS) && !defined(PLATFORM_WEB)
         else if (!strcmp(argv[i],"--record") && i+1<argc) g_recPath=argv[++i];   // dev: film the game to an mp4 (demo videos)
+#endif
         else if (!strcmp(argv[i],"--fps") && i+1<argc) fpsOv=atoi(argv[++i]);   // SetTargetFPS override (0 = uncapped)
         else if (!strcmp(argv[i],"--shot") && i+1<argc) g_shotFrame=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--no-enemies")) g_noEnemies=1;
@@ -7009,6 +7011,7 @@ int main(int argc, char **argv) {
 
     SetTargetFPS(120);   // 120 Hz target (ProMotion etc.); all motion is dt-scaled so physics is unchanged
     if (fpsOv>=0) SetTargetFPS(fpsOv);   // --fps: perf-gate override (0 = uncapped, 30 = throttled dt check)
+    if (g_recPath && fpsOv<0) SetTargetFPS(60);   // --record: one game frame per film frame (at 120 the 60 fps film dropped and repeated frames: judder)
     DisableCursor();
 
     // window + Dock/Cmd-Tab icon

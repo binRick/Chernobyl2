@@ -1,5 +1,5 @@
-# take | in(s) | dur(s) | vo beat or - | vo start within the segment (s)
-cold-1      | 0.3  | 6.0 | cold   | 1.2
+# take | in(s) | dur(s) | vo beat or - | vo start relative to the segment (s; negative = earlier, e.g. over the intro card)
+cold-1      | 0.3  | 6.0 | cold   | -3.3
 first-1     | 9.0  | 4.5 | first  | 0.6
 first-2     | 9.6  | 2.2 | -      | 0
 swarm-1     | 10.4 | 4.6 | swarm  | 0.4
