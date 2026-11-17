@@ -22,16 +22,7 @@
 		{
 			"doubleSided":true,
 			"name":"dark",
-			"normalTexture":{
-				"index":0
-			},
-			"occlusionTexture":{
-				"index":1
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":2
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.5
 			}
@@ -39,16 +30,7 @@
 		{
 			"doubleSided":true,
 			"name":"bare",
-			"normalTexture":{
-				"index":3
-			},
-			"occlusionTexture":{
-				"index":4
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":5
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.5199999809265137
 			}
@@ -81,64 +63,6 @@
 					"material":1
 				}
 			]
-		}
-	],
-	"textures":[
-		{
-			"sampler":0,
-			"source":0
-		},
-		{
-			"sampler":0,
-			"source":1
-		},
-		{
-			"sampler":0,
-			"source":2
-		},
-		{
-			"sampler":0,
-			"source":3
-		},
-		{
-			"sampler":0,
-			"source":4
-		},
-		{
-			"sampler":0,
-			"source":5
-		}
-	],
-	"images":[
-		{
-			"mimeType":"image/png",
-			"name":"dark_n",
-			"uri":"dark_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"dark_orm",
-			"uri":"dark_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"dark_c",
-			"uri":"dark_c.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"bare_n",
-			"uri":"bare_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"bare_orm",
-			"uri":"bare_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"bare_c",
-			"uri":"bare_c.png"
 		}
 	],
 	"accessors":[
@@ -309,12 +233,6 @@
 			"byteLength":11508,
 			"byteOffset":153864,
 			"target":34963
-		}
-	],
-	"samplers":[
-		{
-			"magFilter":9729,
-			"minFilter":9987
 		}
 	],
 	"buffers":[

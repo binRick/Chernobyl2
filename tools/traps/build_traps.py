@@ -232,6 +232,21 @@ def shade(o, floor, drop):
     bpy.ops.object.select_all(action="DESELECT"); o.select_set(True); bpy.context.view_layer.objects.active = o
 
 
+def no_images(path):
+    """Take the images out of an exported .gltf (they stay beside it as files). The game binds a part's textures by its
+    materials' names (src/traps.h TrapTexOf, src/mines.h MineMatOf): each sheet is read once, mipmapped, and shared by
+    every part that wears it. raylib's own glTF loader decodes every image a file names as well -- so each sheet was
+    decoded again for every part (183 decodes for 36 sheets: most of the 2.7 s the traps took to load), and its copies
+    of the normal and ORM sheets were never freed. A file that names no image is read for its geometry alone."""
+    import json
+    with open(path) as f: js = json.load(f)
+    for m in js.get("materials", []):
+        for k in ("normalTexture", "occlusionTexture", "emissiveTexture"): m.pop(k, None)
+        for k in ("baseColorTexture", "metallicRoughnessTexture"): m.get("pbrMetallicRoughness", {}).pop(k, None)
+    for k in ("images", "textures", "samplers"): js.pop(k, None)
+    with open(path, "w") as f: json.dump(js, f, indent="\t", separators=(",", ":")); f.write("\n")
+
+
 def export(name, pivot=(0, 0, 0)):
     global PARTS
     if ONLY and not name.startswith(ONLY):
@@ -246,6 +261,7 @@ def export(name, pivot=(0, 0, 0)):
     bpy.ops.export_scene.gltf(filepath=path, export_format="GLTF_SEPARATE", use_selection=True, export_yup=True, export_apply=True, export_tangents=True,
                               export_materials="EXPORT", export_image_format="AUTO", export_texture_dir="", export_animations=False,
                               export_vertex_color="ACTIVE", export_all_vertex_colors=False, export_active_vertex_color_when_no_material=True)
+    no_images(path)
     print(f"traps: {name:14s} {len(o.data.polygons):6d} faces  {os.path.getsize(os.path.join(OUT, name + '.bin')) / 1e6:5.2f} MB")
     bpy.data.objects.remove(o, do_unlink=True); PARTS = []
 

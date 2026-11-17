@@ -22,16 +22,7 @@
 		{
 			"doubleSided":true,
 			"name":"dark",
-			"normalTexture":{
-				"index":0
-			},
-			"occlusionTexture":{
-				"index":1
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":2
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.5
 			}
@@ -39,16 +30,7 @@
 		{
 			"doubleSided":true,
 			"name":"yellow",
-			"normalTexture":{
-				"index":3
-			},
-			"occlusionTexture":{
-				"index":4
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":5
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.5
 			}
@@ -56,16 +38,7 @@
 		{
 			"doubleSided":true,
 			"name":"bare",
-			"normalTexture":{
-				"index":6
-			},
-			"occlusionTexture":{
-				"index":7
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":8
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.5199999809265137
 			}
@@ -73,16 +46,7 @@
 		{
 			"doubleSided":true,
 			"name":"hazard",
-			"normalTexture":{
-				"index":9
-			},
-			"occlusionTexture":{
-				"index":10
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":11
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.550000011920929
 			}
@@ -90,16 +54,7 @@
 		{
 			"doubleSided":true,
 			"name":"grey",
-			"normalTexture":{
-				"index":12
-			},
-			"occlusionTexture":{
-				"index":13
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":14
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.550000011920929
 			}
@@ -107,16 +62,7 @@
 		{
 			"doubleSided":true,
 			"name":"red",
-			"normalTexture":{
-				"index":15
-			},
-			"occlusionTexture":{
-				"index":16
-			},
 			"pbrMetallicRoughness":{
-				"baseColorTexture":{
-					"index":17
-				},
 				"metallicFactor":0,
 				"roughnessFactor":0.44999998807907104
 			}
@@ -193,172 +139,6 @@
 					"material":5
 				}
 			]
-		}
-	],
-	"textures":[
-		{
-			"sampler":0,
-			"source":0
-		},
-		{
-			"sampler":0,
-			"source":1
-		},
-		{
-			"sampler":0,
-			"source":2
-		},
-		{
-			"sampler":0,
-			"source":3
-		},
-		{
-			"sampler":0,
-			"source":4
-		},
-		{
-			"sampler":0,
-			"source":5
-		},
-		{
-			"sampler":0,
-			"source":6
-		},
-		{
-			"sampler":0,
-			"source":7
-		},
-		{
-			"sampler":0,
-			"source":8
-		},
-		{
-			"sampler":0,
-			"source":9
-		},
-		{
-			"sampler":0,
-			"source":10
-		},
-		{
-			"sampler":0,
-			"source":11
-		},
-		{
-			"sampler":0,
-			"source":12
-		},
-		{
-			"sampler":0,
-			"source":13
-		},
-		{
-			"sampler":0,
-			"source":14
-		},
-		{
-			"sampler":0,
-			"source":15
-		},
-		{
-			"sampler":0,
-			"source":16
-		},
-		{
-			"sampler":0,
-			"source":17
-		}
-	],
-	"images":[
-		{
-			"mimeType":"image/png",
-			"name":"dark_n",
-			"uri":"dark_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"dark_orm",
-			"uri":"dark_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"dark_c",
-			"uri":"dark_c.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"yellow_n",
-			"uri":"yellow_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"yellow_orm",
-			"uri":"yellow_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"yellow_c",
-			"uri":"yellow_c.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"bare_n",
-			"uri":"bare_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"bare_orm",
-			"uri":"bare_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"bare_c",
-			"uri":"bare_c.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"hazard_n",
-			"uri":"hazard_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"hazard_orm",
-			"uri":"hazard_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"hazard_c",
-			"uri":"hazard_c.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"grey_n",
-			"uri":"grey_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"grey_orm",
-			"uri":"grey_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"grey_c",
-			"uri":"grey_c.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"red_n",
-			"uri":"red_n.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"red_orm",
-			"uri":"red_orm.png"
-		},
-		{
-			"mimeType":"image/png",
-			"name":"red_c",
-			"uri":"red_c.png"
 		}
 	],
 	"accessors":[
@@ -861,12 +641,6 @@
 			"byteLength":4224,
 			"byteOffset":1137448,
 			"target":34963
-		}
-	],
-	"samplers":[
-		{
-			"magFilter":9729,
-			"minFilter":9987
 		}
 	],
 	"buffers":[

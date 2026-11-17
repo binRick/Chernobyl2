@@ -143,14 +143,15 @@ def main():
                 im = Image.open(os.path.join(td, f)).convert("RGB"); im.thumbnail((512, 512), Image.LANCZOS)
                 dst = os.path.join(OUT, "assets", "traps", f[:-4] + ".jpg"); im.save(dst, quality=88); other += os.path.getsize(dst)
             elif f.endswith((".gltf", ".bin", ".txt", ".mp3", ".wav")): other += copy("assets/traps/" + f)
-    # the claymore on the floor (src/mines.h, weapon 5): the same way -- its glTF as it is, its textures at 512 px as JPEG
-    # (MineTex looks for .jpg where there is no .png); claymore_vm.txt, its sidecar, goes with the other assets/*.txt above
+    # the claymore (src/mines.h, weapon 5): its glTF as it is, its one sheet of textures as JPEG at the size it is built
+    # (1024 px of colour for the whole mine -- the hand's copy wears it too -- and 512 of normal and ORM; MineTex looks for
+    # .jpg where there is no .png); claymore_vm.txt, its sidecar, goes with the other assets/*.txt above
     md = os.path.join(REPO, "assets", "mines")
     if os.path.isdir(md):
         os.makedirs(os.path.join(OUT, "assets", "mines"), exist_ok=True)
         for f in sorted(os.listdir(md)):
             if f.endswith(".png"):
-                im = Image.open(os.path.join(md, f)).convert("RGB"); im.thumbnail((512, 512), Image.LANCZOS)
+                im = Image.open(os.path.join(md, f)).convert("RGB"); im.thumbnail((1024, 1024), Image.LANCZOS)
                 dst = os.path.join(OUT, "assets", "mines", f[:-4] + ".jpg"); im.save(dst, quality=88); other += os.path.getsize(dst)
             elif f.endswith((".gltf", ".bin")): other += copy("assets/mines/" + f)
     ed = os.path.join(REPO, "assets", "extra")

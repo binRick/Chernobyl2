@@ -483,7 +483,7 @@ static void TrapsLoadModels(void){
     Image a=GenImageColor(1,1,(Color){128,128,255,255}), b=GenImageColor(1,1,(Color){255,204,0,255}), c=GenImageColor(1,1,(Color){0,0,0,255});
     Texture2D flatN=LoadTextureFromImage(a), defOrm=LoadTextureFromImage(b), noEmi=LoadTextureFromImage(c); UnloadImage(a); UnloadImage(b); UnloadImage(c);
     for (int k=0;k<TM_N;k++){ char path[96]; snprintf(path,sizeof path,"assets/traps/%s.gltf",kTrapModel[k]); if (!FileExists(path)) continue;   // (its own buffer: TextFormat's are reused by the texture loads below)
-        SetTraceLogLevel(LOG_ERROR); Model m=LoadModel(path); SetTraceLogLevel(LOG_WARNING);      // (its own look for the normal / roughness images fails, loudly and harmlessly: they are loaded just below)
+        SetTraceLogLevel(LOG_ERROR); Model m=LoadModel(path); SetTraceLogLevel(LOG_WARNING);      // (the file names no images -- tools/traps/build_traps.py no_images -- so raylib reads its geometry alone: each sheet is loaded once, just below, by its material's name. When the files named them, raylib decoded all 183 of the 13 parts' images as well: most of the 2.7 s this took, and its normal and ORM copies were never freed)
         if (m.meshCount<=0) continue;
         { char *txt=LoadFileText(path); int mi=1;                                     // its materials, by name, in the file's order (raylib keeps its default material at 0)
           if (txt){ char *a=strstr(txt,"\"materials\""), *z=a?strstr(a,"\"meshes\""):NULL;

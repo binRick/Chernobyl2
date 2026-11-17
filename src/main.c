@@ -506,6 +506,7 @@ static void SfxAt(Sound snd, Vector3 at, float gain);
 static int MinesRayHit(Vector3 o, Vector3 d, float maxD, float *outD); static void MineSetOff(int i, float fuse);   // mines.h: a claymore
 static void MinesBlast(Vector3 p, float r);                                                          // shot or blasted goes off
 static void MinesPick(void); static void MinesAmmo(void);                                            // 5 takes one out; an ammo box adds one
+static void MinesReset(void);                                                                        // a new life: none laid, three carried
 static float SyNoise(void){ g_syRng=g_syRng*1664525u+1013904223u; return (float)((g_syRng>>8)&0xFFFF)/32768.0f-1.0f; }
 static void SynthInit(void){
     const int SR=44100;
@@ -1482,7 +1483,8 @@ static Shader g_skinShader; static int g_skinBonesLoc=-1, g_skinReady=-1;   // -
 static int g_skinLoc[7]={-1,-1,-1,-1,-1,-1,-1};   // lPos lCol lR lN ambient viewPos -
 static int g_skinAtm[6]={-1,-1,-1,-1,-1,-1};      // the air (AtmosLocs)
 static int g_fogOn=0;                          // the arena run fogs enemies; the gallery / menus don't
-static int g_skinEmiLoc=-1;
+static int g_skinEmiLoc=-1, g_skinMinLoc=-1;
+static void EnemyMinLit(float v){ if (g_skinReady==1 && g_skinMinLoc>=0) SetShaderValue(g_skinShader,g_skinMinLoc,&v,SHADER_UNIFORM_FLOAT); }   // the least light a surface is shown in (0: none -- everything but a laid claymore, mines.h)
 static void EnemyGlowDim(float dim){ if (g_skinReady==1 && g_skinEmiLoc>=0) SetShaderValue(g_skinShader,g_skinEmiLoc,&dim,SHADER_UNIFORM_FLOAT); }   // 0 = eyes lit, 1 = out
 static int EnemySkinInit(void){
     if (g_skinReady>=0) return g_skinReady;
@@ -1515,7 +1517,7 @@ static int EnemySkinInit(void){
         "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos; in vec3 fragNormal; in vec4 fragTangent;\n"
         "uniform sampler2D texture0; uniform sampler2D texture2; uniform sampler2D texOrm; uniform sampler2D texEmi; uniform float emiDim; uniform vec4 colDiffuse;\n"
         "uniform vec3 lPos[8]; uniform vec3 lCol[8]; uniform float lR[8]; uniform int lN;\n"
-        "uniform vec3 ambient; uniform vec3 viewPos;\n"
+        "uniform vec3 ambient; uniform vec3 viewPos; uniform float minLit;\n"
         "out vec4 finalColor;\n"
         GLSL_ATMOS
         "void main(){\n"
@@ -1538,6 +1540,7 @@ static int EnemySkinInit(void){
         "  float rim=pow(1.0-ndv,3.0);\n"
         "  float sheen=pow(1.0-ndv,4.0)*clamp((rough-0.78)*4.5,0.0,1.0)*0.30;\n"   // fabric fuzz
         "  vec3 lit=ambient*ao + dif*mix(1.0,ao,0.5) + sub*sss*0.6 + rim*0.22*vec3(0.75,0.8,0.9)*ao + sheen*ao;\n"
+        "  lit=max(lit,vec3(minLit));\n"   // (a laid claymore is never left darker than this: it has to be found again in a dark corner)
         "  spe*=fres;\n"
         "  vec3 c=t.rgb*colDiffuse.rgb*fragColor.rgb*clamp(lit,0.0,1.6) + spe*spi*mix(1.0,ao,0.5);\n"
         "  c+=texture(texEmi,fragTexCoord).rgb*(1.0-emiDim)*1.9;\n"   // self-lit: irradiated irises, mask lenses, embers; emiDim puts it out as he dies
@@ -1554,7 +1557,7 @@ static int EnemySkinInit(void){
         g_skinShader.locs[SHADER_LOC_MAP_NORMAL]=GetShaderLocation(g_skinShader,"texture2");
         g_skinShader.locs[SHADER_LOC_MAP_OCCLUSION]=GetShaderLocation(g_skinShader,"texOrm");
         g_skinShader.locs[SHADER_LOC_MAP_EMISSION]=GetShaderLocation(g_skinShader,"texEmi");
-        g_skinEmiLoc=GetShaderLocation(g_skinShader,"emiDim");
+        g_skinEmiLoc=GetShaderLocation(g_skinShader,"emiDim"); g_skinMinLoc=GetShaderLocation(g_skinShader,"minLit");
         g_skinShader.locs[SHADER_LOC_VERTEX_TANGENT]=GetShaderLocationAttrib(g_skinShader,"vertexTangent");
         if (g_skinBonesLoc>=0) g_skinReady=1;
     }
@@ -3927,6 +3930,7 @@ static void ShellFeed(Weapon *w, float pvT){
 // refill instantly behind a fixed delay; everything else plays its Reload clip.
 static void TryReload(void){
     Weapon *w=&g_weapons[g_curWeapon];
+    if (g_mineMode) return;                              // the claymore is in the hand and the gun put away: R (or an empty gun's own reload) worked it unseen, its reload sounding with no gun on screen. It reloads when it is drawn again (tests/claymore.sh)
     if (g_reloading || w->magSize<=0 || w->mag>=w->magSize || w->reserve<=0) return;
     if (w->grenade){
         // Breaking it open works the release, and the release clears ALL SIX chambers (that is what the clip shows: every case
@@ -3998,7 +4002,7 @@ static void ApplyFullscreen(int on){
 #include <ctype.h>
 #include "scores.h"                    // leaderboard: initials on the death screen, post + top scores
 static void RespawnPlayer(void){
-    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f; PickupsReset();
+    g_playerHp=100.0f; g_prevHp=100.0f; g_hurt=0.0f; PickupsReset(); MinesReset();   // (the claymores too: killed while laying one, he came back still kneeling, with what the last life had left)
     g_dead=0; g_deadT=0.0f; StopAllSfx();
     for (int i=0;i<g_numWeapons;i++){ g_weapons[i].mag=g_weapons[i].magSize; g_weapons[i].reserve=g_weapons[i].reserveStart; }
     g_flameFuel=0.0f; g_burstLeft=0;           // fresh loadout with the fresh life; no pending burst
@@ -4582,7 +4586,7 @@ static void Update(void) {
         if (IsKeyDown(KEY_LEFT_CONTROL)) g_pos.y -= speed*dt;
         g_vy=0; g_grounded=1;
     } else if (g_hasMap){                               // FPS collision against the loaded map mesh
-        if (g_grounded && (IsKeyPressed(KEY_SPACE) || g_devJump)){ g_vy=6.0f; g_grounded=0; g_devJump=0;
+        if (g_grounded && g_layT<0.0f && (IsKeyPressed(KEY_SPACE) || g_devJump)){ g_vy=6.0f; g_grounded=0; g_devJump=0;   // (not while knelt, laying a claymore: the kneel is measured from his feet)
             if (g_audio && g_hasSy){ SetSoundPitch(g_sy[SY_JUMP],0.95f+GetRandomValue(0,12)/100.0f); SetSoundVolume(g_sy[SY_JUMP],0.30f); PlaySound(g_sy[SY_JUMP]); } }
         float dn=MapRayNearest(g_pos,(Vector3){0,-1,0},80.0f);  // eye -> floor distance
         float floorEye = (dn>0) ? g_pos.y-dn+EYE_H : -1e30f;    // eye height standing on that floor
@@ -4606,7 +4610,7 @@ static void Update(void) {
             if (g_vy>0.0f){ float up=MapRayNearest(g_pos,(Vector3){0,1,0},0.4f); if (up>0) g_vy=0.0f; }  // ceiling
         }
     } else {
-        if (g_grounded && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
+        if (g_grounded && g_layT<0.0f && IsKeyPressed(KEY_SPACE)){ g_vy=5.0f; g_grounded=0; }
         g_vy-=16.0f*dt; g_pos.y+=g_vy*dt;
         if (g_pos.y<=EYE_H){ g_pos.y=EYE_H; g_vy=0; g_grounded=1; }
     }

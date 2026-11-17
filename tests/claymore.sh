@@ -17,4 +17,13 @@ n=$(grep -c '"ev":"mine","placed"' $L)
 [ "$n" = 3 ] && ok "laid three, then no more" || bad "laid $n (want 3: the three carried)"
 grep -q '"ev":"mine","empty":1' $L && ok "the last one laid: the gun back in the hand" || bad "never put away when empty"
 grep -q '"pick":0,"left":0' $L && ok "5 with none left: refused" || bad "no refusal logged for 5 with none left"
+# With the claymore in the hand the gun is put away: R (and an empty gun's own reload) must not work it unseen -- its
+# reload sounded with no gun on screen. It reloads when it is back in the hand. Hooks: --reload-at N empties the gun
+# (CHERNOBYL_RELOAD_REAL=empty) and asks for a reload at frame N; CHERNOBYL_MINE_GUN=s puts the claymore away after s.
+rm -f $L
+CHERNOBYL_BACKGROUND=1 CHERNOBYL_MINE_PICK="1.0" CHERNOBYL_MINE_GUN=9.0 CHERNOBYL_RELOAD_REAL=empty ./build/chernobyl2 --god --no-enemies --no-intro --mute --debug --weapon 2 --reload-at 300 --frames 1500 >/dev/null 2>&1 </dev/null
+g=$(grep -n -m1 '"ev":"mine","gun":1' $L | cut -d: -f1); f=$(grep -n -m1 '"ev":"frame","n":330,' $L | cut -d: -f1); r=$(grep -n -m1 '"ev":"reload"' $L | cut -d: -f1)
+[ -n "$g" ] && [ -n "$f" ] && [ "$f" -lt "$g" ] || bad "the run did not ask for a reload while the claymore was out (frame 330 at line '$f', gun back at '$g')"
+[ -n "$g" ] && { [ -z "$r" ] || [ "$r" -gt "$g" ]; } && ok "claymore in the hand: the put-away gun is not reloaded" || bad "the gun was reloaded while put away (reload at line '$r', gun back at line '$g')"
+[ -n "$g" ] && [ -n "$r" ] && [ "$r" -gt "$g" ] && ok "back in the hand, empty: it reloads" || bad "the empty gun never reloaded once it was back (reload at '$r', gun back at '$g')"
 [ $fail = 0 ] && echo PASS || { echo FAIL; exit 1; }

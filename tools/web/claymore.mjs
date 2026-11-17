@@ -1,6 +1,7 @@
 // Web check of weapon 5, the claymore (src/mines.h): the browser build loads it with the guns -- the hand model, the
-// floor model and its twelve textures, which the pack carries as .jpg (tools/web/pack_web.py) -- and 5 takes it out,
-// three carried. Drives a headless Chrome (sound off) over the DevTools protocol; keys go to that page only.
+// floor model (one mesh) and its sheet of three textures, which the pack carries as .jpg (tools/web/pack_web.py); the
+// hand model takes its two from what is already loaded -- and 5 takes it out, three carried.
+// Drives a headless Chrome (sound off) over the DevTools protocol; keys go to that page only.
 //   node tools/web/claymore.mjs [base-url] [shot.png]      (serve build/web/dist first: node tools/web/serve.mjs)
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -31,7 +32,7 @@ try {
   const t0 = Date.now(); while (Date.now() - t0 < 120000 && !/"ev":"frame"/.test(await log())) await sleep(500);
   const l0 = await log();
   const m = l0.match(/\{[^\n]*"ev":"mines"[^\n]*\}/);
-  ok(m && /"vm":1,"world":1/.test(m[0]) && /"tex":12/.test(m[0]), 'loaded with the guns: ' + (m ? m[0] : 'no "mines" line'));
+  ok(m && /"vm":1,"world":1/.test(m[0]) && /"meshes":1,"tex":3,"vmTex":2/.test(m[0]), 'loaded with the guns: ' + (m ? m[0] : 'no "mines" line'));
   await sleep(1500);
   await send('Input.dispatchKeyEvent', { type: 'keyDown', key: '5', code: 'Digit5', windowsVirtualKeyCode: 53, text: '5' }); await sleep(150);   // held across a frame: the game polls keys per frame
   await send('Input.dispatchKeyEvent', { type: 'keyUp', key: '5', code: 'Digit5', windowsVirtualKeyCode: 53 });

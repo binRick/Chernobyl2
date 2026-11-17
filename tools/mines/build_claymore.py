@@ -3,9 +3,11 @@
     blender -b -P tools/mines/build_claymore.py                 # build both, write the assets
     blender -b -P tools/mines/build_claymore.py -- look OUT.png # preview renders only (look | hold | lay), nothing written
 
-  assets/mines/claymore.gltf   the mine as it stands in the world, legs out -- drawn like a trap part, through the lit shader
+  assets/mines/claymore.gltf   the mine as it stands in the world, legs out -- drawn like a trap part, through the lit shader.
+                               One mesh on one sheet of textures (claymore_c / _n / _orm.png: one_sheet below)
   assets/claymore_vm.glb       first person: the right arm of assets/grenadelauncher.glb ("Grenadelauncher animated", DJMaesen,
-                               CC-BY-4.0 -- the same gloves as the launcher and the minigun) holding it. Clips: Idle (2 s loop), Lay (1 s)
+                               CC-BY-4.0 -- the same gloves as the launcher and the minigun) holding it. Clips: Idle (2 s loop), Lay (1 s).
+                               No textures inside: the game gives it the mine's colour sheet and the launcher's own sleeve (src/mines.h)
   assets/claymore_vm.txt       where the mine sits in the viewmodel's rest pose, for the hand-off to the world (src/mines.h)
 
 The mine is an M18A1: 216 x 83 x 35 mm, bowed (the front convex), FRONT TOWARD ENEMY raised on its face, two fuze wells
@@ -48,6 +50,66 @@ def materials():
     bt.material("claymore_dark", (0.12, 0.125, 0.085), rough=0.55, spec=0.25, chips=0.0, rust=0.0, grime=0.2, tile=0.25, seed=87)
     bt.material("claymore_steel", (0.40, 0.41, 0.42), rough=0.45, spec=0.5, chips=0.0, rust=0.25, grime=0.3, pattern="brushed", tile=0.25, seed=93)
     for m in ("claymore", "claymore_text", "claymore_dark"): soften(m, 0.3)
+
+
+SHEET, DENS, PAD = 1024, 512, 32       # the mine's one sheet: its side (px), px to a tile of the materials above, the margin round each patch
+def one_sheet(o):
+    """The mine's four materials onto one sheet, so it is one mesh -- one draw, and three textures (colour, normal, ORM)
+    where there were twelve. The traps' sheets tile, 1024 px to a tile; a tile here is 25 cm and the mine 22 cm long,
+    so half that (DENS) is already more than a screen shows of it. From each material's sheet the patch its faces use
+    is cut out whole (wrapping, with PAD px more of the same surface all round: nothing else bleeds in until the mips
+    are a few px across) and the faces' UVs are moved onto it -- by whole px, so no texel is resampled."""
+    import numpy as np
+    me = o.data; n = len(me.loops)
+    uv = np.empty(n * 2, np.float32); me.uv_layers[0].data.foreach_get("uv", uv); uv = uv.reshape(n, 2).astype(np.float64)
+    lm = np.empty(n, np.int32)
+    for p in me.polygons: lm[p.loop_start:p.loop_start + p.loop_total] = p.material_index
+    names = [s.material.name for s in o.material_slots]
+    patch = []                                                    # [slot, first px (u, v), size (w, h)] in px of its own sheet at DENS
+    for k in range(len(names)):
+        sel = lm == k
+        if not sel.any(): continue
+        i0 = np.floor(uv[sel].min(0) * DENS).astype(int) - PAD; i1 = np.ceil(uv[sel].max(0) * DENS).astype(int) + PAD
+        patch.append([k, i0, i1 - i0])
+    shelves = []; at = {}                                         # first fit, tallest first: [y, height, x used]
+    for k, i0, wh in sorted(patch, key=lambda q: -q[2][1]):
+        sh = next((s for s in shelves if s[2] + wh[0] <= SHEET and wh[1] <= s[1]), None)
+        if sh is None:
+            sh = [sum(s[1] for s in shelves), int(wh[1]), 0]; shelves.append(sh)
+        assert sh[0] + wh[1] <= SHEET and sh[2] + wh[0] <= SHEET, "the mine's patches no longer fit its sheet: lower DENS or PAD"
+        at[k] = (sh[2], sh[0]); sh[2] += int(wh[0])
+    kinds = ("c", "n", "orm"); src = {}
+    for k, i0, wh in patch:
+        for kind in kinds:
+            img = bpy.data.images[names[k] + "_" + kind]; s = img.size[0]
+            px = np.array(img.pixels[:], np.float32).reshape(s, s, 4)[..., :3]
+            if s > DENS: f = s // DENS; px = px.reshape(DENS, f, DENS, f, 3).mean(axis=(1, 3))
+            elif s < DENS: px = px.repeat(DENS // s, axis=0).repeat(DENS // s, axis=1)
+            src[k, kind] = px
+    fill = {"c": np.mean([src[k, "c"].mean(axis=(0, 1)) for k, _, _ in patch], axis=0), "n": np.array([0.5, 0.5, 1.0]),
+            "orm": np.mean([src[k, "orm"].mean(axis=(0, 1)) for k, _, _ in patch], axis=0)}
+    sheet = {kind: np.empty((SHEET, SHEET, 3), np.float32) for kind in kinds}
+    for kind in kinds: sheet[kind][:] = fill[kind]
+    for k, i0, wh in patch:
+        x0, y0 = at[k]; cols = (i0[0] + np.arange(wh[0])) % DENS; rows = (i0[1] + np.arange(wh[1])) % DENS
+        for kind in kinds: sheet[kind][y0:y0 + wh[1], x0:x0 + wh[0]] = src[k, kind][np.ix_(rows, cols)]
+        sel = lm == k
+        uv[sel, 0] = (uv[sel, 0] * DENS - i0[0] + x0) / SHEET; uv[sel, 1] = (uv[sel, 1] * DENS - i0[1] + y0) / SHEET
+    me.uv_layers[0].data.foreach_set("uv", uv.astype(np.float32).ravel())
+    for kind in ("n", "orm"):                                     # the detail maps at half the colour's size (the normal re-normalised)
+        h = sheet[kind].reshape(SHEET // 2, 2, SHEET // 2, 2, 3).mean(axis=(1, 3))
+        if kind == "n": v = h * 2.0 - 1.0; v /= np.linalg.norm(v, axis=-1, keepdims=True); h = v * 0.5 + 0.5
+        sheet[kind] = h
+    keep = o.material_slots[0].material                           # everything onto the first material ("claymore"), its three images the sheet
+    for p in me.polygons: p.material_index = 0
+    while len(me.materials) > 1: me.materials.pop(index=len(me.materials) - 1)
+    for nm in names:
+        for kind in kinds: bpy.data.images[nm + "_" + kind].name = "was_" + nm + "_" + kind
+    for nd in keep.node_tree.nodes:
+        if nd.type == "TEX_IMAGE" and nd.image:
+            kind = nd.image.name.rsplit("_", 1)[1]; nd.image = bt.to_img(keep.name + "_" + kind, sheet[kind], kind != "c")
+    used = sum(int(wh[0]) * int(wh[1]) for _, _, wh in patch) / float(SHEET * SHEET)
+    print("one_sheet: " + ", ".join(f"{names[k]} {int(wh[0])}x{int(wh[1])} at {at[k]}" for k, _, wh in patch) + f"; {used:.0%} of {SHEET} px used")
 
 
 def bowed_box(x0, x1, u0, u1, o0, o1, mat, bevel, nx=24):
@@ -99,6 +161,7 @@ def build_mine():
     for o in bt.PARTS: o.select_set(True)
     bpy.context.view_layer.objects.active = bt.PARTS[0]; bpy.ops.object.join(); o = bpy.context.object; o.name = "claymore"
     bt.shade(o, floor=True, drop=0.0)
+    one_sheet(o)
     bt.PARTS = []
     return o
 
@@ -390,25 +453,22 @@ def export_world(mine):
     bpy.ops.export_scene.gltf(filepath=path, export_format="GLTF_SEPARATE", use_selection=True, export_yup=True, export_apply=True, export_tangents=True,
                               export_materials="EXPORT", export_image_format="AUTO", export_texture_dir="", export_animations=False,
                               export_vertex_color="ACTIVE", export_all_vertex_colors=False, export_active_vertex_color_when_no_material=True)
+    bt.no_images(path)                                            # (the sheet stays beside it as three files; the game binds them by the material's name, once)
     print(f"export: {path} ({len(mine.data.polygons)} faces)")
 
 
-def colour_only(objs):
-    """The viewmodel is drawn by raylib's default shader (texture x vertex colour, as the guns are): its normal, roughness and
-    occlusion maps would be dead weight in the file. Unlinked here (after the world's export, which keeps them)."""
-    for o in objs:
-        for slot in o.material_slots:
-            m = slot.material
-            if not m or not m.use_nodes: continue
-            nt = m.node_tree
-            for l in list(nt.links):
-                to = l.to_node; name = l.to_socket.name
-                if (to.type == "BSDF_PRINCIPLED" and name in ("Normal", "Metallic", "Roughness")) or (to.type == "GROUP" and name == "Occlusion"):
-                    nt.links.remove(l)
-
-
 def export_vm(arm, me, cvm, frame):
-    colour_only((me, cvm))
+    """No images go into the file (export_image_format NONE): the game draws the viewmodel with raylib's default shader --
+    texture x vertex colour, as the guns are -- and gives it textures it has already loaded: the mine's colour sheet
+    (assets/mines/claymore_c.png) and the launcher's own sleeve and glove. Its materials keep their names for that,
+    and are left plain white: the game's texture is all the colour there is."""
+    for o in (me, cvm):
+        for slot in o.material_slots:
+            nt = slot.material.node_tree if slot.material and slot.material.use_nodes else None
+            b = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None) if nt else None
+            if b is None: continue
+            for l in list(b.inputs["Base Color"].links): nt.links.remove(l)
+            b.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
     bpy.ops.object.select_all(action="DESELECT")
     for o in (arm, me, cvm): o.select_set(True)
     bpy.context.view_layer.objects.active = arm
@@ -419,7 +479,7 @@ def export_vm(arm, me, cvm, frame):
     print("actions:", [(a.name, [str(sl.identifier) for sl in getattr(a, "slots", [])], tuple(a.frame_range)) for a in bpy.data.actions])
     bpy.ops.export_scene.gltf(filepath=VM_PATH, export_format="GLB", use_selection=True, export_yup=True, export_apply=False, export_skins=True,
                               export_def_bones=False, export_rest_position_armature=True, export_animations=True, export_animation_mode="NLA_TRACKS",
-                              export_force_sampling=True, export_frame_step=1, export_materials="EXPORT", export_image_format="AUTO",
+                              export_force_sampling=True, export_frame_step=1, export_materials="EXPORT", export_image_format="NONE",
                               export_vertex_color="ACTIVE", export_all_vertex_colors=False, export_active_vertex_color_when_no_material=True)
     o, a, u, f = frame
     with open(FRAME_PATH, "w") as fh:                              # read by src/mines.h (MinesLoad); glTF axes, the model's own units (cm)
