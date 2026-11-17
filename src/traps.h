@@ -133,13 +133,15 @@ static int TrapInZone(const Trap *t, const Enemy *e){                           
     }
     return 0;
 }
-static void TrapHurt(int i, float dmg, int cause, Vector3 from){
+static int g_trapVictim=-1, g_trapVictimDied=0;                                    // dev: CHERNOBYL_TRAP_VICTIM (below) -- read where he is hurt: a body
+static void TrapHurt(int i, float dmg, int cause, Vector3 from){                    // a crush throws apart frees its slot at once, and a new man can fill it
     Enemy *e=&g_enemies[i]; int oc=g_hurtCause; Vector3 of=g_hurtFrom; g_hurtCause=cause; g_hurtFrom=from;
     if (!e->boss) dmg=99999.0f;                      // a trap that catches a man kills him, whichever trap (the owner's rule). A boss still takes each trap's own damage
 
     Vector3 d=Vector3Subtract(e->pos,from); d.y=0; float l=Vector3Length(d); d=(l>1e-3f)?Vector3Scale(d,1.0f/l):(Vector3){0,0,1};
     HurtEnemy(i,dmg,0,d,(Vector3){e->pos.x,e->pos.y+1.0f,e->pos.z},cause!=HC_FLAME);
     g_hurtCause=oc; g_hurtFrom=of;
+    if (i==g_trapVictim && e->state!=1) g_trapVictimDied=1;
 }
 static float CraneTop(const Trap *t){ return 4.6f*t->ys-(t->ys<1.0f?0.25f:0.0f); }                 // where its load hangs
 static float CraneY(const Trap *t, float on){ float y0=CraneTop(t), y=y0; if (on<0) return y0;
@@ -164,13 +166,16 @@ static int TrapNear(void){ int near=-1; float bd=2.6f;                          
         if (d<bd && fabsf((g_pos.y-EYE_H)-p.y)<2.5f){ bd=d; near=k; } }
     return near; }
 // What of a trap is solid: its posts, legs, tank, casing -- and the door when it is down, the load when it lies on the floor.
+// The load and the door turn solid only once their crush has been dealt (aux==1): enemies move before the traps each
+// frame, so a solid load the frame it landed shoved the man under it clear before it could kill him (he was thrown out
+// in front, alive -- tests/traps-kill.sh).
 static int TrapCircles(const Trap *t, float out[][3]){ int n=0, k=t->kind;
     #define TC(x,z,r) { out[n][0]=(x); out[n][1]=(z); out[n][2]=(r); n++; }
     TC(kTrapSwitchX[k],kTrapSwitchZ[k],0.26f)
     if (k==TR_STEAM){ TC(-3.3f,0,0.3f) TC(3.3f,0,0.36f) }
     if (k==TR_HOSE){ TC(-4.2f,0.3f,0.5f) }
-    if (k==TR_CRANE){ TC(-3.7f,0,0.5f) TC(3.7f,0,0.5f) if (t->state==1 && t->stage==1 && t->t<t->run-1.5f) TC(0,0,1.85f) }
-    if (k==TR_DOOR){ TC(-1.95f,0,0.6f) TC(1.95f,0,0.6f) if (t->state==1 && t->stage>=1 && t->t<t->run-1.6f){ TC(-1.1f,0,0.6f) TC(0,0,0.6f) TC(1.1f,0,0.6f) } }
+    if (k==TR_CRANE){ TC(-3.7f,0,0.5f) TC(3.7f,0,0.5f) if (t->state==1 && t->stage==1 && t->aux==1 && t->t<t->run-1.5f) TC(0,0,1.85f) }
+    if (k==TR_DOOR){ TC(-1.95f,0,0.6f) TC(1.95f,0,0.6f) if (t->state==1 && t->stage>=1 && t->aux==1 && t->t<t->run-1.6f){ TC(-1.1f,0,0.6f) TC(0,0,0.6f) TC(1.1f,0,0.6f) } }
     if (k==TR_SPILL){ TC(-3.6f,0.9f,1.05f) }
     if (k==TR_TURBINE){ TC(0,1.75f,1.6f) TC(0,3.0f,1.6f) TC(0,4.3f,1.6f) }
     #undef TC
@@ -223,6 +228,17 @@ static void TrapsUpdate(float dt){
           if (fireIn>0.0f){ for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==1 && TrapInZone(t,&g_enemies[i])){ fireIn=0.001f; break; } }
           if (t->kind==TR_SPILL && t->state==1 && t->t>5.0f && !lit){ lit=1; TrapFire(fireK); } }   // (the spill: lit once they are slipping in it)
         if (fireIn>0.0f && fireK>=0 && fireK<g_nTraps){ fireIn-=dt; if (fireIn<=0.0f){ TrapSpring(fireK); fireIn=-1.0f; } }
+        { static int vk=-2, vi=-1; static float after=-1;                         // dev: CHERNOBYL_TRAP_VICTIM=<n> holds the nearest man under trap n as it goes
+          static float ox=0, oz=0;                                                   // ("<n> <x> <z>": held there, in the trap's own axes)
+          if (vk==-2){ const char *v=getenv("CHERNOBYL_TRAP_VICTIM"); vk=-1; if (v) sscanf(v,"%d %f %f",&vk,&ox,&oz); }   // off, then logs whether it killed him (tests/traps-kill.sh)
+          if (vk>=0 && vk<g_nTraps){ Trap *t=&g_traps[vk];
+            if (vi<0){ int bi=-1; float bd=1e9f; for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==1 && !g_enemies[i].boss && g_enemies[i].climbT<=0){ float d=Vector3Distance(g_enemies[i].pos,t->c); if (d<bd){ bd=d; bi=i; } }
+              if (bi>=0){ vi=bi; g_trapVictim=bi; TrapSpring(vk); DebugLog("trap","\"k\":%d,\"victim\":%d,\"what\":\"placed\"",vk,vi); } }
+            if (vi>=0 && after==-1){ Enemy *e=&g_enemies[vi];
+              if (t->stage==0 && e->state==1){ Vector3 p=TW(t,ox,0,oz); e->pos.x=p.x; e->pos.z=p.z; e->vel=(Vector3){0,0,0}; }   // held under it until it comes down
+              if (t->stage>=1) after=0.6f; }
+            if (after>0){ int died=g_trapVictimDied;
+              after-=dt; if (died || after<=0){ DebugLog("trap","\"k\":%d,\"victim\":%d,\"outcome\":\"%s\"",vk,vi,died?"dead":"alive"); after=-2; } } } }
         static int armAll=-1; if (armAll<0) armAll=getenv("CHERNOBYL_TRAP_ARM")?1:0;                 // dev: CHERNOBYL_TRAP_ARM=1 keeps every trap armed (tests of them springing)
         if (armAll) for (int k=0;k<g_nTraps;k++) if (g_traps[k].state==0) g_traps[k].state=3; }
       if (!g_trapDemo) goto run;
@@ -246,7 +262,7 @@ static void TrapsUpdate(float dt){
                                if (floorf(t->t*2.0f)!=floorf(pt*2.0f)){ TrapHurt(i,26.0f,HC_BULLET,TW(t,x,-1.0f,z)); SpawnImpact((Vector3){ep.x,ep.y+1.0f,ep.z},(Vector3){0,1,0}); } } break;
             case TR_HOSE: if (t->t>0.35f && x>-3.6f && x<-3.6f+11.0f*fminf(1.0f,(t->t-0.35f)*4.0f) && fabsf(z)<1.0f){ if (e->boss) EnemyKnock(i,Vector3Scale(t->tv,7.5f)); else TrapHurt(i,99999.0f,HC_BLAST,TW(t,x-3.0f,1.0f,z)); } break;       // (along the jet: it throws a boss, and breaks anyone else)
             case TR_SURGE: if (pt<0.45f && t->t>=0.45f){ float d=sqrtf(x*x+z*z); if (t->hole>=0 && e->climbT>0 && e->hole==t->hole) d=0.0f;   /* still climbing out of the breach it vents */ if (d<1.9f) TrapHurt(i,99999.0f,HC_BLAST,TW(t,0,-1.0f,0)); else if (d<5.5f) TrapHurt(i,85.0f,HC_BLAST,t->c); } break;
-            case TR_CRANE: if (t->stage==1 && t->aux==0 && fabsf(x)<1.5f && fabsf(z)<1.5f) TrapHurt(i,99999.0f,HC_BLAST,TW(t,x,6.0f,z)); break;
+            case TR_CRANE: if (t->stage==1 && t->aux==0 && x*x+z*z<1.85f*1.85f) TrapHurt(i,99999.0f,HC_BLAST,TW(t,x,6.0f,z)); break;   // all the load lands on (its solid round, TrapCircles)
             case TR_DOOR: if (t->stage==1 && t->aux==0 && fabsf(x)<1.5f && fabsf(z)<0.55f) TrapHurt(i,99999.0f,HC_BLAST,TW(t,x,5.0f,z));
                           else if (t->stage>=1 && t->t<t->run-2.0f && fabsf(x)<1.6f && fabsf(z)<0.75f) EnemyNudge(i,t->rv.x*(z<0?-1:1)*(0.75f-fabsf(z)),t->rv.z*(z<0?-1:1)*(0.75f-fabsf(z))); break;   // shut: nobody through
             case TR_SPILL: { float r=3.3f*fminf(1.0f,t->t*0.5f), d=sqrtf((x+1.0f)*(x+1.0f)+z*z); if (d<r){
