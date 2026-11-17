@@ -562,11 +562,6 @@ static Sound  g_wave2Snd; static int g_hasWave2Snd = 0;   // ...and wave 2 on an
 static Sound  g_wave1Snd; static int g_hasWave1Snd = 0;   // the run opens on a voice: Russian dialogue over wave 1's start (in place of the sting)
 static Sound  g_clearSnd; static int g_hasClearSnd = 0;   // wave-clear sting
 
-static void SaveTune(const char *path, Vector3 off, float scale, float yaw, float pitch, float roll, int idleHold){
-    FILE *f=fopen(path,"w"); if(!f) return;
-    fprintf(f,"%.5f %.5f %.5f %.6f %.2f %.2f %.2f %d\n", off.x,off.y,off.z,scale,yaw,pitch,roll,idleHold);
-    fclose(f);
-}
 static int LoadTune(const char *path, Vector3 *off, float *scale, float *yaw, float *pitch, float *roll, int *idleHold){
     FILE *f=fopen(path,"r"); if(!f) return 0;
     float ox,oy,oz,sc,yw,pt,rl=0.0f; int ih=-1;
@@ -718,7 +713,8 @@ static void SwitchWeapon(int n){
     ActivateWeapon(n);
     g_drawTopUp=1;                                     // drawn: top it up if it isn't full (WeaponTrigger, once it is raised)
     g_vmRaise=1.0f;                // new gun comes up from below the frame
-    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\"", n, g_weapons[n].label);
+    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"trim\":[%.2f,%.2f,%.2f,%.3f,%.2f,%.2f,%.2f]", n, g_weapons[n].label,
+             g_vmOff.x,g_vmOff.y,g_vmOff.z,g_vmScale,g_vmYaw,g_vmPitch,g_vmRoll);   // (the framing it is held in: tests/gun-trim.sh)
 }
 // Measure a model's bbox CENTRE + max extent from its current vertex data.
 // useAnim picks mesh.animVertices (the posed buffer raylib actually draws) over
@@ -973,7 +969,8 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     // carries idleHold too and wins.
     w->idleHold=-1;
     { Vector3 o; float a,b,c,d; LoadTune(w->tunePath,&o,&a,&b,&c,&d,&w->idleHold); }
-    { int ih=w->idleHold; if (LoadTune(w->trimPath,&w->off,&w->scale,&w->yaw,&w->pitch,&w->roll,&ih)) w->idleHold=(ih>=0)?ih:w->idleHold; }
+    // (No saved vm_trim_*.txt is read: the guns sit where the code frames them. A trim saved by the old tuning keys --
+    // a stray press tilted the grenade launcher 22 degrees -- kept coming back every start. tests/gun-trim.sh)
     DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
              slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
 }
@@ -6743,14 +6740,12 @@ static void LoadGameAssets(void){
     if (g_weapons[1].hasSnd) SetSoundVolume(g_weapons[1].fireSnd, 0.72f);    // the blast, pulled back so the pump after it can be heard
     // Auto viewmodel frames: measured after the per-slot flags (pinGun/grenade/spinUp
     // pick the rest pose + the pinned-gun path), so every gun is framed as drawn.
-    // Per-weapon default trims (code-owned; a saved vm_trim_*.txt still wins).
+    // Per-weapon default trims (code-owned).
     { struct { int slot; Vector3 off; float scale; } D[]={
         { 3, {0.0f, 0.03f, 0.25f}, 1.0f },     // LMG: pulled in from the heavy class slot so it fills the frame
       };
       for (unsigned i=0;i<sizeof D/sizeof D[0];i++){ Weapon *w=&g_weapons[D[i].slot];
-          int saved=FileExists(w->trimPath);
-          w->off0=D[i].off; w->scale0=D[i].scale;
-          if (!saved){ w->off=w->off0; w->scale=w->scale0; } } }
+          w->off0=D[i].off; w->scale0=D[i].scale; w->off=w->off0; w->scale=w->scale0; } }
     if (getenv("VMAIM")) sscanf(getenv("VMAIM"),"%f %f",&g_vmAimR,&g_vmAimD);
     for (int c=0;c<VM_NCLASS;c++){ char ev[16]; snprintf(ev,sizeof ev,"VMCLASS%d",c); const char *e=getenv(ev);
         if (e) sscanf(e,"%f %f %f %f %f",&kVmClass[c].len,&kVmClass[c].pos.x,&kVmClass[c].pos.y,&kVmClass[c].pos.z,&kVmClass[c].conv); }
@@ -7100,13 +7095,7 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    StashActiveTuning();
-    // Persist trims -- but never a --vm dev override (it would silently become the
-    // weapon's saved framing), and only once a trim is non-neutral or already saved,
-    // so untouched guns keep following the auto frame + class table.
-    if (!vmHas) for (int i=0;i<g_numWeapons;i++){ Weapon *w=&g_weapons[i];
-        int neutral = w->off.x==w->off0.x && w->off.y==w->off0.y && w->off.z==w->off0.z && w->scale==w->scale0 && w->yaw==w->yaw0 && w->pitch==w->pitch0 && w->roll==w->roll0;
-        if (!neutral || FileExists(w->trimPath)) SaveTune(w->trimPath,w->off,w->scale,w->yaw,w->pitch,w->roll,w->idleHold); }
+    // (Nothing about the guns' framing is saved at quit: there is no way to change it in play.)
     LogPerfStats();                        // frame-time stats for the perf gate
     DebugLog("shutdown","\"ok\":true");
     for (int i=0;i<g_numWeapons;i++) if (g_weapons[i].has){
