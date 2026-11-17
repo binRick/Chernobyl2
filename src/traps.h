@@ -215,7 +215,13 @@ static void TrapsUpdate(float dt){
       if (g_trapDemo && IsKeyPressed(KEY_T)){ TrapSpring(g_trapNext); g_trapNext=(g_trapNext+1)%TR_N; }
       if (g_trapDemo && IsKeyPressed(KEY_Y)) for (int k=0;k<TR_N;k++) TrapSpring(k);
       { static float fireIn=-2.0f; static int fireK=-1;                             // dev: CHERNOBYL_TRAP_FIRE=<n> sets off trap n two seconds in (stills of a trap in the plant)
-        if (fireIn<-1.0f){ const char *v=getenv("CHERNOBYL_TRAP_FIRE"); fireK=v?atoi(v):-1; fireIn=v?2.0f:-1.0f; }
+        static int whenNear=0, lit=0;                                                // CHERNOBYL_TRAP_FIRE="<n> near": face trap n and set it off once an enemy is
+        if (fireIn<-1.0f){ const char *v=getenv("CHERNOBYL_TRAP_FIRE"); fireK=v?atoi(v):-1; fireIn=v?2.0f:-1.0f;     // in it (25 s at most) -- demo footage of a trap taking someone
+          if (v && strstr(v,"near")){ whenNear=1; fireIn=25.0f; } }
+        if (whenNear && fireK>=0 && fireK<g_nTraps){ const Trap *t=&g_traps[fireK];
+          g_yaw=atan2f(t->c.x-g_pos.x, t->c.z-g_pos.z); g_pitch=-0.08f;
+          if (fireIn>0.0f){ for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==1 && TrapInZone(t,&g_enemies[i])){ fireIn=0.001f; break; } }
+          if (t->kind==TR_SPILL && t->state==1 && t->t>5.0f && !lit){ lit=1; TrapFire(fireK); } }   // (the spill: lit once they are slipping in it)
         if (fireIn>0.0f && fireK>=0 && fireK<g_nTraps){ fireIn-=dt; if (fireIn<=0.0f){ TrapSpring(fireK); fireIn=-1.0f; } }
         static int armAll=-1; if (armAll<0) armAll=getenv("CHERNOBYL_TRAP_ARM")?1:0;                 // dev: CHERNOBYL_TRAP_ARM=1 keeps every trap armed (tests of them springing)
         if (armAll) for (int k=0;k<g_nTraps;k++) if (g_traps[k].state==0) g_traps[k].state=3; }

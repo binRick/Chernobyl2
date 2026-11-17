@@ -90,9 +90,9 @@ static void RecordStop(void){
         RecWavHeader(g_recWav,rate,(unsigned)(s*8)); fclose(g_recWav); g_recWav=NULL; haveWav=s>0;
     }
     char cmd[4096];
-    if (haveWav) snprintf(cmd,sizeof cmd,"ffmpeg -v error -y -i '%s' -i '%s' -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart '%s' && rm -f '%s'",
+    if (haveWav) snprintf(cmd,sizeof cmd,"ffmpeg -nostdin -v error -y -i '%s' -i '%s' -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart '%s' && rm -f '%s'",
                           g_recTmp,g_recWavPath,g_recOut,g_recTmp);
-    else         snprintf(cmd,sizeof cmd,"ffmpeg -v error -y -i '%s' -c copy -movflags +faststart '%s' && rm -f '%s'",g_recTmp,g_recOut,g_recTmp);
+    else         snprintf(cmd,sizeof cmd,"ffmpeg -nostdin -v error -y -i '%s' -c copy -movflags +faststart '%s' && rm -f '%s'",g_recTmp,g_recOut,g_recTmp);
     if (system(cmd)!=0) fprintf(stderr,"record: mux failed; raw video left at %s\n",g_recTmp);
 }
 #endif
