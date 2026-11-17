@@ -655,42 +655,8 @@ def press_png(path):
     im.save(path)
 
 
-# Title-screen controls (keep in step with main.c: kSlotForKey maps keys 1-4 to slots).
-CONTROLS = [("MOVE", "W A S D"), ("LOOK", "MOUSE"), ("FIRE", "LEFT CLICK"), ("RELOAD", "R"),
-            ("SPRINT", "SHIFT"), ("JUMP", "SPACE"), ("MENU", "ESC")]
-WEAPONS = [("1", "MINIGUN"), ("2", "FLAMETHROWER"), ("3", "GRENADE LAUNCHER"), ("4", "REMINGTON")]
-
-
-def controls_png(path):
-    """Two teletype columns flanking the hammer & sickle on the title screen."""
-    im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    fh = ImageFont.truetype(FONT_TTY, 24)
-    fr = ImageFont.truetype(FONT_TTY, 17)
-    fk = ImageFont.truetype(FONT_TTY, 22)
-    def column(x0, x1, ru, en, rows, key_first):
-        y0, step = 300, 34
-        pan = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(pan).rectangle([x0 - 22, y0 - 58, x1 + 22, y0 + step * len(rows) + 8], fill=(0, 0, 0, 165))
-        im.alpha_composite(pan.filter(ImageFilter.GaussianBlur(10)))
-        d = ImageDraw.Draw(im)
-        d.text((x0, y0 - 52), ru, font=fr, fill=(214, 40, 28, 255))
-        d.text((x0, y0 - 32), en, font=fh, fill=(238, 234, 222, 255))
-        d.line([x0, y0 - 4, x1, y0 - 4], fill=(214, 40, 28, 200), width=2)
-        for i, (a, b) in enumerate(rows):
-            y = y0 + 6 + i * step
-            if key_first:      # "1   MINIGUN"
-                d.text((x0, y), a, font=fk, fill=(214, 40, 28, 255))
-                d.text((x0 + 44, y), b, font=fk, fill=(238, 234, 222, 255))
-            else:              # "MOVE ..... W A S D"
-                d.text((x0, y), a, font=fk, fill=(214, 40, 28, 255))
-                w = d.textlength(b, font=fk)
-                d.text((x1 - w, y), b, font=fk, fill=(238, 234, 222, 255))
-    column(70, 400, "УПРАВЛЕНИЕ", "CONTROLS", CONTROLS, False)
-    column(880, 1210, "ОРУЖИЕ", "WEAPONS", WEAPONS, True)
-    a = np.asarray(im, np.float32)                       # grain, as on the subtitles
-    rng = np.random.default_rng(42)
-    a[..., :3] = np.clip(a[..., :3] + rng.normal(0, 9, a.shape[:2])[..., None], 0, 255)
-    Image.fromarray(a.astype(np.uint8), "RGBA").save(path)
+# Title-screen controls: tools/intro/controls.py (apart, so a change of keys does not need this script's librosa).
+from controls import controls_png  # noqa: E402  (this script's own folder is on the path when it runs)
 
 
 def export_game_assets():

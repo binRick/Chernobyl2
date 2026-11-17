@@ -35,6 +35,8 @@
   #iload { position:absolute; left:0; right:0; top:90.5%; transform:translateY(-50%); text-align:center; color:#aaa69c; font-size:min(2.2vw,16px); letter-spacing:2px; }
   #snd { position:absolute; left:50%; top:7%; transform:translateX(-50%); display:none; padding:12px 26px; background:rgba(0,0,0,.78); border:1px solid #c0392b; color:#f1ead8; font-size:20px; letter-spacing:3px; white-space:nowrap; cursor:pointer; animation:sndp 1.3s ease-in-out infinite; }
   @keyframes sndp { 0%,100% { opacity:.55 } 50% { opacity:1 } }
+  #imute { position:absolute; right:10px; top:8px; padding:8px 10px; color:#8d8980; font-size:12px; letter-spacing:2px; text-shadow:0 0 4px #000; cursor:pointer; user-select:none; -webkit-user-select:none; }
+  #imute.on { color:#c8c8d2; }
   #note { position:absolute; right:14px; bottom:10px; color:#8d8980; font-size:12px; letter-spacing:1px; text-shadow:0 0 4px #000; }
   #fade { position:fixed; inset:0; background:#000; opacity:0; z-index:30; pointer-events:none; transition:opacity 1.2s linear; }
   @keyframes flicker { 0% { filter:brightness(.93); } 33% { filter:brightness(1); } 66% { filter:brightness(.96); } }
@@ -48,7 +50,7 @@
     <hr>
     <p><b>W A S D</b> move &nbsp; <b>MOUSE</b> look &nbsp; <b>CLICK</b> fire &nbsp; <b>R</b> reload</p>
     <p><b>SHIFT</b> sprint &nbsp; <b>SPACE</b> jump &nbsp; <b>M</b> mute &nbsp; <b>ESC</b> menu</p>
-    <p><b>1</b> minigun &nbsp; <b>2</b> flamethrower &nbsp; <b>3</b> grenade launcher &nbsp; <b>4</b> Remington</p>
+    <p><b>1</b> minigun &nbsp; <b>2</b> flamethrower &nbsp; <b>3</b> grenade launcher &nbsp; <b>4</b> Remington &nbsp; <b>5</b> claymore</p>
     <div id="bar"><div id="fill"></div></div>
     <div id="cta">loading&hellip;</div>
     <div id="sub"></div>
@@ -61,6 +63,7 @@
     </div>
     <div id="snd">&#9834; &nbsp;CLICK OR PRESS ANY KEY FOR SOUND</div>
     <div id="note"></div>
+    <div id="imute">M &nbsp;MUTE</div>
   </div>
   <div id="fade"></div>
   <div id="stage"><canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas></div>
@@ -104,7 +107,7 @@
     }
     function tick(){
       if (stage===0 || stage===3) return;
-      $('snd').style.display = (!soundOn && stage===1) ? 'block' : 'none';       // a browser will not start sound unasked: say so, plainly, until it has been asked
+      $('snd').style.display = (!soundOn && !userMuted && stage===1) ? 'block' : 'none';       // a browser will not start sound unasked: say so, plainly, until it has been asked (not once it has been muted)
       if (stage===1){
         var c=(soundOn && inStep) ? music.currentTime : vid.currentTime;                     // (silent so far: the picture keeps its own time)
         if (soundOn && inStep && Math.abs(vid.currentTime-c)>0.25 && vid.readyState>=2 && c<vid.duration-0.3){ try { vid.currentTime=c; } catch(e){} }   // the picture follows the music
@@ -130,14 +133,28 @@
         fade.style.transition='opacity .5s linear'; fade.style.opacity=0;
       }, 1250);
     }
+    function soundIn(){                             // the music comes in, in step with the picture
+      var at = (stage===1) ? vid.currentTime : Math.max(0,tStamp+Math.min(4,now()-stageAt));
+      music.muted=false; music.volume=1;
+      var p=music.play(); soundOn=true;
+      var seek=function(){ try { if (Math.abs(music.currentTime-at)>0.3) music.currentTime=at+(now()-t0); } catch(x){} inStep=true; }, t0=now();
+      if (music.readyState>=1) seek(); else music.addEventListener('loadedmetadata', seek, {once:true});      // (not loaded far enough to seek yet: as soon as it is)
+      if (p && p.then) p.then(function(){ console.log('intro: sound on at '+at.toFixed(1)+'s'); }).catch(function(e){ soundOn=false; console.log('intro: sound refused: '+e); });
+    }
+    // M (or a click on MUTE, top right) mutes the intro as M does the game, and the game starts as it was left
+    // (window.__c2_muted, read by the game's WebFrame). Never a skip. Unmuting is asking for sound: it brings the music in.
+    var userMuted=false, imute=$('imute');
+    function setMuted(m){
+      userMuted=m; window.__c2_muted=m;
+      imute.innerHTML = m ? 'MUTED &nbsp;(M)' : 'M &nbsp;MUTE'; imute.className = m ? 'on' : '';
+      if (music){ if (m) music.muted=true; else if (soundOn) music.muted=false; else if (stage===1 || stage===2) soundIn(); }
+      console.log('intro: '+(m ? 'muted' : 'unmuted'));
+    }
+    function muteClick(e){ e.preventDefault(); e.stopPropagation(); if (stage===1 || stage===2) setMuted(!userMuted); }
+    imute.addEventListener('mousedown', muteClick); imute.addEventListener('touchend', muteClick, {passive:false});
     function introInput(e){
-      if (!soundOn && music && (stage===1 || stage===2)){                        // the first input: the music comes in, in step with the picture (and is not a skip)
-        var at = (stage===1) ? vid.currentTime : Math.max(0,tStamp+Math.min(4,now()-stageAt));
-        music.muted=false; music.volume=1;
-        var p=music.play(); soundOn=true;
-        var seek=function(){ try { if (Math.abs(music.currentTime-at)>0.3) music.currentTime=at+(now()-t0); } catch(x){} inStep=true; }, t0=now();
-        if (music.readyState>=1) seek(); else music.addEventListener('loadedmetadata', seek, {once:true});      // (not loaded far enough to seek yet: as soon as it is)
-        if (p && p.then) p.then(function(){ console.log('intro: sound on at '+at.toFixed(1)+'s'); }).catch(function(e){ soundOn=false; console.log('intro: sound refused: '+e); });
+      if (!soundOn && !userMuted && music && (stage===1 || stage===2)){           // the first input: the music comes in (and is not a skip) -- unless it has been muted
+        soundIn();
         if (stage===1) return;
       }
       if (stage===1){ if (now()-stageAt>1.5) toTitle(true); }
@@ -146,7 +163,9 @@
     document.addEventListener('keydown', function(e){
       if (stage!==1 && stage!==2) return;
       if (e.metaKey || e.ctrlKey || e.altKey || /^(Shift|Control|Alt|Meta|CapsLock|ContextMenu)$/.test(e.key)) return;   // system chords are not a skip
-      e.preventDefault(); introInput(e);
+      e.preventDefault();
+      if (e.key==='m' || e.key==='M'){ setMuted(!userMuted); return; }    // M mutes, as in the game: never a skip
+      introInput(e);
     }, true);
     intro.addEventListener('mousedown', introInput);
     intro.addEventListener('touchend', function(e){ e.preventDefault(); introInput(e); }, {passive:false});

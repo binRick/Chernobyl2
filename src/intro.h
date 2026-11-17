@@ -2,7 +2,8 @@
 // its own music (assets/intro_music.mp3), then the CHERNOBYL 2 title held with
 // "PRESS ANY KEY" while Hell March plays on. Any key during the montage jumps to the
 // title (landing on the hammer-and-sickle stamp); a key on the title fades out into
-// the game. Built by tools/intro/build_intro.py; included once from main.c.
+// the game. M is not a skip: it mutes, as in the game, and the game starts the way it
+// was left. Built by tools/intro/build_intro.py; included once from main.c.
 //
 // The video is slaved to the music clock (GetMusicTimePlayed), so picture and sound
 // never drift. The intro keeps its music even under --mute (the montage is mostly its
@@ -37,9 +38,11 @@ static void IntroBlit(Texture2D t, Color tint){
 // CHERNOBYL_INTRO_AUTO="skipAt,startAt" (seconds since the intro began): dev/test only --
 // presses "a key" itself, so the intro can be exercised without a human at the keyboard.
 static float g_introAuto[2]={-1,-1}, g_introWall=0.0f;
+static int g_introAutoKey=0;                                   // the last "key" IntroAnyInput reported was the hook's
 static float g_introFocusT=0.0f, g_introShot=-1.0f;          // seconds the window has been focused
+static Rectangle g_introMuteR={0};                            // the MUTE label as last drawn (top right): a click on it mutes, never skips
 static int IntroAnyInput(void){
-    for (int i=0;i<2;i++) if (g_introAuto[i]>=0 && g_introWall>=g_introAuto[i]){ g_introAuto[i]=-1; return 1; }
+    for (int i=0;i<2;i++) if (g_introAuto[i]>=0 && g_introWall>=g_introAuto[i]){ g_introAuto[i]=-1; g_introAutoKey=1; return 1; }
     // A key only counts if it was meant for the game. Cmd+Tab (and every other system chord) used
     // to skip the montage: Cmd and Tab are keys too, and they arrive just as the window loses
     // focus. So: modifiers on their own never count, nothing counts while Cmd / Ctrl / Alt is
@@ -48,13 +51,28 @@ static int IntroAnyInput(void){
     while ((q=GetKeyPressed())!=0){
         if (q==KEY_LEFT_SUPER || q==KEY_RIGHT_SUPER || q==KEY_LEFT_ALT || q==KEY_RIGHT_ALT || q==KEY_LEFT_CONTROL || q==KEY_RIGHT_CONTROL ||
             q==KEY_LEFT_SHIFT || q==KEY_RIGHT_SHIFT || q==KEY_CAPS_LOCK || q==KEY_KB_MENU) continue;
+        if (q==KEY_M) continue;                           // M mutes (RunIntro), as in the game: never a skip
         k=q; }
     int chord=IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER) || IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT) ||
               IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     int click=IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+    if (click && g_introMuteR.width>0 && CheckCollisionPointRec(GetMousePosition(),g_introMuteR)) click=0;   // (that one is the MUTE label's)
     // the click that focuses the window (or anything in the first moments) is not a skip
     if (g_introWall<1.5f || g_introFocusT<0.6f || !IsWindowFocused() || chord) return 0;
     return k!=0 || click;
+}
+
+// The MUTE label, top right, as on the web intro: "M  MUTE" faint while it plays with sound, "MUTED  (M)" (as the game
+// shows it) once muted. M or a click on it.
+static Rectangle IntroMuteRect(int muted, const char **txt){
+    const char *t=muted?"MUTED  (M)":"M  MUTE"; if (txt) *txt=t;
+    int w=MeasureText(t,16);
+    return (Rectangle){ (float)(GetScreenWidth()-w-28), 10.0f, (float)(w+16), 28.0f };
+}
+// M on the intro: the game's own mute (g_userMute), so the game starts as the intro was left.
+static void IntroSetMute(int on){
+    g_userMute=on; SetMasterVolume(on?0.0f:1.0f);
+    DebugLog("mute","\"on\":%d,\"intro\":1", on);
 }
 
 // Returns 0 if the window was closed during the intro (quit), else 1.
@@ -118,6 +136,11 @@ static int RunIntro(void){
 
     float vol=GetMasterVolume();
     if (g_mute || getenv("CHERNOBYL_MUTE")) SetMasterVolume(1.0f);   // the intro keeps its soundtrack
+    // M mutes it (the intro always starts with its sound, so the first M is "off"). dev: CHERNOBYL_INTRO_MUTE="t1,t2,..."
+    // presses M at those seconds of the intro; a 0 presses it before the music starts (a silent test of it)
+    int introMute=0, muteTouched=0, muteN=0, muteI=0; float muteAt[8];
+    { const char *e=getenv("CHERNOBYL_INTRO_MUTE"); while (e && *e && muteN<8){ muteAt[muteN++]=(float)atof(e); e=strchr(e,','); if (e) e++; } }
+    while (muteI<muteN && muteAt[muteI]<=0.0f){ muteI++; introMute=!introMute; muteTouched=1; IntroSetMute(introMute); }
     Music mu={0}; int hasMu=0;
     if (g_audio && fm){ mu=LoadMusicStream(fm); hasMu=IsMusicValid(mu); }
     if (hasMu){ mu.looping=true; SetMusicVolume(mu,1.0f); PlayMusicStream(mu); }
@@ -130,7 +153,7 @@ static int RunIntro(void){
     double clock=0.0, vidT=-1.0, fps=plm_get_framerate(plm); if (fps<=0) fps=25.0;
     { const char *au=getenv("CHERNOBYL_INTRO_AUTO"); if (au) sscanf(au,"%f,%f",&g_introAuto[0],&g_introAuto[1]); }
     { const char *sh=getenv("CHERNOBYL_INTRO_SHOT"); if (sh) g_introShot=(float)atof(sh); }
-    int stage=0, ok=1;                                    // 0 montage, 1 title, 2 fade out
+    int stage=0, ok=1, autoHeld=0;                        // 0 montage, 1 title, 2 fade out; autoHeld: CHERNOBYL_INTRO_AUTO's start, waiting
     float stageT=0.0f, loadedT=0.0f;                      // loadedT: seconds on the title with everything loaded
     while (GetKeyPressed()!=0) {}                         // drop keys queued before the window
     for (;;){
@@ -138,6 +161,11 @@ static int RunIntro(void){
         float dt=GetFrameTime(); if (dt>worstDt) worstDt=dt; if (dt>0.1f){ slow++; dt=0.1f; }
         stageT+=dt; g_introWall+=dt;
         g_introFocusT = IsWindowFocused() ? g_introFocusT+dt : 0.0f;
+        { int chord=IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER) || IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) || IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+          int press=(IsKeyPressed(KEY_M) && IsWindowFocused() && !chord);                       // (Cmd+M minimises: not a mute)
+          if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && g_introFocusT>=0.6f && g_introMuteR.width>0 && CheckCollisionPointRec(GetMousePosition(),g_introMuteR)) press=1;
+          if (muteI<muteN && g_introWall>=muteAt[muteI]){ muteI++; press=1; }
+          if (press && stage<2){ introMute=!introMute; muteTouched=1; IntroSetMute(introMute); } }
         if (hasMu){ INTRO_MU_LOCK(); if (!pump) UpdateMusicStream(mu); clock=GetMusicTimePlayed(mu); INTRO_MU_UNLOCK(); } else clock+=dt;
         if (stage==0){
             int dirty=0, ended=0;
@@ -154,8 +182,10 @@ static int RunIntro(void){
             } else if (ended || clock>=tEnd-0.05){ stage=1; stageT=0.0f; }
         } else if (stage==1){
             loadedT = g_loadFinished ? loadedT+dt : 0.0f;
-            int key=IntroAnyInput();                      // (asked every frame: a key pressed during the loading is dropped, not saved up)
-            if (stageT>1.0f && loadedT>0.35f && key){ stage=2; stageT=0.0f; }
+            int key=IntroAnyInput();                      // (asked every frame: a key pressed during the loading is dropped, not saved up --
+            if (key && g_introAutoKey) autoHeld=1;        //  but the hook's press is held until the title can take it: a load a moment
+            g_introAutoKey=0;                             //  slower than its timing used to leave the title waiting for good)
+            if (stageT>1.0f && loadedT>0.35f && (key || autoHeld)){ stage=2; stageT=0.0f; }
         } else if (stage==2){
             float k=1.0f-stageT/1.2f; if (k<0) k=0;
             if (hasMu){ INTRO_MU_LOCK(); SetMusicVolume(mu,k); INTRO_MU_UNLOCK(); }
@@ -184,6 +214,11 @@ static int RunIntro(void){
             }
             if (stage==2){ float k=stageT/1.2f; if (k>1) k=1; DrawRectangle(0,0,GetScreenWidth(),GetScreenHeight(),(Color){0,0,0,(unsigned char)(k*255)}); }
         }
+        if (stage<2){ const char *mt; Rectangle mr=IntroMuteRect(introMute,&mt); g_introMuteR=mr;
+            int hov=CheckCollisionPointRec(GetMousePosition(),mr);
+            DrawText(mt,(int)mr.x+9,(int)mr.y+7,16,(Color){0,0,0,170});                          // (a shadow: legible on a bright frame)
+            DrawText(mt,(int)mr.x+8,(int)mr.y+6,16, introMute ? (Color){200,200,210,235} : (Color){141,137,128,(unsigned char)(hov?235:150)}); }
+        else g_introMuteR=(Rectangle){0};
         EndDrawing();
         if (g_introShot>=0 && g_introWall>=g_introShot){       // dev: CHERNOBYL_INTRO_SHOT=seconds
             TakeScreenshot("intro_shot.png"); DebugLog("intro","\"shot\":%.2f,\"clock\":%.2f,\"stage\":%d", g_introWall, clock, stage);
@@ -196,7 +231,8 @@ static int RunIntro(void){
 #endif
     DebugLog("intro","\"worst_dt\":%.3f,\"slow_frames\":%d", worstDt, slow);
     if (hasMu){ StopMusicStream(mu); UnloadMusicStream(mu); }
-    SetMasterVolume(vol);
+    SetMasterVolume(muteTouched ? (introMute?0.0f:1.0f) : vol);   // M pressed: the game starts as the intro was left; else as it came
+    DebugLog("intro","\"end\":1,\"muted\":%d,\"vol\":%.2f", g_userMute, GetMasterVolume());
     UnloadTexture(vt); UnloadTexture(tt); if (pt2.id) UnloadTexture(pt2); if (ct.id) UnloadTexture(ct);
     free(rgba); plm_destroy(plm);
     DebugLog("intro","\"done\":%d", ok);

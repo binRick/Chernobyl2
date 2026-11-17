@@ -121,7 +121,7 @@ static bool C2KeyPressed(int k){
         if (k==KEY_R) return TouchOverlayReloadPressed();
         if (k==KEY_E) return TouchOverlayUsePressed();
         if (k==KEY_ESCAPE) return TouchOverlayPausePressed();
-        if (k>=KEY_ONE && k<=KEY_FOUR) return TouchOverlayWeaponPressed()==k-KEY_ONE;
+        if (k>=KEY_ONE && k<=KEY_FIVE) return TouchOverlayWeaponPressed()==k-KEY_ONE;      // (5: the claymore)
     }
     return IsKeyPressed(k);
 }
@@ -503,6 +503,9 @@ static Sound g_sy[SY_N]; static int g_hasSy=0;
 static Music g_amb[2]; static int g_hasAmb=0; static float g_ambTense=0.0f;
 static unsigned int g_syRng=0x1234567u;
 static void SfxAt(Sound snd, Vector3 at, float gain);
+static int MinesRayHit(Vector3 o, Vector3 d, float maxD, float *outD); static void MineSetOff(int i, float fuse);   // mines.h: a claymore
+static void MinesBlast(Vector3 p, float r);                                                          // shot or blasted goes off
+static void MinesPick(void); static void MinesAmmo(void);                                            // 5 takes one out; an ammo box adds one
 static float SyNoise(void){ g_syRng=g_syRng*1664525u+1013904223u; return (float)((g_syRng>>8)&0xFFFF)/32768.0f-1.0f; }
 static void SynthInit(void){
     const int SR=44100;
@@ -1986,6 +1989,7 @@ static float           g_runT         = 0.0f;   // run clock (results screen)
 static int             g_stress       = 0;      // --stress: keep the field at MAX_ENEMIES cooks, no waves (perf gate)
 static int             g_dead = 0;              // player death state: world frozen, waiting on a respawn input
 static float           g_deadT = 0.0f;          // seconds since death (brief delay before respawn is allowed)
+static int             g_fellIn = 0;            // down a breach: that kills even in god mode / --no-enemies (the death gate below)
 static float           g_hurt = 0.0f;           // 0..1 red damage flash, spikes on hp loss then decays
 static float           g_prevHp = 100.0f;       // last frame's hp, to detect a drop -> trigger the hurt flash
 static int             g_noclip = 0;            // map mode: F toggles free-fly / noclip vs FPS collision
@@ -2328,6 +2332,7 @@ static void PickupsUpdate(float dt){
             case PK_MEGA:   if (g_playerHp>=150.0f) continue; g_playerHp=fminf(150.0f,g_playerHp+50.0f); msg="+50 MEGA HEALTH"; break;
             case PK_AMMO:   for (int w=0;w<g_numWeapons;w++){ Weapon *wp=&g_weapons[w]; if (wp->magSize>0){
                                 wp->reserve+=wp->magSize; int cap=wp->reserveStart*2; if (wp->reserve>cap) wp->reserve=cap; } }
+                            MinesAmmo();                                              // and a claymore (mines.h)
                             msg="AMMO"; break;
             case PK_QUAD:   g_quadT=30.0f;  msg="QUAD DAMAGE!"; break;
             case PK_SPEED:  g_speedT=30.0f; msg="SPEED BOOST!"; break;
@@ -2989,6 +2994,7 @@ static void GrenadeExplode(Vector3 p){
         if (d<=GREN_RADIUS){ g_hurtCause=HC_BLAST; g_hurtFrom=p;
             HurtEnemy(i, GREN_DMG*(1.0f-d/GREN_RADIUS), 0, (Vector3){0,1,0}, c, 1); g_hurtCause=HC_BULLET; }
     }
+    MinesBlast(p, GREN_RADIUS);                             // a claymore in the blast goes with it (mines.h)
     DynLightAdd((Vector3){p.x,p.y+0.6f,p.z}, (Vector3){3.2f,1.9f,0.8f}, 20.0f, 0.50f, 0);   // the blast lights everything round it
     for (int q=0;q<26;q++) SpawnSmoke(p,1);                 // fireball: smoke...
     for (int q=0;q<34;q++) SpawnFlame(p,(Vector3){GetRandomValue(-100,100)/100.0f, GetRandomValue(-30,100)/100.0f, GetRandomValue(-100,100)/100.0f}); // ...radial flame
@@ -3101,7 +3107,9 @@ static void Fire(Camera3D cam) {
         // enemy hit takes priority if it's closer than the world geometry
         float ed; Vector3 ep; int head=0;
         int ei=HitEnemy(cam.position,dir,worldDist,&ed,&ep,&head);
-        if (ei>=0){
+        float md; int mi=MinesRayHit(cam.position,dir,(ei>=0)?ed:worldDist,&md);   // a laid claymore nearer than all of it: the round sets it off (mines.h)
+        if (mi>=0){ end=Vector3Add(cam.position,Vector3Scale(dir,md)); SpawnImpact(end,Vector3Negate(dir)); MineSetOff(mi,0.04f); }
+        else if (ei>=0){
             end=ep; hits++; g_shotsHit++; if (head) headAny=1;
             shotDmg[ei]+=head ? dmg*HEADSHOT_MULT : dmg;
             if (g_audio && g_hasFleshSnd && g_fleshSndCd<=0.0f){ SetSoundPitch(g_fleshSnd,0.9f+GetRandomValue(0,22)/100.0f); SfxAt(g_fleshSnd, ep, 0.7f); g_fleshSndCd=0.09f; }
@@ -3144,6 +3152,8 @@ static void Fire(Camera3D cam) {
 #define ENEMY_STEP    0.7f    // max riser an enemy can step up (matches the player's auto-step)
 static int g_trapDemo; static void TrapsUpdate(float dt); static void TrapsDraw(void); static void TrapsHud(void); static void TrapsInit(void);   // traps.h: the plant's traps (and --traps, their sandbox)
 static int TrapBlocked(float x, float z, float pad); static void TrapPushPlayer(void); static void TrapPushEnemy(int i); static int TrapMarks(Vector3 *pos, int *ready, int max);
+static int g_minesOn, g_mineMode; static float g_layT, g_mineRaise, g_mineModeT;   // mines.h: the claymore (--mines)
+static void MinesDip(Vector3 *eye, Vector3 *fwd); static void MinesUpdate(float dt); static void MinesDraw(void); static void MinesDrawViewmodel(void); static void MinesHud(int W, int H);
 static int EnemyMoveOK(float x, float z, float curY){
     if (!g_mapCol.ready) return 1;
     if (HoleAt(x,z,HOLE_KEEPOUT)>=0) return 0;          // a breach in the floor: round it, not into it
@@ -4011,7 +4021,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     if (g_fleshSndCd>0) g_fleshSndCd-=dt;
     if (g_hitMark>0) g_hitMark-=dt;
     if (g_killMark>0) g_killMark-=dt;
-    int af=g_autoFire;
+    int af=g_autoFire && !g_mineMode;                              // (no gun in the hand while it holds a claymore, mines.h)
     if (af && g_recPath){                                          // filmed (--record): shoot like a player -- only at an enemy ahead and in range,
         static float hold=0; hold-=dt;                             // and ease off the minigun before its 5 s overheat lock
         Vector3 ff=Vector3Normalize((Vector3){fwd.x,0,fwd.z});
@@ -4090,7 +4100,7 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
             // (where the viewmodel barrel tip sits) and forward past the barrel, then the
             // jet flies out along the aim. Built from the camera basis so it tracks the gun.
             Vector3 muzzle=VmMuzzleWorld(g_pos, fwd, 0.95f);             // at the drawn nozzle tip
-            { static float prevHeat=0; if (prevHeat<FLAME_WARMUP && g_flameHeat>=FLAME_WARMUP) ExtraPlay(EX_FLAME,0.75f); prevHeat=g_flameHeat; }   // it catches
+            { static float prevHeat=0; if (prevHeat<FLAME_WARMUP && g_flameHeat>=FLAME_WARMUP){ ExtraPlay(EX_FLAME,0.75f); DebugLog("flame","\"lit\":1"); } prevHeat=g_flameHeat; }   // it catches
             if (g_flameHeat < FLAME_WARMUP){                             // NOT lit yet: spit raw fuel, no damage
                 for (int q=0;q<2;q++) SpawnLiquid(muzzle, fwd);
             } else {                                                     // ignited: flame + burn
@@ -4369,7 +4379,7 @@ static void Update(void) {
     TouchOverlayPoll(g_touchPlaying);
     { float tx,ty; TouchOverlayLastTapPos(&tx,&ty);                   // a tap is a click where it lands; a held finger is the pointer
       if (tx>=0) g_tapPos=(Vector2){tx,ty}; else if (GetTouchPointCount()>0) g_tapPos=GetTouchPosition(0); }
-    TouchOverlaySetSelectedWeapon(g_curWeapon==2?0:(g_curWeapon==5?1:(g_curWeapon==0?2:3)));
+    TouchOverlaySetSelectedWeapon(g_mineMode?4:(g_curWeapon==2?0:(g_curWeapon==5?1:(g_curWeapon==0?2:3))));   // (4: the claymore in the hand)
 #endif
 
     // While P-paused, ANY of P / ESC / click resumes (handled here, before ESC would
@@ -4526,6 +4536,7 @@ static void Update(void) {
             flat=(Vector3){sinf(g_yaw),0,cosf(g_yaw)}; right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
             wish=Vector3Subtract(wish,flat); if (((int)(GetTime()/3.0))&1) wish=Vector3Add(wish,Vector3Scale(right,0.6f)); moving=1; }
     }
+    if (g_layT>=0.0f){ wish=(Vector3){0,0,0}; moving=0; }   // knelt, laying a claymore (mines.h)
     g_playerMoveAmt += ((moving?1.0f:0.0f)-g_playerMoveAmt)*fminf(1.0f,dt*6.0f);   // spoils enemy hitscan aim
     Vector3 mv={0,0,0};
     if (moving && Vector3Length(wish)>0.001f){
@@ -4561,13 +4572,10 @@ static void Update(void) {
                                                || (!g_grounded && g_vy<=0.0f && reach && g_pos.y<lipEye+0.05f && g_pos.y>lipEye-0.75f)));   // falling short, but only just
         if (stop){ float k=1.0f/sqrtf(holeR2); g_pos.x=H->pos.x+ex*k*ax; g_pos.z=H->pos.z+ez*k*az; holeR2=1.0f;
             if (!g_grounded){ g_eyeSmooth+=lipEye-g_pos.y; g_pos.y=lipEye; g_vy=0.0f; g_grounded=1; } }
-        else if (g_grounded && g_pos.y<lipEye-1.5f){                                                        // on the bottom, in the light
-            if (!g_godMode) g_playerHp-=25.0f*PLAYER_DMG_K;
-            float dx=g_pos.x-H->pos.x, dz=g_pos.z-H->pos.z; int e=(fabsf(dx)/H->hx>fabsf(dz)/H->hz)?(dx<0?0:1):(dz<0?2:3);
-            g_pos.x=H->pos.x+kEdgeNX[e]*(H->hx+0.6f)+(kEdgeNX[e]==0?dx*0.5f:0.0f); g_pos.z=H->pos.z+kEdgeNZ[e]*(H->hz+0.6f)+(kEdgeNZ[e]==0?dz*0.5f:0.0f);
-            g_pos.y=lipEye; g_vy=0.0f; g_eyeSmooth=0.0f; inHole=-1;
-            DynLightAdd((Vector3){H->pos.x,H->pos.y+0.5f,H->pos.z}, HoleTint(H,3.0f), 12.0f, 0.5f, 0);
-            DebugLog("holefall","\"hole\":%d,\"hp\":%.0f", (int)(H-g_mapHoles), g_playerHp); }
+        else if (g_grounded && g_pos.y<lipEye-1.5f && !g_dead){                                             // on the bottom, in the light: the core kills him -- always, god
+            DynLightAdd((Vector3){H->pos.x,H->pos.y+0.5f,H->pos.z}, HoleTint(H,3.0f), 12.0f, 0.5f, 0);        //  mode and --no-enemies too (the owner's rule, 2026-11-16/17; it used to
+            g_playerHp=0.0f; g_fellIn=1;                                                                      //  burn 25 and throw him back out onto the lip). He stays down there.
+            DebugLog("holefall","\"hole\":%d,\"died\":true", (int)(H-g_mapHoles)); }
     }
     if (g_hasMap && g_noclip){                         // F: free-fly / noclip (inspect or escape)
         if (IsKeyDown(KEY_SPACE))        g_pos.y += speed*dt;
@@ -4621,6 +4629,7 @@ static void Update(void) {
         eye.y += GetRandomValue(-1000,1000)/1000.0f*a;
         eye.z += GetRandomValue(-1000,1000)/1000.0f*a;
     }
+    MinesDip(&eye,&fwd);                                   // laying a claymore: the view kneels and dips to the floor (mines.h)
     g_cam.position=eye; g_cam.target=Vector3Add(eye,fwd); g_cam.up=(Vector3){0,1,0};
     if (g_shake>0.001f){                                   // plus a little look-direction wobble
         float a=g_shake*0.03f;
@@ -4630,10 +4639,11 @@ static void Update(void) {
 
     // shooting / reload
     if (g_swallowClick && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_swallowClick=0;                // the button that un-paused has come up: the trigger is live again
-    WeaponTrigger(dt, fwd, !g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT), !g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+    WeaponTrigger(dt, fwd, !g_mineMode && !g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT), !g_mineMode && !g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));   // (the claymore in the hand: the click is its, mines.h)
 
     UpdateEnemies(dt);
     TrapsUpdate(dt);
+    MinesUpdate(dt);
     UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
     UpdateSmoke(dt);
     UpdateGrenades(dt);
@@ -4653,7 +4663,8 @@ static void Update(void) {
     // 2=flamethrower, 3=grenade launcher, then the rest. (g_weapons indices: 0 grenade
     // launcher,1 remington,2 minigun,3 LMG,4 AK,5 flamethrower.)
     static const int kSlotForKey[4]={2,5,0,1};        // 1 minigun, 2 flamethrower, 3 grenade launcher, 4 Remington
-    for (int k=0;k<4;k++) if (IsKeyPressed(KEY_ONE+k)) SwitchWeapon(kSlotForKey[k]);
+    for (int k=0;k<4;k++) if (IsKeyPressed(KEY_ONE+k) && g_layT<0.0f){ if (g_mineMode){ g_mineMode=0; g_vmRaise=1.0f; } SwitchWeapon(kSlotForKey[k]); }
+    if (IsKeyPressed(KEY_FIVE)) MinesPick();                // 5: the claymore (mines.h)
     // (The keys that moved, turned, scaled and saved the gun in the hand are gone: the guns are set, and a player who
     // brushed I J K L, the brackets or ENTER was re-posing them, and writing the result to disk.)
     // (H / F2, which wrote where you stood as the next launch's spawn, is gone with them. A spawn file already saved is still read.)
@@ -4774,7 +4785,8 @@ static void Update(void) {
         if (low && !IsSoundPlaying(g_heartSnd)) PlaySound(g_heartSnd);
         if (!low && IsSoundPlaying(g_heartSnd)) StopSound(g_heartSnd);
     }
-    if (!g_godMode && !g_noEnemies && g_playerHp<=0.0f && !g_dead){ // killed -> enter the death/respawn loop
+    if (((!g_godMode && !g_noEnemies && g_playerHp<=0.0f) || g_fellIn) && !g_dead){ // killed (or down a breach, which nothing survives) -> the death/respawn loop
+        g_fellIn=0;
         g_dead=1; g_deadT=0.0f;
         StopAllSfx();
         if (g_audio && g_hasDieSnd){ SetSoundVolume(g_dieSnd,0.9f); PlaySound(g_dieSnd); }
@@ -5557,8 +5569,9 @@ static void DrawHUD(void) {
     DrawText(TextFormat("HP %d", (int)g_playerHp), 28, H-40, 16, RAYWHITE);
     if (g_godMode && !cleanHud) DrawText("GOD", 112, H-40, 16, (Color){120,220,255,255});   // invulnerable (cheat)
     // ammo (bottom-right): mag / reserve for the active weapon
+    MinesHud(W,H);
     { Weapon *hw=&g_weapons[g_curWeapon];
-      if (hw->magSize>0){
+      if (hw->magSize>0 && !g_mineMode){
         const char *at=TextFormat("%d / %d", hw->mag, hw->reserve);
         int fs=30, aw=MeasureText(at,fs);
         DrawText(at, W-28-aw, H-50, fs, (hw->mag==0)?(Color){255,90,60,255}:RAYWHITE);
@@ -6087,6 +6100,7 @@ static void DrawHoleFX(void){
     rlEnableDepthMask();
 }
 #include "traps.h"                      // the plant's traps + their sandbox (--traps)
+#include "mines.h"                      // the claymore (--mines)
 #if !defined(C2_IOS) && !defined(PLATFORM_WEB)
 #include "record.h"                     // dev: --record <out.mp4> (demo videos)
 #endif
@@ -6104,13 +6118,14 @@ static void DrawScene(void){
         DrawDust();
         DrawEnemies();
         TrapsDraw();
+        MinesDraw();
         DrawPickups();
         DrawBolts();
         DrawSmoke(g_cam);                     // minigun muzzle smoke/steam (billboards, drawn last)
     EndMode3D();
     TrapsHud();
     if (g_inspect && !g_noEnemies) DrawInspect();
-    DrawViewmodel();
+    if (g_mineMode) MinesDrawViewmodel(); else DrawViewmodel();
 }
 static void LoadPump(void);
 static void Frame(void) {
@@ -6345,7 +6360,7 @@ static float PickOpenYaw(Vector3 eye){
 // call repeatedly (e.g. after the ESC "Select Map" button). g_mapPath==NULL -> the
 // built-in arena. The one-time setup (weapons, enemy model, sounds) is NOT redone.
 static void RunResetExtras(void){                     // in-flight things and pickups from the last run
-    memset(g_gren,0,sizeof g_gren); memset(g_sparks,0,sizeof g_sparks); PickupsReset();
+    memset(g_gren,0,sizeof g_gren); memset(g_sparks,0,sizeof g_sparks); PickupsReset(); MinesReset();
 }
 // The first map is loaded BEFORE the title intro (main), under the loading card, so the game starts the moment
 // the intro is left: loading it after left seconds of black between the two. StartSelectedMap takes it from here.
@@ -6454,6 +6469,7 @@ static void StartSelectedMap(void){
             g_pos.x=h->pos.x+nx[best]*dist; g_pos.z=h->pos.z+nz[best]*dist;
             g_yaw=atan2f(-nx[best],-nz[best]); g_pitch=-0.42f; }
         DebugLog("nav","\"grid\":[%d,%d],\"walkable\":%d,\"ok\":%d,\"holes\":%d", g_navNX, g_navNZ, g_navCount, g_navOK, g_nMapHoles);
+        for (int h=0;h<g_nMapHoles;h++) DebugLog("hole","\"i\":%d,\"at\":[%.2f,%.2f,%.2f],\"half\":[%.2f,%.2f],\"depth\":%.2f", h, g_mapHoles[h].pos.x,g_mapHoles[h].pos.y,g_mapHoles[h].pos.z, g_mapHoles[h].hx,g_mapHoles[h].hz, g_mapHoles[h].depth);
         g_spawnResetPos=g_pos; g_voidY=-12.0f;        // below the lowest floor (normalised to y=0) -> fell off
     } else { g_pos=(Vector3){0,EYE_H,6}; g_voidY=-1e9f; }
 
@@ -6516,7 +6532,8 @@ static void WebFrame(void){
         if (++n==3 || (go && n<3)){ n=3; EM_ASM({ if (window.__c2_ready) window.__c2_ready(); }); }   // loaded: the page can offer the start
         if (hold){
             BeginDrawing(); ClearBackground(BLACK); EndDrawing();
-            if (go){ SetMasterVolume(vol); while (GetKeyPressed()!=0) {} }       // the start key is not a game key
+            if (go){ if (EM_ASM_INT({ return window.__c2_muted ? 1 : 0; })){ g_userMute=1; vol=0.0f; DebugLog("mute","\"on\":1,\"intro\":1"); }   // muted on the page's intro: the game starts muted
+                     SetMasterVolume(vol); while (GetKeyPressed()!=0) {} }       // the start key is not a game key
             return;
         }
     }
@@ -6675,6 +6692,7 @@ static void LoadGameAssets(void){
     // evaluate. assets/mp5.glb + knife.glb kept as spares.)
     LoadWeapon(5, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt", VM_HEAVY);
     LoadTick();
+    MinesLoad();                       // weapon 5, the claymore (mines.h): with the guns, so it is ready the moment 5 is pressed
     g_numWeapons=6;
     ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // boot on slot 0 / grenade launcher (or --weapon N for tuning)
     if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
@@ -6831,6 +6849,7 @@ static void LoadThreadFinish(void){                   // the game's first needs 
     if (!g_loadThOn) return;
     if (!g_stageLoad) LoadThreadJoin();
     for (int i=0;i<6;i++) if (g_weapons[i].model.meshCount>0) ModelVaoRebuild(&g_weapons[i].model);
+    if (g_mineVmOk) ModelVaoRebuild(&g_mineVm); if (g_mineWOk) ModelVaoRebuild(&g_mineW);   // the claymore in the hand and on the floor
     for (int t=0;t<EN_NTYPES;t++){ if (g_rig[t].model.meshCount>0) ModelVaoRebuild(&g_rig[t].model); if (g_rig[t].hasLod) ModelVaoRebuild(&g_rig[t].lod); }
     ModelVaoRebuild(&g_floor); ModelVaoRebuild(&g_wall); ModelVaoRebuild(&g_crate);
     if (g_preMapOK) ModelVaoRebuild(&g_preMap);
@@ -6940,6 +6959,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--traps")){ g_trapDemo=1; g_godMode=1; g_noIntro=1; }   // dev: the trap sandbox (traps.h) -- no map, every trap in a ring
         else if (!strcmp(argv[i],"--stress")) g_stress=1;            // perf gate: field saturated with cooks, no waves
         else if (!strcmp(argv[i],"--god")) g_godMode=1;              // headless/perf runs: no death
+        else if (!strcmp(argv[i],"--mines")){ g_mineStart=1; g_mineMode=1; }   // dev: the claymore sandbox -- one in the hand from the start, never runs out (mines.h)
 #if !defined(C2_IOS) && !defined(PLATFORM_WEB)
         else if (!strcmp(argv[i],"--record") && i+1<argc) g_recPath=argv[++i];   // dev: film the game to an mp4 (demo videos)
 #endif

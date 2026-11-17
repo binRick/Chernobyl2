@@ -4,7 +4,7 @@
 The desktop assets are ~600 MB, 95% of it 2048-px PNG textures inside the .glb models. For the
 web each model's textures are re-encoded -- base colour capped at 1024 px, normal / ORM /
 emission at 512 px, JPEG wherever the image has no alpha -- and the .glb is rebuilt round them.
-Only what the game loads goes in: the 11 enemies (+ LODs, gait files), the 4 weapons, the
+Only what the game loads goes in: the 11 enemies (+ LODs, gait files), the 5 weapons (the claymore's floor model too), the
 sounds, and the default map with the textures it names.
 
     python3 tools/web/pack_web.py [--albedo 1024] [--detail 512]
@@ -17,7 +17,15 @@ OUT = os.path.join(REPO, "build", "web", "fs")
 ALBEDO = int(sys.argv[sys.argv.index("--albedo") + 1]) if "--albedo" in sys.argv else 1024
 DETAIL = int(sys.argv[sys.argv.index("--detail") + 1]) if "--detail" in sys.argv else 512
 ENEMIES = "cook linecook butcher liquidator headchef rifleman gunner mutant priest revenant fiend".split()
-WEAPONS = "minigun flamethrower grenadelauncher remington".split()
+WEAPONS = "minigun flamethrower grenadelauncher remington claymore_vm".split()   # (claymore_vm: weapon 5 in the hand -- src/mines.h)
+
+
+def resize_data(img, size):
+    """A detail map's alpha is data, not coverage (the skins keep their subsurface mask there, 0 across the face): resize
+    each channel on its own. Pillow resizes RGBA premultiplied by alpha, which zeroes the colour wherever alpha is 0 --
+    it turned the skins' occlusion / roughness / specular to nothing and the cooks black on the web and the phone."""
+    if img.mode in ("RGBA", "LA"): return Image.merge(img.mode, [ch.resize(size, Image.LANCZOS) for ch in img.split()])
+    return img.resize(size, Image.LANCZOS)
 
 
 def shrink_glb(src, dst):
@@ -46,8 +54,8 @@ def shrink_glb(src, dst):
         img = Image.open(io.BytesIO(raw)); img.load()
         cap = ALBEDO if role.get(i, "albedo") == "albedo" else DETAIL
         if max(img.size) > cap:
-            k = cap / max(img.size)
-            img = img.resize((max(1, round(img.size[0] * k)), max(1, round(img.size[1] * k))), Image.LANCZOS)
+            k = cap / max(img.size); size = (max(1, round(img.size[0] * k)), max(1, round(img.size[1] * k)))
+            img = img.resize(size, Image.LANCZOS) if role.get(i, "albedo") == "albedo" else resize_data(img, size)   # (an albedo's alpha is coverage: premultiplied is right for it)
         alpha = img.mode in ("RGBA", "LA", "P") and img.convert("RGBA").getextrema()[3][0] < 255
         buf = io.BytesIO()
         if alpha:
@@ -135,6 +143,16 @@ def main():
                 im = Image.open(os.path.join(td, f)).convert("RGB"); im.thumbnail((512, 512), Image.LANCZOS)
                 dst = os.path.join(OUT, "assets", "traps", f[:-4] + ".jpg"); im.save(dst, quality=88); other += os.path.getsize(dst)
             elif f.endswith((".gltf", ".bin", ".txt", ".mp3", ".wav")): other += copy("assets/traps/" + f)
+    # the claymore on the floor (src/mines.h, weapon 5): the same way -- its glTF as it is, its textures at 512 px as JPEG
+    # (MineTex looks for .jpg where there is no .png); claymore_vm.txt, its sidecar, goes with the other assets/*.txt above
+    md = os.path.join(REPO, "assets", "mines")
+    if os.path.isdir(md):
+        os.makedirs(os.path.join(OUT, "assets", "mines"), exist_ok=True)
+        for f in sorted(os.listdir(md)):
+            if f.endswith(".png"):
+                im = Image.open(os.path.join(md, f)).convert("RGB"); im.thumbnail((512, 512), Image.LANCZOS)
+                dst = os.path.join(OUT, "assets", "mines", f[:-4] + ".jpg"); im.save(dst, quality=88); other += os.path.getsize(dst)
+            elif f.endswith((".gltf", ".bin")): other += copy("assets/mines/" + f)
     ed = os.path.join(REPO, "assets", "extra")
     if os.path.isdir(ed):
         os.makedirs(os.path.join(OUT, "assets", "extra"), exist_ok=True)

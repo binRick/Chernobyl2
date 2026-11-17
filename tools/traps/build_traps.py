@@ -430,7 +430,8 @@ def turbine():
     export("turbine_rotor")
 
 
-bpy.ops.wm.read_factory_settings(use_empty=True)
-build_materials()
-for fn in (post, steam, plate, hose, surge, crane, door, tank, turbine): fn()
-print("traps: done ->", OUT)
+if __name__ == "__main__":                                     # (imported -- tools/mines/build_claymore.py borrows the materials and shading -- it builds nothing)
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    build_materials()
+    for fn in (post, steam, plate, hose, surge, crane, door, tank, turbine): fn()
+    print("traps: done ->", OUT)

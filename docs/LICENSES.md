@@ -46,6 +46,10 @@ Sketchfab at download time) — verified 2026-07-24.
 | sawnoff.glb | unused spare | "sawnoff animated" — DJMaesen | CC-BY-4.0 | SHIP (unused) |
 | rifle.glb | unused spare (M16A3, cut) | "Animated Assault Rifle" — JUST | **CC-BY-NC-4.0** | SHIP-NC — delete before any commercial release |
 | shotgun.glb | unused spare | "Shotgun Animated" — DJMaesen | **CC-BY-NC-4.0** | SHIP-NC — delete before any commercial release |
+| claymore_vm.glb | weapon 5, the claymore | the right arm of "Grenadelauncher animated" — DJMaesen (re-posed and re-animated in `tools/mines/build_claymore.py`), holding a claymore modelled from code | CC-BY-4.0 (the arm) | SHIP |
+
+The claymore itself (`assets/mines/`, and the one in `claymore_vm.glb`) is modelled from code by `tools/mines/build_claymore.py`:
+no downloaded geometry or textures. Its raised lettering is cut from Blender's built-in font (DejaVu Sans, Bitstream Vera licence).
 
 ## Enemy model (`assets/enemy.glb`)
 

@@ -1,7 +1,7 @@
 // Touch overlay -- the on-screen controls of the iPhone build. Brought over from ../Chernobyl
 // (src/touch_overlay.c, its iOS port), where they were tuned on real phones: a floating stick
 // under the left thumb, the right half of the screen as a look pad, FIRE (drag on it to keep
-// aiming), JUMP, PAUSE and the four weapons. This game adds RELOAD, an edge-triggered fire, and
+// aiming), JUMP, PAUSE and the five weapons (5: the claymore, mines.h). This game adds RELOAD, an edge-triggered fire, and
 // a button for a trap's switch that is only up while he stands at one.
 // Included once from main.c, on iOS only.
 //
@@ -20,7 +20,7 @@ typedef enum {
     CTRL_PAUSE,
     CTRL_RELOAD,
     CTRL_USE,        // a trap's switch: only there while he stands at one (g_useShow)
-    CTRL_WPN,        // wpnIdx field selects which (0..3)
+    CTRL_WPN,        // wpnIdx field selects which (0..4)
     CTRL_MENU_TAP,   // any-tap on non-gameplay screens
 } TouchCtrl;
 
@@ -37,7 +37,7 @@ static struct {
 } g_slots[MAX_SLOTS];
 
 // Set by game.c each frame so the overlay can highlight the active weapon
-// button. 0..3 = highlight that slot; -1 = no highlight.
+// button. 0..4 = highlight that slot; -1 = no highlight.
 static int g_currentWeapon = 0;
 static void TouchOverlaySetSelectedWeapon(int w) { g_currentWeapon = w; }
 
@@ -71,7 +71,7 @@ static struct {
     Vector2 relC;   float relR;
     Vector2 useC;   float useR;
     Vector2 pauseC; float pauseR;
-    Vector2 wpnC[4]; float wpnR;
+    Vector2 wpnC[5]; float wpnR;
 } g_lay;
 
 static void RecalcLayout(void) {
@@ -102,8 +102,8 @@ static void RecalcLayout(void) {
     g_lay.pauseC = (Vector2){ W * 0.045f, H * 0.09f };     // top left: this game's top right is the kill count and the minimap
     g_lay.pauseR = m * 0.04f;
 
-    for (int i = 0; i < 4; i++) {
-        g_lay.wpnC[i] = (Vector2){ W * (0.125f + 0.078f*i), H * 0.09f };   // a row beside it, left of the wave banner
+    for (int i = 0; i < 5; i++) {   // a row beside it, left of the wave banner (centred at the top: five fit left of it at this spacing)
+        g_lay.wpnC[i] = (Vector2){ W * (0.10f + 0.07f*i), H * 0.09f };
     }
     g_lay.wpnR = m * 0.04f;
 }
@@ -132,7 +132,7 @@ static TouchCtrl Classify(Vector2 p, int gs, int *wpnIdx) {
     if (gs != GS_PLAY) return CTRL_MENU_TAP;     // any tap = ENTER on menu/dead/picker
 
     if (InCircle(p, g_lay.pauseC, g_lay.pauseR)) return CTRL_PAUSE;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         if (InCircle(p, g_lay.wpnC[i], g_lay.wpnR)) { *wpnIdx = i; return CTRL_WPN; }
     }
     if (InCircle(p, g_lay.fireC, g_lay.fireR))   return CTRL_FIRE;
@@ -437,10 +437,10 @@ static void TouchOverlayDraw(int gs) {
     int pw = MeasureText("II", pz);
     DrawText("II", (int)g_lay.pauseC.x - pw/2, (int)g_lay.pauseC.y - pz/2, pz, textCol);
 
-    // Weapon buttons 1..4. Highlight the currently-selected weapon (set by
+    // Weapon buttons 1..5. Highlight the currently-selected weapon (set by
     // game.c via TouchOverlaySetSelectedWeapon) and the one being tapped.
-    static const char *labels[4] = {"1","2","3","4"};
-    for (int i = 0; i < 4; i++) {
+    static const char *labels[5] = {"1","2","3","4","5"};
+    for (int i = 0; i < 5; i++) {
         bool isSelected = (i == g_currentWeapon);
         bool isTapped   = IsCtrlHeld(CTRL_WPN, i);
         Color fill = Fade((Color){80,80,80,255},

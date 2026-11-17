@@ -140,7 +140,7 @@ static void LbPoll(void){                                  // the answers, as th
 // The run just ended.
 static void LbOnDeath(int score, const char *weapon){
     memset(&g_lb,0,sizeof g_lb);
-    if (g_cheatUsed || g_godMode || score<=0 || !LbEnabled()){ g_lb.state=LB_OFF; return; }
+    if (g_cheatUsed || g_godMode || g_noEnemies || score<=0 || !LbEnabled()){ g_lb.state=LB_OFF; return; }   // (--no-enemies: no run to score -- it can die now, down a breach)
     g_lb.score=score; g_lb.kills=g_kills; g_lb.headshots=g_headshots; g_lb.wave=g_wave; g_lb.shots=g_shotsFired;
     g_lb.acc=g_shotsFired>0?(int)(100.0f*g_shotsHit/g_shotsFired+0.5f):0; g_lb.time=g_runT;
     { int k=0; for (const char *c=weapon; c && *c && k<23; c++) if (isalnum((unsigned char)*c) || *c==' ' || *c=='-') g_lb.weapon[k++]=*c; g_lb.weapon[k]=0; }
