@@ -42,7 +42,6 @@ static unsigned long long g_mineMask=0;   // bit k: mesh k of the viewmodel is t
 // (As first built the two files named seventeen 1024 px images. raylib decoded every one, twelve were then read again
 // by name, and its copies of the normal and ORM maps were never freed: 0.39 s of the load and some 60 MB of video
 // memory, for four draws a mine. tests/claymore-lean.sh)
-#define MINE_ARM_SLOT 0                                               // main.c's slot for the grenade launcher: the rig the claymore's arm is cut from
 typedef struct { char name[24]; Texture2D c, n, o; } MineMat;
 static MineMat g_mineMat[4]; static int g_nMineMat=0;
 static int g_mineTexN=0, g_mineVmTex=0, g_mineMs=0;                   // pictures read (3); materials of the hand model given one already loaded (2); how long it all took
@@ -65,11 +64,6 @@ static char *MineGlbJson(const char *path){                           // a .glb'
     if (d && n>20 && !memcmp(d,"glTF",4) && !memcmp(d+16,"JSON",4)){ memcpy(&len,d+12,4);
         if (len>0 && 20+(long)len<=(long)n){ js=(char*)MemAlloc(len+1); memcpy(js,d+20,len); js[len]=0; } }
     if (d) UnloadFileData(d); return js; }
-static Texture2D MineSleeve(void){                                    // the launcher's sleeve and glove: the colour map of the one mesh of it that is arm, not gun
-    const Weapon *w=&g_weapons[MINE_ARM_SLOT]; Texture2D none={0}; if (!w->has) return none;
-    for (int k=0;k<w->model.meshCount && k<64;k++) if (!((w->gunMask>>k)&1ULL) && w->model.meshes[k].vertexCount>0){
-        Texture2D t=w->model.materials[w->model.meshMaterial[k]].maps[MATERIAL_MAP_DIFFUSE].texture; return (t.id>0 && t.id!=rlGetTextureIdDefault())?t:none; }
-    return none; }
 static void MinesLoadWorld(void){                                   // the mine in the world: the traps' way (traps.h TrapsLoadModels)
     const char *path="assets/mines/claymore.gltf"; if (!FileExists(path) || EnemySkinInit()!=1) return;
     Model m=LoadModel(path);
@@ -116,7 +110,7 @@ static void MinesLoad(void){
             MemFree(ms->animVertices); MemFree(ms->animNormals); ms->animVertices=NULL; ms->animNormals=NULL; }
         char *js=MineGlbJson(vp); char nm[4][24]; int n=MineMatNames(js,nm,4); if (js) MemFree(js);       // its materials, by name: textures already loaded
         for (int i=0;i<n && i+1<g_mineVm.materialCount;i++){ Texture2D t={0};
-            if (!strcmp(nm[i],"arms")) t=MineSleeve(); else { const MineMat *mt=MineMatOf(nm[i]); if (mt) t=mt->c; }
+            if (!strcmp(nm[i],"arms")) t=WeaponSleeve(); else { const MineMat *mt=MineMatOf(nm[i]); if (mt) t=mt->c; }   // (main.c WeaponSleeve: the launcher's own -- the guns refitted to its arm wear it too)
             if (t.id>0){ g_mineVm.materials[i+1].maps[MATERIAL_MAP_DIFFUSE].texture=t; g_mineVmTex++; } }
     }
     if (f) fclose(f);

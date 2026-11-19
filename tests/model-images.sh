@@ -9,8 +9,8 @@ cd "$(dirname "$0")/.." || exit 1
 python3 - "${1:-assets}" <<'PY'
 import glob, json, os, sys
 root = sys.argv[1]; fail = 0
-files = sorted(glob.glob(os.path.join(root, "traps", "*.gltf")) + glob.glob(os.path.join(root, "mines", "*.gltf")))
-if len(files) < 14: print(f"FAIL only {len(files)} model files found under {root} (13 trap parts and the claymore)"); fail = 1
+files = sorted(glob.glob(os.path.join(root, "traps", "*.gltf")) + glob.glob(os.path.join(root, "mines", "*.gltf")) + glob.glob(os.path.join(root, "gibs", "*.gltf")))
+if len(files) < 15: print(f"FAIL only {len(files)} model files found under {root} (13 trap parts, the claymore and the flesh chunks)"); fail = 1
 for g in files:
     js = json.load(open(g)); mats = js.get("materials", [])
     refs = sum(1 for m in mats for k in ("normalTexture", "occlusionTexture", "emissiveTexture") if k in m)

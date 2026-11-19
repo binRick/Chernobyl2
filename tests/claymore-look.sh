@@ -20,14 +20,17 @@ def red(p): return p[0] - max(p[1], p[2])
 def lum(p): return 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
 
 def shoot(look, env=None, lamp_off=False):
-    """One mine laid at his feet and armed, then a screenshot. lamp_off: taken again (a few times) if its own red lamp was
-    lit in that frame -- it blinks for a seventh of every second, and lights the mine and the floor round it."""
-    for _ in range(6):
+    """One mine laid at his feet and armed, then a screenshot. lamp_off: taken again if its own red lamp was lit in that
+    frame -- it blinks for a seventh of every second, and lights the mine and the floor round it. Each further try is
+    taken 50 frames (near half a second) later, not at the same frame again: a run's timing repeats to a few hundredths
+    of a second, so the same frame finds the lamp lit every time (2026-11-18: 9.17 to 9.23 s in four runs)."""
+    for k in range(6):
+        at = 560 + (50 * k if lamp_off else 0)
         for f in ("chernobyl2-shot.png", "chernobyl2-debug.log"):
             if os.path.exists(f): os.remove(f)
         e = dict(os.environ, CHERNOBYL_BACKGROUND="1", CHERNOBYL_CLEAN_HUD="1", CHERNOBYL_MINE_AUTO="30"); e.update(env or {})
         subprocess.run(["perl", "-e", "alarm 120; exec @ARGV", "./build/chernobyl2", "--mines", "--god", "--no-enemies", "--no-intro", "--mute", "--debug",
-                        "--look", "-94.7", str(look), "--shot", "560", "--frames", "575"], env=e, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        "--look", "-94.7", str(look), "--shot", str(at), "--frames", str(at + 15)], env=e, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         ev = []
         for line in open("chernobyl2-debug.log"):
             try: ev.append(json.loads(line))

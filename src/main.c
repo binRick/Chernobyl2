@@ -779,6 +779,32 @@ static int ApplyIbmBindPose(Model *m, const char *glbPath, int slot){
     DebugLog("ibm","\"slot\":%d,\"file\":\"%s\",\"mode\":%d,\"applied\":%d,\"missing\":%d,\"bones\":%d",slot,p,mode,applied,missing,m->skeleton.boneCount);
     return applied;
 }
+// Which meshes of a weapon rig are GUN parts? This raylib build gives EVERY mesh of a rigged model bone data (static
+// meshes get rigid-bound to a bone), so "boneCount==0" finds nothing. Real test: a gun part is unskinned OR rigid (every
+// vertex 100%% on the same single bone); the arms are BLENDED across many.
+static int MeshIsGunPart(const Mesh *ms){
+    if (ms->vertexCount<=0 || !ms->vertices) return 1;
+    if (!ms->boneIndices || !ms->boneWeights) return 1;               // no skin data at all -> static gun part
+    int rb=-2;                                                        // rb: -2 unset, -1 unweighted, >=0 the single bone
+    for (int v=0;v<ms->vertexCount;v++){
+        int best=-1; float bw=0.0f;
+        for (int c=0;c<4;c++){ float wt=ms->boneWeights[v*4+c]; if (wt>bw){ bw=wt; best=(int)ms->boneIndices[v*4+c]; } }
+        int vb = (bw>=0.99f) ? best : ((bw<=0.01f) ? -1 : -3);        // -3 = genuinely blended vertex
+        if (vb==-3) return 0;
+        if (rb==-2) rb=vb; else if (vb!=rb) return 0;                 // spans multiple bones -> organic arms
+    }
+    return 1;
+}
+// One arm for the guns: the grenade launcher's sleeve and glove -- the colour map of the one mesh of it that is arm, not
+// gun (id 0: none). The claymore's hand wears it (mines.h), and so do the guns whose arms were refitted to the
+// launcher's (tools/arms/refit_arms.py: the minigun, the Remington): the picture is held once for all of them.
+#define ARM_SLOT 0                                                    // the grenade launcher's slot (LoadGameAssets)
+static Texture2D WeaponSleeve(void){
+    const Weapon *w=&g_weapons[ARM_SLOT]; Texture2D none={0}; if (!w->has) return none;
+    for (int k=0;k<w->model.meshCount && k<64;k++) if (!((w->gunMask>>k)&1ULL) && w->model.meshes[k].vertexCount>0){
+        Texture2D t=w->model.materials[w->model.meshMaterial[k]].maps[MATERIAL_MAP_DIFFUSE].texture; return (t.id>0 && t.id!=rlGetTextureIdDefault())?t:none; }
+    return none;
+}
 // Load a glb into slot, resolve idle/shoot/reload clips by name, load saved tuning.
 static void LoadWeapon(int slot, const char *path, const char *alt,
                        const char *label, const char *tunePath, int vmClass){
@@ -800,11 +826,20 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     ApplyIbmBindPose(&w->model, fp, slot);           // true bind pose (raylib skins against the rest pose)
     w->anim=LoadModelAnimations(fp,&w->animN);
     w->has=(w->model.meshCount>0);
+    // A refitted arm's file carries no picture of the sleeve: it is given the launcher's here. Such an arm is a
+    // blended-skinned mesh with no texture and plain white -- exactly what the cull below hides -- so it is dressed
+    // first. (No launcher to take it from: a plain dark sleeve, so the hands are still there.)
+    int sleeve=0;
+    if (slot!=ARM_SLOT){ Texture2D sl=WeaponSleeve();
+        for (int k=0;k<w->model.meshCount;k++){ int mi=w->model.meshMaterial[k]; if (mi<0 || MeshIsGunPart(&w->model.meshes[k])) continue;
+            MaterialMap *dm=&w->model.materials[mi].maps[MATERIAL_MAP_DIFFUSE];
+            if (dm->texture.id!=rlGetTextureIdDefault() || dm->color.r!=255 || dm->color.g!=255 || dm->color.b!=255 || dm->color.a!=255) continue;
+            if (sl.id>0){ dm->texture=sl; sleeve=1; } else { dm->color=(Color){62,66,72,255}; sleeve=-1; } } }
     // Cull stray morph-target / blend-shape helper meshes: those ship with NO diffuse
     // texture AND the default white material, so raylib draws them as a white untextured
     // blob over the gun (the M16A3's "shape_pose" mesh -> "rifle looks unskinned"). Only
-    // hide meshes that are BOTH untextured AND pure white -- legit flat-colour parts (the
-    // flamethrower's tinted glass / status lights have real baseColorFactor) are kept.
+    // hide meshes that are BOTH untextured AND pure white -- legit flat-colour parts (a tinted
+    // glass, a status light: a real baseColorFactor, as the flamethrower's wristwatch had) are kept.
     for (int k=0;k<w->model.meshCount;k++){
         int mi=w->model.meshMaterial[k]; if (mi<0) continue;
         MaterialMap dm=w->model.materials[mi].maps[MATERIAL_MAP_DIFFUSE];
@@ -836,20 +871,7 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     for (int k=0;k<w->model.meshCount && k<64;k++){
         Mesh *ms=&w->model.meshes[k];
         if (ms->vertexCount<=0 || !ms->vertices) continue;
-        int isGun=0;
-        if (!ms->boneIndices || !ms->boneWeights) isGun=1;            // no skin data at all -> static gun part
-        else {
-            int rigid=1, rb=-2;                                       // rb: -2 unset, -1 unweighted, >=0 the single bone
-            for (int v=0;v<ms->vertexCount && rigid;v++){
-                int best=-1; float bw=0.0f;
-                for (int c=0;c<4;c++){ float wt=ms->boneWeights[v*4+c]; if (wt>bw){ bw=wt; best=(int)ms->boneIndices[v*4+c]; } }
-                int vb = (bw>=0.99f) ? best : ((bw<=0.01f) ? -1 : -3); // -3 = genuinely blended vertex
-                if (vb==-3){ rigid=0; break; }
-                if (rb==-2) rb=vb; else if (vb!=rb) rigid=0;          // spans multiple bones -> organic arms
-            }
-            isGun=rigid;
-        }
-        if (isGun) w->gunMask |= (1ULL<<k);
+        if (MeshIsGunPart(ms)) w->gunMask |= (1ULL<<k);
     }
     // Bind-space centre of the gun meshes. The pinned draw seats this point at the
     // palms, so the gun starts in the hands instead of wherever the artist parked it;
@@ -975,8 +997,8 @@ static void LoadWeapon(int slot, const char *path, const char *alt,
     { Vector3 o; float a,b,c,d; LoadTune(w->tunePath,&o,&a,&b,&c,&d,&w->idleHold); }
     // (No saved vm_trim_*.txt is read: the guns sit where the code frames them. A trim saved by the old tuning keys --
     // a stray press tilted the grenade launcher 22 degrees -- kept coming back every start. tests/gun-trim.sh)
-    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f]",
-             slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z);
+    DebugLog("weapon","\"slot\":%d,\"label\":\"%s\",\"bones\":%d,\"anims\":%d,\"idle\":%d,\"shoot\":%d,\"reload\":%d,\"bbox\":%.1f,\"scale\":%.6f,\"centroid\":[%.1f,%.1f,%.1f],\"sleeve\":%d",
+             slot,label,w->model.skeleton.boneCount,w->animN,w->aIdle,w->aShoot,w->aReload,md,w->scale,w->centroid.x,w->centroid.y,w->centroid.z,sleeve);
 }
 
 // Attach a fire sound to a weapon slot. loop=1 -> sustained machine-gun fire
@@ -1972,6 +1994,7 @@ static int             g_reloadAt = 0;          // --reload-at N: force a reload
 static const char     *g_recPath = NULL;        // --record <out.mp4>: dev, film the game (record.h)
 static int             g_kite = 0;              // --kite: dev autopilot -- face the nearest enemy and backpedal (repro chase glitches)
 static int             g_shotEvery = 0;         // --shot-every K: numbered screenshot every K frames (dev)
+static const char     *g_gibsArg = NULL, *g_gibRowArg = NULL;   // --gibs F[*n] / --gib-row F (dev: as CHERNOBYL_GIBS / CHERNOBYL_GIB_ROW, for the browser build, which has no environment; gibs.h)
 static int             g_devCorpses = 0;        // --corpses N: lay out N cook corpses at run start (dev: test the priest)
 static int             g_devBoss = 0;           // --boss: jump straight to wave 1's boss interlude (dev)
 static int             g_vmHoldDev = -1;        // --vm-hold N: freeze the grenade launcher's clip on frame N (dev: read its animation)
@@ -2760,45 +2783,7 @@ static int EnemyVoice(const Enemy *e, int cue, float gain, float gap){   // 1 = 
 }
 static void EnemyVoiceStopAll(void){ for (int t=0;t<EN_NTYPES;t++) for (int c=0;c<EC_N;c++) for (int v=0;v<g_hasECue[t][c];v++) StopSound(g_eCue[t][c][v]); }
 
-// Gibs: a body caught at the heart of a blast, or by a shotgun at arm's length, comes apart --
-// chunks of meat and bone thrown out, bouncing and leaving blood where they land. No corpse.
-typedef struct { Vector3 pos, vel; float life, floorY, size; int bounces; Color col; } Gib;
-#define MAX_GIBS 96
-static Gib g_gibs[MAX_GIBS]; static int g_gibNext=0;
-static void SpawnGibs(Vector3 c, Vector3 away, float floorY, float scale){
-    for (int k=0;k<13;k++){
-        Gib g={0}; float a=GetRandomValue(0,628)/100.0f, sp=2.0f+GetRandomValue(0,450)/100.0f;
-        g.pos=(Vector3){c.x+cosf(a)*0.15f, c.y+GetRandomValue(-40,50)/100.0f*scale, c.z+sinf(a)*0.15f};
-        g.vel=(Vector3){cosf(a)*sp+away.x*2.6f, 2.5f+GetRandomValue(0,450)/100.0f, sinf(a)*sp+away.z*2.6f};
-        g.size=(0.045f+GetRandomValue(0,60)/1000.0f)*scale; g.life=7.0f+GetRandomValue(0,300)/100.0f; g.floorY=floorY;
-        g.col=(k%4==3) ? (Color){170,160,140,255} : (Color){(unsigned char)(90+GetRandomValue(0,40)),12,10,255};   // bone among the meat
-        g_gibs[g_gibNext]=g; g_gibNext=(g_gibNext+1)%MAX_GIBS;
-    }
-    for (int k=0;k<3;k++) SpawnBlood(c,(Vector3){away.x*0.5f+GetRandomValue(-60,60)/100.0f, 0.5f, away.z*0.5f+GetRandomValue(-60,60)/100.0f}, 2.2f, floorY);
-}
-static void GibsUpdate(float dt){
-    for (int i=0;i<MAX_GIBS;i++){ Gib *g=&g_gibs[i]; if (g->life<=0) continue;
-        g->life-=dt; if (g->bounces>=3) continue;
-        g->vel.y-=16.0f*dt;
-        Vector3 st=Vector3Scale(g->vel,dt); float sl=Vector3Length(st);
-        if (g_hasMap && g_mapCol.ready && sl>1e-5f){              // walls stop them
-            float w=MapRayNearest(g->pos,Vector3Scale(st,1.0f/sl),sl+g->size);
-            if (w>0.0f && fabsf(st.y)<sl*0.9f){ g->vel.x*=-0.3f; g->vel.z*=-0.3f; st=(Vector3){0,st.y,0}; }
-        }
-        g->pos=Vector3Add(g->pos,st);
-        if (g->pos.y<=g->floorY+g->size*0.6f && g->vel.y<0){
-            g->pos.y=g->floorY+g->size*0.6f; g->bounces++;
-            SpawnBlood(g->pos,(Vector3){0,0.2f,0},0.05f,g->floorY);                 // a wet mark where it lands
-            if (g->bounces>=3 || fabsf(g->vel.y)<1.2f){ g->bounces=3; g->vel=(Vector3){0,0,0}; }
-            else { g->vel.y*=-0.30f; g->vel.x*=0.5f; g->vel.z*=0.5f; }
-        }
-    }
-}
-static void DrawGibs(void){
-    for (int i=0;i<MAX_GIBS;i++){ Gib *g=&g_gibs[i]; if (g->life<=0) continue;
-        Color c=g->col; if (g->life<1.0f) c.a=(unsigned char)(255*g->life);
-        DrawSphereEx(g->pos, g->size, 4, 6, c); }
-}
+#include "gibs.h"                       // what a blast leaves of a man: chunks of meat and bone (tests/gibs.sh)
 static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, int blood){
     if (ei<0 || g_enemies[ei].state!=1) return;
     if (blood) SpawnBlood(hitPt, dir, head?1.9f:1.0f, g_enemies[ei].pos.y);
@@ -4036,6 +4021,10 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     }
     int lmb=held || af;
     int lmbP=pressed || (af && g_fireCd<=0.0f);
+    { static int in=0, n=0, uf=0; static float sv[8][2];           // dev (tests/arms.sh): CHERNOBYL_SWAY="x y;x y;..." -- the look delta held at each pair
+      if (!in){ in=1; const char *e=getenv("CHERNOBYL_SWAY");      // for 120 frames in turn, as a steady turn of the head holds it: the gun lags the look, and a
+          while (e && *e && n<8){ if (sscanf(e,"%f %f",&sv[n][0],&sv[n][1])==2) n++; e=strchr(e,';'); if (e) e++; } }   // hard turn lifts its arms up the picture
+      if (n>0){ int k=(uf>0?uf-1:0)/120; if (k>=n) k=n-1; uf++; g_vmLook=(Vector2){sv[k][0],sv[k][1]}; } }
     { float k=fminf(1.0f,dt*9.0f);                                 // sway: chase the look delta, clamp big flicks
       Vector2 t={ fmaxf(-40.0f,fminf(40.0f,g_vmLook.x)), fmaxf(-40.0f,fminf(40.0f,g_vmLook.y)) };
       g_vmSway.x+=(t.x-g_vmSway.x)*k; g_vmSway.y+=(t.y-g_vmSway.y)*k; g_vmLook=(Vector2){0,0}; }
@@ -5461,6 +5450,15 @@ static void DrawViewmodel(void){
     glClear(GL_DEPTH_BUFFER_BIT);   // weapon always on top
 #endif
     rlSetClipPlanes(0.05, 4000.0);  // the viewmodel: raylib's own range (the hands come closer to the lens than the world's near plane)
+    // dev (CHERNOBYL_VM_KEY=1, tests/arms.sh): the arms drawn flat magenta and the gun flat green, so a screenshot can be read
+    // for how much of the picture each takes (a sleeve's end standing in front of the lens; a gun hidden behind an arm).
+    static int key=-1; if (key<0){ const char *e=getenv("CHERNOBYL_VM_KEY"); key=(e && *e && strcmp(e,"0")) ? 1 : 0; }
+    MaterialMap keyKept[64]; int keyN=0;
+    if (key && g_gun.skeleton.boneCount<=256){ unsigned char isArm[256]={0}; int nb=g_gun.skeleton.boneCount; ClassifyArmBones(&g_gun,isArm);
+        for (int i=0;i<g_gun.meshCount && i<64;i++){ Mesh *ms=&g_gun.meshes[i]; int a=0; for (int v=0;v<ms->vertexCount;v++) a+=VertIsArm(ms,v,isArm,nb);
+            MaterialMap *dm=&g_gun.materials[g_gun.meshMaterial[i]].maps[MATERIAL_MAP_DIFFUSE]; keyKept[keyN++]=*dm;
+            dm->texture=(Texture2D){ rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+            dm->color=(a*2>ms->vertexCount) ? (Color){255,0,255,255} : (Color){0,255,0,255}; } }
     BeginMode3D(g_vmCam);
         g_gun.transform=M;            // the whole rig transform; draws below pass pos 0 / scale 1
         Vector3 o={0,0,0};
@@ -5473,6 +5471,7 @@ static void DrawViewmodel(void){
         } else                        // everything else: per-mesh draw with the arms nudge
             DrawGunSpinMesh(g_gun, o, 1.0f, -1, 0.0f, w->gunMask, w->pinOff);
     EndMode3D();
+    for (int i=keyN-1;i>=0;i--) g_gun.materials[g_gun.meshMaterial[i]].maps[MATERIAL_MAP_DIFFUSE]=keyKept[i];   // (last first: two meshes may wear one material)
     g_gun.transform=MatrixIdentity();
 }
 
@@ -6697,6 +6696,7 @@ static void LoadGameAssets(void){
     LoadWeapon(5, "assets/flamethrower.glb", "../assets/flamethrower.glb", "Flamethrower", "vm_tune_flame.txt", VM_HEAVY);
     LoadTick();
     MinesLoad();                       // weapon 5, the claymore (mines.h): with the guns, so it is ready the moment 5 is pressed
+    GibsLoad();                        // the chunks a blast leaves (gibs.h): with the guns too, not at the first man blown apart
     g_numWeapons=6;
     ActivateWeapon( (vmWeapon>=0)?vmWeapon:0 );   // boot on slot 0 / grenade launcher (or --weapon N for tuning)
     if (vmHas){ g_vmOff=(Vector3){vmOv[0],vmOv[1],vmOv[2]}; g_vmScale=vmOv[3]; g_vmYaw=vmOv[4]; g_vmPitch=vmOv[5]; g_vmRoll=vmOv[6]; }
@@ -6854,6 +6854,7 @@ static void LoadThreadFinish(void){                   // the game's first needs 
     if (!g_stageLoad) LoadThreadJoin();
     for (int i=0;i<6;i++) if (g_weapons[i].model.meshCount>0) ModelVaoRebuild(&g_weapons[i].model);
     if (g_mineVmOk) ModelVaoRebuild(&g_mineVm); if (g_mineWOk) ModelVaoRebuild(&g_mineW);   // the claymore in the hand and on the floor
+    if (g_gibOk){ ModelVaoRebuild(&g_gibM); DebugLog("gibs","\"vaos\":%d", g_gibM.meshCount); }   // the chunks a blast leaves (gibs.h)
     for (int t=0;t<EN_NTYPES;t++){ if (g_rig[t].model.meshCount>0) ModelVaoRebuild(&g_rig[t].model); if (g_rig[t].hasLod) ModelVaoRebuild(&g_rig[t].lod); }
     ModelVaoRebuild(&g_floor); ModelVaoRebuild(&g_wall); ModelVaoRebuild(&g_crate);
     if (g_preMapOK) ModelVaoRebuild(&g_preMap);
@@ -6957,6 +6958,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--viewer") && i+1<argc) g_viewA=argv[++i];        // model viewer (see viewer.h)
         else if (!strcmp(argv[i],"--viewer-b") && i+1<argc) g_viewB=argv[++i];
         else if (!strcmp(argv[i],"--viewer-shots") && i+1<argc) g_viewShots=argv[++i];
+        else if (!strcmp(argv[i],"--gibs") && i+1<argc) g_gibsArg=argv[++i];
+        else if (!strcmp(argv[i],"--gib-row") && i+1<argc) g_gibRowArg=argv[++i];
         else if (!strcmp(argv[i],"--shot-every") && i+1<argc) g_shotEvery=atoi(argv[++i]);  // dev: numbered shots into build/shots/        // dev: hold the trigger (muzzle-FX screenshots)
         else if (!strcmp(argv[i],"--cycle")) g_cycleTest=1;          // soak: weapon-cycle ammo regression
         else if (!strcmp(argv[i],"--melee-drain")) g_meleeDrain=1;   // A/B: legacy enemy contact drain

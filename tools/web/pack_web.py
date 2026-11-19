@@ -154,6 +154,13 @@ def main():
                 im = Image.open(os.path.join(md, f)).convert("RGB"); im.thumbnail((1024, 1024), Image.LANCZOS)
                 dst = os.path.join(OUT, "assets", "mines", f[:-4] + ".jpg"); im.save(dst, quality=88); other += os.path.getsize(dst)
             elif f.endswith((".gltf", ".bin")): other += copy("assets/mines/" + f)
+    # the chunks a blast leaves (src/gibs.h): the model and its three small pictures as they are -- PNG, not JPEG: the
+    # wetness picture's alpha (0: light bleeds through the flesh) has to arrive, and the three are 150 KB together
+    gd = os.path.join(REPO, "assets", "gibs")
+    if os.path.isdir(gd):
+        os.makedirs(os.path.join(OUT, "assets", "gibs"), exist_ok=True)
+        for f in sorted(os.listdir(gd)):
+            if f.endswith((".gltf", ".bin", ".png")): other += copy("assets/gibs/" + f)
     ed = os.path.join(REPO, "assets", "extra")
     if os.path.isdir(ed):
         os.makedirs(os.path.join(OUT, "assets", "extra"), exist_ok=True)

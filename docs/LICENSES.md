@@ -34,13 +34,13 @@ Sketchfab at download time) — verified 2026-07-24.
 | File | In use | Title / Author | License | Verdict |
 |---|---|---|---|---|
 | grenadelauncher.glb | slot 0 | "Grenadelauncher animated" — DJMaesen | CC-BY-4.0 | SHIP |
-| remington.glb | slot 1 | "FPS Arms remington (shotgun)" — Cransh | CC-BY-4.0 | SHIP |
-| minigun.glb | slot 2 | "Minigun animated" — DJMaesen | CC-BY-4.0 | SHIP |
+| remington.glb | slot 1 | "FPS Arms remington (shotgun)" — Cransh: the gun, the skeleton and the clips; **changed:** its arms are replaced by the arms of "Grenadelauncher animated" — DJMaesen, refitted to this skeleton by `tools/arms/refit_arms.py` | CC-BY-4.0 (both) | SHIP |
+| minigun.glb | slot 2 | "Minigun animated" — DJMaesen; **changed:** its arms are replaced by the arms of his "Grenadelauncher animated", refitted to this skeleton by `tools/arms/refit_arms.py` | CC-BY-4.0 | SHIP |
 | lmg.glb | slot 3 | "lmg animated" — DJMaesen | CC-BY-4.0 | SHIP |
 | ak74.glb | slot 4 | "FPS AK-74m animations" — Cransh | CC-BY-4.0 | SHIP |
 | mp5.glb | slot 5 | "Animated MP5" — JUST | CC-BY-4.0 | SHIP |
 | benelli.glb | slot 6 | "FPS Benelli M4 Animations" — Cransh | CC-BY-4.0 | SHIP |
-| flamethrower.glb | slot 7 | "CSO Salamader (FlameThrower) First Person" — Amine.Elouneg | CC-BY-4.0 | SHIP |
+| flamethrower.glb | slot 7 | "CSO Salamader (FlameThrower) First Person" — Amine.Elouneg: the gun, the skeleton and the clips; **changed:** its arms (hands, sleeves) are replaced by the arms of "Grenadelauncher animated" — DJMaesen, refitted to this skeleton by `tools/arms/refit_arms.py`, and the wristwatch its own arms wore is removed | CC-BY-4.0 (both) | SHIP |
 | knife.glb | slot 8 | "knife animated" — DJMaesen | CC-BY-4.0 | SHIP |
 | gun.glb | unused spare | "GUN" — NksXxX | CC-BY-4.0 | SHIP (unused) |
 | sawnoff.glb | unused spare | "sawnoff animated" — DJMaesen | CC-BY-4.0 | SHIP (unused) |
@@ -78,6 +78,7 @@ Unused: ak74_fire, sawnoff_fire, shotgun_cock.
 | Item | Verdict |
 |---|---|
 | `assets/icon.png`, `assets/screenshot.png` | ours — SHIP |
+| `assets/gibs/` (the chunks a blast leaves: `chunks.gltf`, `chunks.bin`, `meat_c.png`, `meat_n.png`, `meat_orm.png`) | ours — SHIP. Made from code by `tools/gibs/build_chunks.py` (numpy noise): no downloaded geometry or textures |
 | `../Chernobyl/sounds/` (sibling repo, 56 files, presumed C&C rips) | **QUARANTINE** — nothing ships from there, ever |
 | Title intro: `assets/intro.mpg`, `intro_music.mp3`, `intro_title.png` (`tools/intro/`) | **QUARANTINE** (private build only) — archival Soviet/Chernobyl footage of mixed or unclear rights (archive.org: 1986–91 Soviet documentaries, Periscope Film uploads, Pripyat home video, plus a public-domain aerial shot and compilation), the 1977 USSR anthem recording, and *Hell March* (C&C: Red Alert). Strip the intro (or rebuild it from cleared footage and music) before any public release; the game runs without it. The iPhone (App Store) build ships without it since 1.0 build 3: a plain text title card instead (`ios/C2Intro.m`, `ios/project.yml`). Desktop and browser still play it. |
 | `src/pl_mpeg.h` (phoboslab/pl_mpeg) | MIT — SHIP |
@@ -92,7 +93,9 @@ Unused: ak74_fire, sawnoff_fire, shotgun_cock.
 > Person" by [Amine.Elouneg](https://sketchfab.com/Amine.Elouneg); "GUN" by
 > [NksXxX](https://sketchfab.com/NksXxX) — all licensed
 > [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/), modified (rig/scale
-> edits) for this game. Source URLs are embedded in each `.glb`.
+> edits; the minigun, the Remington and the flamethrower carry the grenade
+> launcher's arms in place of their own) for this game. Source URLs are embedded
+> in each `.glb`.
 > Maps and map textures from [Xonotic](https://xonotic.org) (GPLv2+).
 > Enemy character and animations from [Adobe Mixamo](https://www.mixamo.com).
 > Built with [raylib](https://www.raylib.com) (zlib).
