@@ -135,12 +135,12 @@ static int TrapInZone(const Trap *t, const Enemy *e){                           
 }
 static int g_trapVictim=-1, g_trapVictimDied=0;                                    // dev: CHERNOBYL_TRAP_VICTIM (below) -- read where he is hurt: a body
 static void TrapHurt(int i, float dmg, int cause, Vector3 from){                    // a crush throws apart frees its slot at once, and a new man can fill it
-    Enemy *e=&g_enemies[i]; int oc=g_hurtCause; Vector3 of=g_hurtFrom; g_hurtCause=cause; g_hurtFrom=from;
+    Enemy *e=&g_enemies[i]; int oc=g_hurtCause, ob=g_hurtBy; Vector3 of=g_hurtFrom; g_hurtCause=cause; g_hurtFrom=from; g_hurtBy=HB_TRAP;
     if (!e->boss) dmg=99999.0f;                      // a trap that catches a man kills him, whichever trap (the owner's rule). A boss still takes each trap's own damage
 
     Vector3 d=Vector3Subtract(e->pos,from); d.y=0; float l=Vector3Length(d); d=(l>1e-3f)?Vector3Scale(d,1.0f/l):(Vector3){0,0,1};
     HurtEnemy(i,dmg,0,d,(Vector3){e->pos.x,e->pos.y+1.0f,e->pos.z},cause!=HC_FLAME);
-    g_hurtCause=oc; g_hurtFrom=of;
+    g_hurtCause=oc; g_hurtFrom=of; g_hurtBy=ob;
     if (i==g_trapVictim && e->state!=1) g_trapVictimDied=1;
 }
 static float CraneTop(const Trap *t){ return 4.6f*t->ys-(t->ys<1.0f?0.25f:0.0f); }                 // where its load hangs
@@ -180,21 +180,35 @@ static int TrapCircles(const Trap *t, float out[][3]){ int n=0, k=t->kind;
     if (k==TR_TURBINE){ TC(0,1.75f,1.6f) TC(0,3.0f,1.6f) TC(0,4.3f,1.6f) }
     #undef TC
     return n; }
-static int __attribute__((unused)) TrapBlocked(float x, float z, float pad){
+static int TrapBlocked(float x, float z, float pad){                                  // inside a trap's solid parts, pad out (the route grid, mapload.h)
     float c[8][3];
     for (int i=0;i<g_nTraps;i++){ const Trap *t=&g_traps[i]; if (fabsf(x-t->c.x)>9.0f || fabsf(z-t->c.z)>9.0f) continue;
         int n=TrapCircles(t,c); for (int q=0;q<n;q++){ Vector3 p=TW(t,c[q][0],0,c[q][1]); float r=c[q][2]+pad; if ((x-p.x)*(x-p.x)+(z-p.z)*(z-p.z)<r*r) return 1; } }
     return 0; }
-// Enemies are not STOPPED by a trap's solid parts (the route they follow knows nothing of them: one walked into a switch
-// post and stood there treading) -- they are slid off: pushed out of the circle, and a little round it, the same way
-// each time for the same enemy, so he goes past on one side.
+// Enemies are not STOPPED by a trap's solid parts (one walked into a switch post and stood there treading) -- they are slid
+// off: pushed out of the circle, and a little round it. The route grid goes round the parts that stand still (TrapBlocked,
+// mapload.h); this is for what moves -- the crane's load, the blast door -- and for a step that cuts a corner.
 static void TrapPushEnemy(int i){
     Enemy *e=&g_enemies[i]; float c[8][3]; if (g_nTraps<=0 || e->climbT>0) return;
+    Vector3 sd={0,0,0}; int nav=0;                                   // where the route grid is sending him
     for (int ti=0;ti<g_nTraps;ti++){ const Trap *t=&g_traps[ti]; if (fabsf(e->pos.x-t->c.x)>9.0f || fabsf(e->pos.z-t->c.z)>9.0f || fabsf(e->pos.y-t->c.y)>2.5f) continue;
         int n=TrapCircles(t,c); for (int q=0;q<n;q++){ Vector3 p=TW(t,c[q][0],0,c[q][1]); float r=c[q][2]+0.32f, dx=e->pos.x-p.x, dz=e->pos.z-p.z, d=sqrtf(dx*dx+dz*dz);
             if (d>=r) continue; if (d<1e-3f){ dx=1; dz=0; d=1; }
-            float ov=r-d, sgn=(i&1)?1.0f:-1.0f, nx=p.x+dx/d*r-dz/d*ov*0.6f*sgn, nz=p.z+dz/d*r+dx/d*ov*0.6f*sgn;
-            if (!g_mapCol.ready || !MapSphereHitsWall((Vector3){nx,e->pos.y+ENEMY_STEP+ENEMY_MOVE_R+0.03f,nz},ENEMY_MOVE_R)){ e->pos.x=nx; e->pos.z=nz; e->stuckT=0.0f; } } }
+            // Pushed off it, he slides round it -- to the side the route grid is sending him, then the other if a wall is
+            // there, then straight out. The side was his slot number's (odd one way, even the other): at breach 2's spill
+            // tank, by the doorway, the even ones slid into the wall and stepped straight back in, on the spot for good.
+            // When the route points at its middle (a part that moves: the grid goes round only those that stand still), the side
+            // is the one with less of the route left from just round it.
+            if (!nav && g_hasMap) nav=MapNavSteer(e->pos,&sd)?1:-1;
+            float ov=r-d, tx=-dz/d, tz=dx/d, w=(nav>0)?sd.x*tx+sd.z*tz:0.0f, first=(i&1)?1.0f:-1.0f;
+            if (fabsf(w)>0.3f) first=(w>0)?1.0f:-1.0f;
+            else if (nav>0){ float cs[2];                                // just round each side: the radius turned 55 degrees, a body's width out
+                for (int k=0;k<2;k++){ float sg=k?-1.0f:1.0f, ca=0.574f, sa=0.819f*sg, ux=dx/d*ca-dz/d*sa, uz=dz/d*ca+dx/d*sa;   // (+ turns toward t)
+                    cs[k]=MapNavCostAt(p.x+ux*(r+0.5f), p.z+uz*(r+0.5f), e->pos.y, 1e4f); }
+                if (fabsf(cs[0]-cs[1])>0.25f) first=(cs[0]<cs[1])?1.0f:-1.0f; }
+            const float side[3]={first,-first,0.0f};
+            for (int k=0;k<3;k++){ float nx=p.x+dx/d*r+tx*ov*0.6f*side[k], nz=p.z+dz/d*r+tz*ov*0.6f*side[k];
+                if (!g_mapCol.ready || !MapSphereHitsWall((Vector3){nx,e->pos.y+ENEMY_STEP+ENEMY_MOVE_R+0.03f,nz},ENEMY_MOVE_R)){ e->pos.x=nx; e->pos.z=nz; e->stuckT=0.0f; break; } } } }
 }
 static void TrapPushPlayer(void){                                                    // the player slides round them
     float c[8][3]; if (g_noclip) return;
@@ -603,4 +617,64 @@ static void TrapsHud(void){
     if (!g_trapDemo) return;
     const char *h="TRAP DEMO    E at a switch: arm it (springs when one walks in)    T: fire the next    Y: fire all    N: enemies on/off"; int w=MeasureText(h,18);
     DrawRectangle(W/2-w/2-10,H-34,w+20,26,(Color){0,0,0,150}); DrawText(h,W/2-w/2,H-30,18,(Color){225,205,150,255});
+}
+// ---- --bot (main.c BotSteer): the traps, as a player shows them off -- for the filmed demo (the owner, 2026-11-20: "arm the
+// traps. make it so we can see the traps execute"). With a wave on and nothing on top of it, it walks (over the route grid,
+// BotRouteTo) to the nearest idle trap's switch it can reach, arms it (E), and waits just behind the switch, the trap between
+// it and those coming that way, looking at the trap and holding its fire on anyone by it -- so they walk in. When a trap goes
+// off near it, it looks at it for two seconds (and lights the spill once they are down in it). tests/bot-demo.sh.
+static int g_botTrap=-1, g_botTrapPhase=0, g_botWatch=-1, g_botWatchLog=0; static float g_botTrapT=0.0f, g_botTrapRest=4.0f, g_botWatchT=0.0f;
+static float g_botTrapBad[MAX_TRAPS]; static int g_botSaw[MAX_TRAPS];
+static Vector3 BotSwitchAt(const Trap *t){ return TW(t,kTrapSwitchX[t->kind],0,kTrapSwitchZ[t->kind]); }
+static int BotTrapSpare(const Enemy *e){                                              // by the trap it waits at: let him walk in
+    if (g_botTrapPhase!=2 || g_botTrap<0) return 0; const Trap *t=&g_traps[g_botTrap]; if (t->state!=3) return 0;
+    return hypotf(e->pos.x-t->c.x,e->pos.z-t->c.z)<6.0f && hypotf(e->pos.x-g_pos.x,e->pos.z-g_pos.z)>4.5f; }
+// 0 nothing to do with traps; 1 on its way to a switch (*go); 2 going back to its place by the armed trap (*go); 3 there:
+// stand. *lookOn: look at *look -- 1 the trap it waits by (when nothing close needs shooting), 2 one going off (unless one is
+// at its throat).
+static int BotTraps(float dt, Vector3 *go, Vector3 *look, int *lookOn){
+    *lookOn=0; if (!g_hasMap || g_nTraps<=0 || g_dead) return 0;
+    float feet=g_pos.y-EYE_H; int alive=0, close=0;
+    for (int i=0;i<MAX_ENEMIES;i++){ const Enemy *e=&g_enemies[i]; if (e->state!=1) continue; alive++;
+        if (kEnemy[e->type].kind==AK_MELEE && hypotf(e->pos.x-g_pos.x,e->pos.z-g_pos.z)<6.0f) close++; }
+    for (int k=0;k<g_nTraps;k++) if (g_botTrapBad[k]>0.0f) g_botTrapBad[k]-=dt;
+    // one going off near it, that it can see: watch it
+    for (int k=0;k<g_nTraps;k++){ const Trap *t=&g_traps[k];
+        if (t->state!=1){ g_botSaw[k]=0; continue; }
+        if (!g_botSaw[k] && hypotf(t->c.x-g_pos.x,t->c.z-g_pos.z)<32.0f && BotSees(g_pos,(Vector3){t->c.x,t->c.y+1.0f,t->c.z})){
+            g_botSaw[k]=1; g_botWatch=k; g_botWatchT=2.2f; g_botWatchLog=1; } }
+    if (g_botWatchT>0.0f && g_botWatch>=0){ const Trap *t=&g_traps[g_botWatch]; g_botWatchT-=dt;
+        *look=(Vector3){t->c.x,t->c.y+0.9f,t->c.z}; *lookOn=2;                        // (2: watching one go -- before all but one at its throat)
+        if (g_botWatchLog && g_botWatchT<1.5f){ g_botWatchLog=0;                     // (0.7 s in: where the camera is)
+            float want=atan2f(t->c.x-g_pos.x,t->c.z-g_pos.z), off=fabsf(want-g_yaw); while (off>PI) off=fabsf(off-2*PI);
+            DebugLog("botwatch","\"k\":%d,\"name\":\"%s\",\"off\":%.1f,\"dist\":%.1f",g_botWatch,kTrapName[t->kind],off*RAD2DEG,hypotf(t->c.x-g_pos.x,t->c.z-g_pos.z)); }
+        if (t->kind==TR_SPILL && t->state==1 && t->stage==0 && t->t>2.5f && TrapNear()==g_botWatch) TrapFire(g_botWatch); }   // down in it: light it
+    g_botTrapRest-=dt;
+    if (g_botTrapPhase==0){                                                           // pick one: the nearest idle one on its floor it can walk to
+        if (g_botTrapRest>0.0f || alive==0 || close>0 || g_playerHp<40.0f) return 0;
+        int best=-1; float bd=40.0f;
+        for (int k=0;k<g_nTraps;k++){ const Trap *t=&g_traps[k]; if (t->state!=0 || g_botTrapBad[k]>0.0f) continue;
+            Vector3 sw=BotSwitchAt(t); float d=hypotf(sw.x-g_pos.x,sw.z-g_pos.z); if (fabsf(sw.y-feet)<1.2f && d<bd){ bd=d; best=k; } }
+        if (best<0){ g_botTrapRest=3.0f; return 0; }
+        Vector3 sw=BotSwitchAt(&g_traps[best]); int gn=BotNodeNear(sw,sw.y,3); BotRouteTo(gn); int left=BotRouteLeft();
+        if (gn<0 || left<0 || left>70){ g_botTrapBad[best]=30.0f; return 0; }
+        g_botTrap=best; g_botTrapPhase=1; g_botTrapT=0.0f; DebugLog("bottrap","\"k\":%d,\"name\":\"%s\",\"cells\":%d",best,kTrapName[g_traps[best].kind],left);
+    }
+    Trap *t=&g_traps[g_botTrap]; Vector3 sw=BotSwitchAt(t); g_botTrapT+=dt;
+    if (g_botTrapPhase==1){                                                           // on its way
+        if (t->state!=0 || g_botTrapT>25.0f || g_playerHp<30.0f){ g_botTrapBad[g_botTrap]=20.0f; g_botTrapPhase=0; g_botTrap=-1; g_botTrapRest=3.0f; return 0; }
+        if (TrapNear()==g_botTrap){ TrapFire(g_botTrap); g_botTrapPhase=2; g_botTrapT=0.0f;
+            DebugLog("botarm","\"k\":%d,\"name\":\"%s\"",g_botTrap,kTrapName[t->kind]); }
+        else { float L=hypotf(sw.x-g_pos.x,sw.z-g_pos.z);
+            if (L<2.0f || !BotRouteDir(go)) *go=Vector3Normalize((Vector3){sw.x-g_pos.x,0,sw.z-g_pos.z});
+            return 1; }
+    }
+    // armed: wait just behind the switch, the trap between it and them, and look at it
+    if (t->state!=3 || g_botTrapT>20.0f || g_playerHp<30.0f){ g_botTrapPhase=0; g_botTrap=-1; g_botTrapRest=(t->state==3)?2.0f:5.0f; return 0; }
+    Vector3 out={sw.x-t->c.x,0,sw.z-t->c.z}; float ol=Vector3Length(out); out=(ol>1e-3f)?Vector3Scale(out,1.0f/ol):(Vector3){1,0,0};
+    Vector3 hold={sw.x+out.x*1.2f,0,sw.z+out.z*1.2f};
+    if (!*lookOn){ *look=(Vector3){t->c.x,t->c.y+0.6f,t->c.z}; *lookOn=1; }
+    float L=hypotf(hold.x-g_pos.x,hold.z-g_pos.z);
+    if (L>1.0f){ *go=Vector3Normalize((Vector3){hold.x-g_pos.x,0,hold.z-g_pos.z}); return 2; }
+    return 3;
 }

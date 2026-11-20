@@ -1464,6 +1464,7 @@ typedef struct { Vector3 pos; float hp; int state; int clip; float animT; float 
                  struct ModelAnimation *drawAn; float drawFrame, drawYaw;
                  // --- motion (EnemyPose / UpdateEnemies): he has momentum, turns at a rate, and his legs and torso are posed apart
                  Vector3 vel, mv, lastPos;        // vel: commanded ground velocity (accel-limited, takes hit impulses); mv: measured, smoothed
+                 float detA, detT;                // the way round what blocks him: an angle off his heading (UpdateEnemies' sweep), kept detT s more
                  float yaw, yawRate, twist, headTw, lean, pitch;   // body facing (deg) + torso/head turned to the player + lean into turns/accel
                  int loco, locoPrev, back; float locoT, locoPrevT, locoBlend, legW;   // lower-body clip (idle/walk/run/limp) + crossfade; legW: legs from loco (1) or the action clip (0)
                  float flank, atkRest, atkRate, stagT, hitAcc, hitAccT, aimT, modeT, lostT; int mode, side, shots, rehit;   // approach side, post-swing rest, stagger, ranged stance
@@ -1993,6 +1994,7 @@ static int             g_meleeDrain = 0;        // --melee-drain: legacy untimed
 static int             g_reloadAt = 0;          // --reload-at N: force a reload at update frame N (dev: inspect reload anims)
 static const char     *g_recPath = NULL;        // --record <out.mp4>: dev, film the game (record.h)
 static int             g_kite = 0;              // --kite: dev autopilot -- face the nearest enemy and backpedal (repro chase glitches)
+static int             g_bot = 0;               // --bot: dev autopilot that plays to survive (BotSteer) -- with --record, a filmed run of the waves
 static int             g_shotEvery = 0;         // --shot-every K: numbered screenshot every K frames (dev)
 static const char     *g_gibsArg = NULL, *g_gibRowArg = NULL;   // --gibs F[*n] / --gib-row F (dev: as CHERNOBYL_GIBS / CHERNOBYL_GIB_ROW, for the browser build, which has no environment; gibs.h)
 static int             g_devCorpses = 0;        // --corpses N: lay out N cook corpses at run start (dev: test the priest)
@@ -2041,7 +2043,7 @@ static void EnemyArm(int i, Vector3 pos, int type){   // common: bring enemy i t
     g_enemies[i].wN=0; g_enemies[i].wNext=0; g_enemies[i].drawAn=NULL;
     { Enemy *e=&g_enemies[i];                              // motion state: standing, turned to the player, his own pace and approach side
       e->spd*=1.0f+GetRandomValue(-8,8)/100.0f;
-      e->vel=e->mv=(Vector3){0,0,0}; e->lastPos=pos;
+      e->vel=e->mv=(Vector3){0,0,0}; e->lastPos=pos; e->detA=e->detT=0.0f;
       e->yaw=atan2f(g_pos.x-pos.x, g_pos.z-pos.z)*RAD2DEG + ENEMY_YAW_OFFSET; e->yawRate=e->twist=e->headTw=e->lean=e->pitch=0;
       e->loco=e->locoPrev=CL_IDLE; e->back=0; e->locoT=(float)GetRandomValue(0,40); e->locoPrevT=0; e->locoBlend=0; e->legW=1;
       e->flank=GetRandomValue(-100,100)/100.0f; e->atkRest=0; e->atkRate=1; e->stagT=0; e->hitAcc=e->hitAccT=0; e->aimT=e->modeT=e->lostT=0;
@@ -2691,6 +2693,8 @@ static int g_gibKills=0;        // kills that left no body (a running tally: cal
 static int g_noCredit=0;        // the damage being dealt is not the player's doing: no kill tally, marker or confirm sound
 #define GIB_BLAST_DMG 100.0f     // a grenade doing this much to the round that kills him blows him apart
 static int g_hurtCause=HC_BULLET; static Vector3 g_hurtFrom;   // g_hurtFrom: the blast centre
+static int g_hurtBy=-1;                                         // who: a gun's slot, HB_TRAP, HB_MINE; -1 the gun in the hand (the debug log's "edeath": tests/bot-demo.sh)
+enum { HB_TRAP=100, HB_MINE=101 };
 #define LIMP_TIME     6.0f      // seconds of limping after a leg hit
 #define LIMP_SPEED    0.85f     // m/s while limping (the clip plays faster to keep the feet planted)
 #define LIMP_CLIP_MPS 0.52f     // the limp take's own walking speed
@@ -2825,7 +2829,7 @@ static void HurtEnemy(int ei, float dmg, int head, Vector3 dir, Vector3 hitPt, i
                 if (g_audio && g_hasGibSnd){ SetSoundPitch(g_gibSnd,0.92f+GetRandomValue(0,16)/100.0f); SfxAt(g_gibSnd, c, 1.0f); }
                 e->state=0;                                    // nothing left to fall over
                 DebugLog("gib","\"i\":%d,\"cause\":%d", ei, g_hurtCause); } }
-          DebugLog("edeath","\"i\":%d,\"role\":%d,\"cause\":%d", ei, e->deathRole, g_hurtCause); }
+          DebugLog("edeath","\"i\":%d,\"role\":%d,\"cause\":%d,\"by\":%d", ei, e->deathRole, g_hurtCause, g_hurtBy>=0?g_hurtBy:g_curWeapon); }
         if (!g_enemies[ei].dropping) g_enemies[ei].drawY=g_enemies[ei].pos.y;          // settle the render height so the corpse doesn't pop
         int bossTheme=0;                                                             // the boss's death track stands in for his own cry (both at once was a muddle)
         if (g_enemies[ei].boss && g_audio && g_hasBossDeadSnd){                      // the boss is down
@@ -2979,8 +2983,8 @@ static void GrenadeExplode(Vector3 p){
         if (g_enemies[i].state!=1) continue;
         Vector3 c=(Vector3){g_enemies[i].pos.x, g_enemies[i].pos.y+ENEMY_HEIGHT*0.5f, g_enemies[i].pos.z};
         float d=Vector3Distance(p,c);
-        if (d<=GREN_RADIUS){ g_hurtCause=HC_BLAST; g_hurtFrom=p;
-            HurtEnemy(i, GREN_DMG*(1.0f-d/GREN_RADIUS), 0, (Vector3){0,1,0}, c, 1); g_hurtCause=HC_BULLET; }
+        if (d<=GREN_RADIUS){ g_hurtCause=HC_BLAST; g_hurtFrom=p; g_hurtBy=0;   // (the launcher's, whatever is in the hand by now)
+            HurtEnemy(i, GREN_DMG*(1.0f-d/GREN_RADIUS), 0, (Vector3){0,1,0}, c, 1); g_hurtCause=HC_BULLET; g_hurtBy=-1; }
     }
     MinesBlast(p, GREN_RADIUS);                             // a claymore in the blast goes with it (mines.h)
     DynLightAdd((Vector3){p.x,p.y+0.6f,p.z}, (Vector3){3.2f,1.9f,0.8f}, 20.0f, 0.50f, 0);   // the blast lights everything round it
@@ -3137,12 +3141,12 @@ static void Fire(Camera3D cam) {
 // floor) or off a cliff taller than NAV_MAXFALL -- and be clear of walls. This single
 // test drives all enemy movement: they slide along walls, climb stairs, drop off
 // ledges toward the player, and still refuse bottomless edges.
-#define ENEMY_STEP    0.7f    // max riser an enemy can step up (matches the player's auto-step)
+#define ENEMY_STEP    NAV_CLIMB   // max riser an enemy can step up, 0.7 m (matches the player's auto-step; the route grid's own, mapload.h)
 static int g_trapDemo; static void TrapsUpdate(float dt); static void TrapsDraw(void); static void TrapsHud(void); static void TrapsInit(void);   // traps.h: the plant's traps (and --traps, their sandbox)
 static int TrapBlocked(float x, float z, float pad); static void TrapPushPlayer(void); static void TrapPushEnemy(int i); static int TrapMarks(Vector3 *pos, int *ready, int max);
-static int g_minesOn, g_mineMode; static float g_layT, g_mineRaise, g_mineModeT;   // mines.h: the claymore (--mines)
+static int g_minesOn, g_mineMode, g_minesLeft, g_mineLayReq; static float g_layT, g_mineRaise, g_mineModeT; static void MinesPick(void);   // (g_mineLayReq: --bot lays the one in its hand)   // mines.h: the claymore (--mines)
 static void MinesDip(Vector3 *eye, Vector3 *fwd); static void MinesUpdate(float dt); static void MinesDraw(void); static void MinesDrawViewmodel(void); static void MinesHud(int W, int H);
-static int EnemyMoveOK(float x, float z, float curY){
+static int EnemyMoveOK(float x, float z, float curY, float fromX, float fromZ){   // to (x,z), from (fromX,fromZ) at height curY
     if (!g_mapCol.ready) return 1;
     if (HoleAt(x,z,HOLE_KEEPOUT)>=0) return 0;          // a breach in the floor: round it, not into it
     float top=curY+ENEMY_STEP, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f);
@@ -3153,15 +3157,40 @@ static int EnemyMoveOK(float x, float z, float curY){
     // Clear where he'd stand -- tested from STEP height up. The sphere used to sit at 0.9 m, its underside 0.42 m off the
     // floor: on a stair it caught the top edge of the next riser (0.45 m) from 17 cm out, a band he could never cross a
     // frame at a time -- so he ran in place against every flight, his body sunk in the step. What he can step over is not a wall.
-    return !MapSphereHitsWall((Vector3){x,ny+ENEMY_STEP+ENEMY_MOVE_R+0.03f,z},ENEMY_MOVE_R);
+    // Off a ledge taller than a step, what must be clear is where he steps out, at the height he is at: tested at the floor
+    // below, the sphere took in the side of the ledge he was leaving, and he ran on the spot at its edge for good (the last
+    // of a wave stuck on the hall's platform, 2026-11-19; tests/enemy-paths.sh). He falls from there (UpdateEnemies).
+    float sy=(ny<curY-ENEMY_STEP)?curY:ny, cy=sy+ENEMY_STEP+ENEMY_MOVE_R+0.03f;
+    if (!MapSphereHitsWall((Vector3){x,cy,z},ENEMY_MOVE_R)) return 1;   // the common case, at the cost it always had (the first wall in reach ends it)
+    float to=MapSphereWallDist((Vector3){x,cy,z},ENEMY_MOVE_R);
+    // Pressed against a wall already -- landed at the foot of the ledge he stepped off, shoved there by the crowd -- a step
+    // that takes him further from it is allowed, one along it or into it is not: every step still touched it, so he could
+    // never leave it, and ran on the spot until the embed check moved him to a breach.
+    return to>MapSphereWallDist((Vector3){fromX,cy,fromZ},ENEMY_MOVE_R)+1e-4f;
+}
+// Stepped off a ledge taller than a step: he carries on out far enough to land clear of its side, as a body jumps down
+// (not slides down the face). Landed at its foot, his body was in the side; if he wanted back toward it (the player up
+// on the deck he fell from) no step was his, and the embed check moved him to a breach.
+static void EnemyLandClear(int i, float mx, float mz, float y0){
+    Enemy *e=&g_enemies[i]; float L=sqrtf(mx*mx+mz*mz); if (L<1e-6f) return;
+    float top=y0+ENEMY_STEP, fd=MapRayNearest((Vector3){e->pos.x,top,e->pos.z},(Vector3){0,-1,0},80.0f); if (fd<=0) return;
+    float ny=top-fd; if (ny>=y0-ENEMY_STEP) return;                    // not off a ledge
+    float cy=ny+ENEMY_STEP+ENEMY_MOVE_R+0.03f, dx=mx/L, dz=mz/L;
+    for (float s=0.0f;s<=0.7f;s+=0.05f){ float x=e->pos.x+dx*s, z=e->pos.z+dz*s;
+        float f2=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},80.0f); if (f2<=0 || fabsf((top-f2)-ny)>0.3f || HoleAt(x,z,HOLE_KEEPOUT)>=0) break;
+        if (MapSphereWallDist((Vector3){x,cy,z},ENEMY_MOVE_R)>=ENEMY_MOVE_R){ e->pos.x=x; e->pos.z=z;
+            DebugLog("eland","\"i\":%d,\"drop\":%.2f,\"out\":%.2f,\"clear\":1",i,y0-ny,s); return; } }
+    DebugLog("eland","\"i\":%d,\"drop\":%.2f,\"clear\":0",i,y0-ny);
 }
 // Move enemy i by (mx,mz), per-axis -- nothing walks through walls OR off ledges. Both
 // the chase and the enemy-vs-enemy separation go through here.
 static void EnemyNudge(int i, float mx, float mz){
     Enemy *e=&g_enemies[i];
     if (g_hasMap && g_mapCol.ready){
-        if (EnemyMoveOK(e->pos.x+mx, e->pos.z, e->pos.y)) e->pos.x+=mx;
-        if (EnemyMoveOK(e->pos.x, e->pos.z+mz, e->pos.y)) e->pos.z+=mz;
+        float y0=e->pos.y;
+        if (EnemyMoveOK(e->pos.x+mx, e->pos.z, y0, e->pos.x, e->pos.z)) e->pos.x+=mx;
+        if (EnemyMoveOK(e->pos.x, e->pos.z+mz, y0, e->pos.x, e->pos.z)) e->pos.z+=mz;
+        EnemyLandClear(i, mx, mz, y0);
     } else { e->pos.x+=mx; e->pos.z+=mz; }
 }
 
@@ -3598,21 +3627,27 @@ static void UpdateEnemies(float dt){
               float dl=Vector3Length(dd), mxs=acc*dt; if (dl>mxs) dd=Vector3Scale(dd,mxs/dl);
               e->vel=Vector3Add(e->vel,dd); e->vel.y=0;
               if (down) e->vel=(Vector3){0,0,0}; }
-            { float vl=Vector3Length(e->vel);
+            { float vl=Vector3Length(e->vel); e->detT=fmaxf(0.0f,e->detT-dt);
               if (vl>0.02f){
                 Vector3 b4=e->pos; float step=vl*dt, mx=e->vel.x/vl, mz=e->vel.z/vl;
-                EnemyNudge(i, mx*step, mz*step);
                 #define STILL() (fabsf(e->pos.x-b4.x)<1e-5f && fabsf(e->pos.z-b4.z)<1e-5f)
+                if (e->detT>0.0f){                                  // on his way round something (the sweep below found it): keep to it
+                    float c=cosf(e->detA), sn=sinf(e->detA); EnemyNudge(i, (mx*c-mz*sn)*step, (mx*sn+mz*c)*step);
+                    if (STILL()) e->detT=0.0f; }                    // shut that way too: look again
+                if (STILL()) EnemyNudge(i, mx*step, mz*step);
                 if (STILL() && nav) EnemyNudge(i, navDir.x*step, navDir.z*step);   // his own line is walled off: take the route's
                 // wedged (the heading runs into a wall and per-axis collision blocks BOTH axes)? sweep the
                 // heading outward to either side -- nearest angle first -- until one frees up, so he slides
                 // out of corners instead of running in place. Goes out to +-150 deg to escape concave pockets.
+                // The way it finds he keeps to for 0.3 s: taken one step at a time, the next step was back on his
+                // heading, into what he had stepped aside from -- at a small stand in a corridor, too small for the
+                // route grid, the route sent him at it for good (a fiend 38 s, a butcher 45 s; tests/enemy-paths.sh).
                 if (g_hasMap && wspd>0.1f && STILL()){
                     const float ANG[10]={0.524f,-0.524f, 1.047f,-1.047f, 1.571f,-1.571f, 2.094f,-2.094f, 2.618f,-2.618f};
                     for (int k=0;k<10;k++){
                         float c=cosf(ANG[k]), sn=sinf(ANG[k]);
                         EnemyNudge(i, (mx*c-mz*sn)*step, (mx*sn+mz*c)*step);
-                        if (!STILL()) break;
+                        if (!STILL()){ e->detA=ANG[k]; e->detT=0.3f; break; }
                     }
                 }
                 if (STILL()) e->vel=Vector3Scale(e->vel,0.5f);             // flat against something: no speed stored up
@@ -4001,6 +4036,217 @@ static void RespawnPlayer(void){
 // looped fire sound. held/pressed = the trigger (--autofire adds to them after the cooldown
 // ticks, as it always has); fwd = aim direction
 // from g_pos (g_cam must be set). Shared by Update and the enemy gallery's range mode.
+// ---- --bot: a dev autopilot that plays to survive -------------------------------------------------------------
+// For a filmed run of the waves (--bot --record, no god mode): what a player would do with a mouse and WASD, decided
+// ten times a second. It keeps a fighting distance: it backs off from those that swing, from all within 12 m and hard
+// from one inside 7 to 9 m (sprinting, as a player holding shift does), strafes those that shoot, closes on a target it can see that is
+// far off, and goes after the nearest when none is close; and it picks its way by what is open: not into a wall or a corner, not to the mouth of a breach (they are
+// where the waves climb out). It turns to face the nearest enemy it can see, else looks where it goes, and shoots
+// only what is in its sights, in sight and in the gun's reach. It takes health when it is hurt and ammo when
+// the belt runs low. It shows the game off (the owner, 2026-11-20: "do more weapon switches and arm the traps. make it so
+// we can see the traps execute"): it changes guns to suit what it faces (the flamethrower up close, the minigun into a
+// crowd, the launcher on a knot of them further off, the Remington in the middle distance), lays a claymore in the way of
+// those that follow it, and goes to the traps' switches, arms them, waits by them for the waves to walk in, and watches
+// them go (BotTraps, traps.h). tests/bot-demo.sh. The old --kite (face the nearest, back away) is left as it was: tests use it.
+static Vector3 g_botDir={0,0,1}, g_botDodge={0,0,0}, g_botLast={0,0,0};
+static float   g_botThink=0.0f, g_botStuck=0.0f, g_botDodgeT=0.0f, g_botSwitchT=0.0f, g_botLogT=0.0f;
+static int     g_botTgt=-1, g_botSeen=0;
+static Vector3 BotChest(const Enemy *e){ return (Vector3){ e->pos.x, e->pos.y+1.35f*kEnemy[e->type].scale, e->pos.z }; }   // the top of the chest: what goes high is a headshot
+// The way to a spot across the plant (a trap's switch), over the route grid the enemies use (mapload.h): a fill out
+// from the spot by the steps a body can take (up a step, down a storey), then downhill from where it stands.
+static int *g_botRoute=NULL, *g_botRouteQ=NULL; static long g_botRouteN=0; static int g_botRouteGoal=-1;
+static int BotNodeNear(Vector3 p, float feet, int r){                 // the route grid's node at p (its storey), else the nearest within r cells
+    if (!g_navOK) return -1;
+    int cx=(int)((p.x-g_navMn.x)/g_navCS), cz=(int)((p.z-g_navMn.z)/g_navCS), best=-1, bd=1<<30;
+    for (int dz=-r;dz<=r;dz++) for (int dx=-r;dx<=r;dx++){ int x=cx+dx, z=cz+dz; if (x<0||z<0||x>=g_navNX||z>=g_navNZ) continue;
+        int ci=z*g_navNX+x; if (g_navNL[ci]==0) continue; int l=NavLayer(ci,feet); if (l<0) continue;
+        int d=dx*dx+dz*dz; if (d<bd){ bd=d; best=ci*NAV_MAXL+l; } }
+    return best; }
+static void BotRouteTo(int goal){
+    if (goal<0 || !g_navOK) return;
+    long nn=(long)g_navNX*g_navNZ*NAV_MAXL;
+    if (nn!=g_botRouteN){ free(g_botRoute); free(g_botRouteQ); g_botRoute=(int*)malloc(sizeof(int)*nn); g_botRouteQ=(int*)malloc(sizeof(int)*nn); g_botRouteN=nn; g_botRouteGoal=-1; }
+    if (goal==g_botRouteGoal) return;
+    g_botRouteGoal=goal; for (long i=0;i<nn;i++) g_botRoute[i]=-1;
+    int head=0, tail=0; g_botRoute[goal]=0; g_botRouteQ[tail++]=goal;
+    const int DX[8]={1,-1,0,0,1,1,-1,-1}, DZ[8]={0,0,1,-1,1,-1,1,-1};
+    while (head<tail){ int node=g_botRouteQ[head++], ci=node/NAV_MAXL, cx=ci%g_navNX, cz=ci/g_navNX; float h=g_navFloor[node];
+        for (int k=0;k<8;k++){ int x=cx+DX[k], z=cz+DZ[k]; if (x<0||z<0||x>=g_navNX||z>=g_navNZ) continue; int nci=z*g_navNX+x;
+            for (int l=0;l<g_navNL[nci];l++){ int ni=nci*NAV_MAXL+l; if (g_botRoute[ni]>=0) continue;
+                float dh=g_navFloor[ni]-h; if (dh<-NAV_CLIMB || dh>NAV_MAXFALL) continue;   // from there to here: up a step at most, down a storey
+                g_botRoute[ni]=g_botRoute[node]+1; g_botRouteQ[tail++]=ni; } } }
+}
+static int BotRouteLeft(void){                                         // cells from where it stands to the goal; -1: no way there
+    if (g_botRouteGoal<0 || !g_botRoute) return -1;
+    int n=BotNodeNear(g_pos,g_pos.y-EYE_H,2); return n<0 ? -1 : g_botRoute[n]; }
+static int BotRouteDir(Vector3 *dir){                                  // which way along it: toward the neighbour cell nearest the goal
+    int n=BotNodeNear(g_pos,g_pos.y-EYE_H,2); if (n<0 || g_botRoute[n]<0) return 0;
+    int ci=n/NAV_MAXL, cx=ci%g_navNX, cz=ci/g_navNX, best=-1, bd=g_botRoute[n]; float h=g_navFloor[n];
+    const int DX[8]={1,-1,0,0,1,1,-1,-1}, DZ[8]={0,0,1,-1,1,-1,1,-1};
+    for (int k=0;k<8;k++){ int x=cx+DX[k], z=cz+DZ[k]; if (x<0||z<0||x>=g_navNX||z>=g_navNZ) continue; int nci=z*g_navNX+x;
+        for (int l=0;l<g_navNL[nci];l++){ int ni=nci*NAV_MAXL+l; float dh=g_navFloor[ni]-h;
+            if (g_botRoute[ni]>=0 && g_botRoute[ni]<bd && dh<=NAV_CLIMB && dh>=-NAV_MAXFALL){ bd=g_botRoute[ni]; best=ni; } } }
+    if (best<0) return 0;
+    int bc=best/NAV_MAXL; Vector3 c={g_navMn.x+(bc%g_navNX+0.5f)*g_navCS,0,g_navMn.z+(bc/g_navNX+0.5f)*g_navCS};
+    Vector3 v={c.x-g_pos.x,0,c.z-g_pos.z}; float L=Vector3Length(v); if (L<1e-3f) return 0;
+    *dir=Vector3Scale(v,1.0f/L); return 1; }
+// The traps, as one shows them off (traps.h, below the traps themselves): to a switch, arm it, wait by it for them to walk
+// in, and watch it go. BotTraps says where to be and what to look at; BotTrapSpare, whom not to shoot (let him walk in).
+static int BotTraps(float dt, Vector3 *go, Vector3 *look, int *lookOn);
+static int BotTrapSpare(const Enemy *e);
+static int BotSees(Vector3 from, Vector3 to){                       // nothing of the map between
+    if (!g_hasMap || !g_mapCol.ready) return 1;
+    Vector3 d=Vector3Subtract(to,from); float L=Vector3Length(d); if (L<0.3f) return 1;
+    float h=MapRayNearest(from,Vector3Scale(d,1.0f/L),L); return !(h>0.0f && h<L-0.25f);
+}
+static float BotStepFree(Vector3 d, float step){                  // how far a step that way really goes: Update's own move test (per axis,
+    float by=g_pos.y-0.55f, x=g_pos.x, z=g_pos.z;                    // so it slides; the 0.42 m sphere; no walking into a body; the floor's edge).
+    if (g_hasMap && !g_noclip){                                       // Its rays judged the way open where the body did not fit, and every step it
+        if (!MapSphereHitsWall((Vector3){x+d.x*step,by,z},0.42f) && !PlayerIntoEnemy(x+d.x*step,z)) x+=d.x*step;   // chose was refused: frozen
+        if (!MapSphereHitsWall((Vector3){x,by,z+d.z*step},0.42f) && !PlayerIntoEnemy(x,z+d.z*step)) z+=d.z*step;   // for good (tests/bot.sh)
+        if (g_hasHall){ float m=0.45f; x=fmaxf(g_mapHall[0]+m,fminf(g_mapHall[2]-m,x)); z=fmaxf(g_mapHall[1]+m,fminf(g_mapHall[3]-m,z)); } }
+    else { x+=d.x*step; z+=d.z*step; }
+    return sqrtf((x-g_pos.x)*(x-g_pos.x)+(z-g_pos.z)*(z-g_pos.z));
+}
+static int BotAmmo(int s){ const Weapon *w=&g_weapons[s]; return !w->has ? 0 : (w->magSize>0 ? w->mag+w->reserve : 1); }
+static float BotReach(int s){ return s==5 ? 7.5f : s==1 ? 14.0f : s==0 ? 26.0f : 20.0f; }   // flamethrower (FLAME_RANGE 8.5), Remington, grenades, the rest (the minigun's spray is wasted further off)
+static Vector3 BotAimAt(const Enemy *e){                              // where to point: the chest; the launcher, his middle raised by the lob's
+    Vector3 c=BotChest(e); if (g_curWeapon!=0) return c;              // drop on the way (GREN_SPEED, GREN_GRAV, the 3 m/s loft LaunchGrenade gives it)
+    float hz=hypotf(c.x-g_pos.x,c.z-g_pos.z), t=hz/30.0f; c.y+=-0.5f+fmaxf(0.0f,0.5f*24.0f*t*t-3.0f*t); return c; }
+// The trigger, for WeaponTrigger: an enemy in its sights (within about half a metre of where it points), in sight, and
+// in the gun's reach -- held half a second on, so the minigun stays spun up between bursts; off near its overheat.
+static int BotWantsFire(float dt, Vector3 fwd){
+    static float hold=0.0f; hold-=dt;
+    float reach=BotReach(g_curWeapon);
+    for (int k=0;k<MAX_ENEMIES;k++){ const Enemy *e=&g_enemies[k]; if (e->state!=1 || BotTrapSpare(e)) continue;   // (by the trap it armed: let him walk in)
+        Vector3 c=BotAimAt(e), d=Vector3Subtract(c,g_pos); float L=Vector3Length(d); if (L<0.3f || L>reach) continue;
+        if (g_curWeapon==0 && L<7.0f) continue;                       // a grenade at arm's length is in its own face
+        float along=Vector3DotProduct(fwd,d); if (along<=0.0f) continue;
+        if (sqrtf(fmaxf(0.0f,L*L-along*along))>0.55f) continue;
+        if (BotSees(g_pos,BotChest(e))){ hold=0.35f; break; } }
+    return hold>0.0f && !(g_curWeapon==2 && g_mgHeat>=4.3f);
+}
+static int g_botMine=0; static float g_botMineT=20.0f;                // the claymore: 1 drawn, 2 being laid; the wait before the next
+static void BotSteer(float dt, Vector3 *wish, int *moving, float *speed){
+    float feet=g_pos.y-EYE_H; Vector3 me={g_pos.x,0,g_pos.z};
+    Vector3 tgo={0,0,0}, look={0,0,0}; int lookOn=0, tm=BotTraps(dt,&tgo,&look,&lookOn);   // the traps (traps.h): where to be, what to watch
+    g_botMineT-=dt;
+    if (g_botMine==1 && g_layT>=0.0f) g_botMine=2;
+    if (g_botMine==2 && g_layT<0.0f){ g_botMine=0; if (g_mineMode){ g_mineMode=0; g_vmRaise=1.0f; } }   // down: the gun back up (as a number key does)
+    if (g_botMine==1 && g_mineMode && g_mineRaise<=0.2f && g_grounded) g_mineLayReq=1;
+    if (g_botMine==1 && !g_mineMode) g_botMine=0;
+    int threat=0;                                                    // one that swings within 16 m, or one that shoots within 25: run, don't walk
+    for (int k=0;k<MAX_ENEMIES;k++){ const Enemy *e=&g_enemies[k]; if (e->state!=1) continue;
+        float L=Vector3Distance((Vector3){e->pos.x,0,e->pos.z},me); if (L<(kEnemy[e->type].kind==AK_MELEE?16.0f:25.0f)){ threat=1; break; } }
+    g_botThink-=dt; g_botSwitchT-=dt; g_botDodgeT-=dt;
+    if (g_botThink<=0.0f){ g_botThink=0.1f;
+        // the target: the nearest it can see; else the nearest at all, to turn toward
+        int ti=-1, ni=-1; float td=1e9f, nd=1e9f;
+        for (int k=0;k<MAX_ENEMIES;k++){ const Enemy *e=&g_enemies[k]; if (e->state!=1) continue;
+            float d=Vector3Distance((Vector3){e->pos.x,0,e->pos.z},me);
+            if (d<nd){ nd=d; ni=k; }
+            if (d<td && d<40.0f && !BotTrapSpare(e) && BotSees(g_pos,BotChest(e))){ td=d; ti=k; } }
+        g_botTgt=(ti>=0)?ti:ni; g_botSeen=(ti>=0);
+        // what it would pick up, and how much it wants each
+        float wantHp = g_playerHp<40.0f ? 3.0f : g_playerHp<75.0f ? 1.6f : g_playerHp<100.0f ? 0.4f : 0.0f;
+        int belt=BotAmmo(2); float wantAmmo = belt<60 ? 2.5f : belt<240 ? 1.2f : 0.2f;
+        Vector3 pkDir[MAX_PICKUPS]; float pkW[MAX_PICKUPS]; int npk=0;
+        for (int i=0;i<MAX_PICKUPS;i++){ const Pickup *q=&g_pk[i]; if (!q->active) continue;
+            float w = q->type==PK_HEALTH ? wantHp : q->type==PK_MEGA ? (g_playerHp<150.0f?2.2f:0.0f) : q->type==PK_AMMO ? wantAmmo : q->type==PK_QUAD ? 0.8f : 0.5f;
+            Vector3 v={q->pos.x-g_pos.x,0,q->pos.z-g_pos.z}; float L=Vector3Length(v);
+            if (w<=0.0f || L>((q->type==PK_AMMO && belt<240) || (q->type==PK_HEALTH && g_playerHp<40.0f) ? 45.0f : 25.0f) || L<0.05f || fabsf(q->pos.y-feet)>1.6f) continue;   // (further for what it is short of)
+            for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1 && Vector3Distance((Vector3){g_enemies[k].pos.x,0,g_enemies[k].pos.z},(Vector3){q->pos.x,0,q->pos.z})<3.5f){ w*=0.25f; break; }   // not into the arms of one
+            pkDir[npk]=Vector3Scale(v,1.0f/L); pkW[npk]=w*1.2f/(1.0f+L/8.0f); npk++; }
+        // the way to go: 24 directions scored by what is open, who is near, what it wants
+        float best=-1e9f; Vector3 bestD=g_botDir; float clear[24], free[24];
+        float edge=1e9f; Vector3 toMid={0,0,0};                          // how near the floor's edge it is, and which way its middle is
+        if (g_hasHall){ edge=fminf(fminf(g_pos.x-g_mapHall[0],g_mapHall[2]-g_pos.x),fminf(g_pos.z-g_mapHall[1],g_mapHall[3]-g_pos.z));
+            Vector3 v={(g_mapHall[0]+g_mapHall[2])*0.5f-g_pos.x,0,(g_mapHall[1]+g_mapHall[3])*0.5f-g_pos.z}; float L=Vector3Length(v); if (L>0.01f) toMid=Vector3Scale(v,1.0f/L); }
+        for (int a=0;a<24;a++){ float ang=a*(2.0f*PI/24.0f); Vector3 d={sinf(ang),0,cosf(ang)};
+            float c=8.0f;                                              // open floor that way (to 8 m: a dead end is seen early): knee and chest height
+            if (g_hasMap && g_mapCol.ready){
+                float h=MapRayNearest((Vector3){g_pos.x,feet+0.5f,g_pos.z},d,8.0f); if (h>0.0f && h<c) c=h;
+                h=MapRayNearest((Vector3){g_pos.x,feet+1.3f,g_pos.z},d,8.0f); if (h>0.0f && h<c) c=h; }
+            if (g_hasHall){ float m=0.5f;                                // the playable floor's edge (Update clamps him to it)
+                if (d.x> 0.01f) c=fminf(c,(g_mapHall[2]-m-g_pos.x)/d.x); if (d.x<-0.01f) c=fminf(c,(g_mapHall[0]+m-g_pos.x)/d.x);
+                if (d.z> 0.01f) c=fminf(c,(g_mapHall[3]-m-g_pos.z)/d.z); if (d.z<-0.01f) c=fminf(c,(g_mapHall[1]+m-g_pos.z)/d.z); }
+            float freeStep=BotStepFree(d,0.3f); free[a]=freeStep; clear[a]=c;
+            float sc=0.8f*fminf(fmaxf(c,0.0f),8.0f)/8.0f; if (c<1.2f) sc-=4.0f*(1.2f-c); if (c<3.0f) sc-=(3.0f-c)/3.0f;
+            if (freeStep<0.12f) sc-=6.0f; else if (freeStep<0.24f) sc-=2.0f;   // the body does not get through that way (a slide along a wall still counts)
+            if (edge<10.0f) sc+=0.7f*(10.0f-edge)/10.0f*Vector3DotProduct(d,toMid);   // near the floor's edge: back toward its middle (corners kill)
+            for (int t=1;t<=3;t++) if (HoleAt(g_pos.x+d.x*0.9f*t, g_pos.z+d.z*0.9f*t, 0.7f)>=0){ sc-=3.0f/t; break; }
+            for (int k=0;k<MAX_ENEMIES;k++){ const Enemy *e=&g_enemies[k]; if (e->state!=1) continue;
+                Vector3 v={e->pos.x-g_pos.x,0,e->pos.z-g_pos.z}; float L=Vector3Length(v); if (L>25.0f || L<0.01f) continue;
+                float toward=Vector3DotProduct(d,Vector3Scale(v,1.0f/L));
+                if (kEnemy[e->type].kind==AK_MELEE){                     // those that swing: away from all within 12 m (less the further), at
+                    float keep=(e->boss || kEnemy[e->type].speed>6.0f)?9.0f:7.0f, w=(L<12.0f)?1.0f/fmaxf(L,1.5f):(20.0f-L)/96.0f;   // once from one inside
+                    if (w>0.0f) sc-=toward*w*6.4f;                       // 7 to 9 m (the quick ones and the boss: 9) -- room to shoot them as they come
+                    if (L<keep) sc-=toward*3.0f*(keep-L)/keep; }
+                else { if (L<6.0f) sc-=toward*1.0f;                     // those that shoot: across their aim, not at them
+                       sc+=0.35f*(1.0f-fabsf(toward)); }
+                if (k==g_botTgt && g_botSeen && L>15.0f) sc+=0.3f*toward;  // a target far off: closer, where the gun tells
+                if (L<4.0f && toward>0.5f) sc-=3.0f; }                    // never run into one
+            for (int i=0;i<npk;i++) sc+=pkW[i]*Vector3DotProduct(d,pkDir[i]);
+            if (ni>=0 && nd>18.0f){                                      // nothing close: go after the nearest, as a player would (the last of a wave
+                Vector3 v={g_enemies[ni].pos.x-g_pos.x,0,g_enemies[ni].pos.z-g_pos.z}; float L=Vector3Length(v);   // can stick on a deck and never come)
+                if (L>0.01f) sc+=0.9f*Vector3DotProduct(d,Vector3Scale(v,1.0f/L)); }
+            else if (ni<0 && g_hasHall){                                 // none at all (between waves): toward the middle of the floor
+                Vector3 mid={(g_mapHall[0]+g_mapHall[2])*0.5f-g_pos.x,0,(g_mapHall[1]+g_mapHall[3])*0.5f-g_pos.z}; float L=Vector3Length(mid);
+                if (L>6.0f) sc+=0.4f*Vector3DotProduct(d,Vector3Scale(mid,1.0f/L)); }
+            sc+=0.6f*Vector3DotProduct(d,g_botDir);                      // keep going the way it was going
+            if (tm==1 || tm==2) sc+=2.4f*Vector3DotProduct(d,tgo);       // to a trap's switch (the route's way), or back to its place by it
+            if (sc>best){ best=sc; bestD=d; } }
+        g_botDir=bestD;
+        float moved=Vector3Distance(me,g_botLast); g_botLast=me;
+        g_botStuck = moved<0.04f ? g_botStuck+0.1f : 0.0f;
+        if (g_botStuck>0.5f){ int o=0; for (int a=1;a<24;a++) if (free[a]>free[o]+0.01f || (fabsf(free[a]-free[o])<=0.01f && clear[a]>clear[o])) o=a;   // pinned: out the way the body goes furthest, whoever is
+            float ang=o*(2.0f*PI/24.0f); g_botDodge=(Vector3){sinf(ang),0,cosf(ang)}; g_botDodgeT=0.7f; g_botStuck=0.0f; }                // there (a side step from a corner met the other wall)
+        // guns, for the show and for the job: whichever suits what it faces, each held 3.5 s at least (at once if dry) --
+        // the flamethrower on anyone within 6.5 m, the minigun into a crowd, the launcher on a knot of them 8-24 m off,
+        // the Remington on one at 6.5-11 m, else the minigun (then whatever has rounds)
+        int cur=g_curWeapon; float far_=(g_botTgt>=0)?Vector3Distance((Vector3){g_enemies[g_botTgt].pos.x,0,g_enemies[g_botTgt].pos.z},me):99.0f;
+        int knot=0, melee=0; float meleeNear=99.0f;
+        for (int k=0;k<MAX_ENEMIES;k++){ const Enemy *e=&g_enemies[k]; if (e->state!=1) continue;
+            float L=hypotf(e->pos.x-g_pos.x,e->pos.z-g_pos.z);
+            if (g_botTgt>=0 && hypotf(e->pos.x-g_enemies[g_botTgt].pos.x,e->pos.z-g_enemies[g_botTgt].pos.z)<3.5f) knot++;
+            if (kEnemy[e->type].kind==AK_MELEE && L<16.0f){ melee++; if (L<meleeNear) meleeNear=L; } }
+        if ((g_botSwitchT<=0.0f || BotAmmo(cur)==0) && !g_mineMode && g_layT<0.0f && !g_reloading && g_vmRaise<=0.0f && g_botTgt>=0){
+            int want=-1;
+            if (far_<6.5f && BotAmmo(5)>0) want=5;
+            else if (knot>=3 && far_<14.0f && BotAmmo(2)>0) want=2;
+            else if (knot>=2 && far_>8.0f && far_<24.0f && BotAmmo(0)>0) want=0;
+            else if (far_>=6.5f && far_<11.0f && BotAmmo(1)>0) want=1;
+            else if (BotAmmo(2)>0) want=2;
+            const int order[4]={2,1,0,5}; for (int q=0;q<4 && (want<0 || BotAmmo(want)==0);q++) want=order[q];
+            if (want!=cur && BotAmmo(want)>0){ SwitchWeapon(want); g_botSwitchT=3.5f; }
+        }
+        // a claymore in the way of those that follow it: one that swings coming, 8-16 m off, in sight (it faces where it looks)
+        if (g_botMine==0 && g_botMineT<=0.0f && g_minesLeft>0 && melee>=1 && meleeNear>8.0f && g_botSeen && tm<2 && !g_reloading && g_layT<0.0f && g_grounded){
+            MinesPick(); if (g_mineMode){ g_botMine=1; g_botMineT=18.0f; } else g_botMineT=5.0f; }
+        if (g_botMine==1 && meleeNear<5.0f){ g_botMine=0; g_mineMode=0; g_vmRaise=1.0f; }   // too late: the gun
+        g_botLogT-=0.1f;
+        if (g_botLogT<=0.0f){ g_botLogT=5.0f; int alive=0; for (int k=0;k<MAX_ENEMIES;k++) alive+=(g_enemies[k].state==1);
+            DebugLog("bot","\"hp\":%.0f,\"wave\":%d,\"alive\":%d,\"gun\":%d,\"ammo\":%d,\"near\":%.1f,\"pos\":[%.1f,%.1f]", g_playerHp, g_wave, alive, g_curWeapon, BotAmmo(g_curWeapon), nd<1e8f?nd:-1.0f, g_pos.x, g_pos.z); }
+    }
+    Vector3 go=(g_botDodgeT>0.0f)?g_botDodge:g_botDir;
+    *wish=go; *moving=1; *speed=(threat?9.0f:5.0f)*(g_speedT>0.0f?1.5f:1.0f);
+    float throat=99.0f, tgtD=99.0f;                                    // the nearest that swings; how far the target is
+    for (int k=0;k<MAX_ENEMIES;k++){ const Enemy *e=&g_enemies[k]; if (e->state==1 && kEnemy[e->type].kind==AK_MELEE){ float L=hypotf(e->pos.x-g_pos.x,e->pos.z-g_pos.z); if (L<throat) throat=L; } }
+    if (g_botTgt>=0) tgtD=hypotf(g_enemies[g_botTgt].pos.x-g_pos.x,g_enemies[g_botTgt].pos.z-g_pos.z);
+    if (tm==3 && throat>4.0f && g_botDodgeT<=0.0f){ *wish=(Vector3){0,0,0}; *moving=0; }   // at its place by the armed trap: stand
+    if (g_botMine && g_layT>=0.0f){ *moving=0; }
+    float k=fminf(1.0f,dt*9.0f);                                       // turn like a hand on a mouse: quick, not a snap
+    if (lookOn && ((lookOn==2 && throat>2.5f) || (lookOn==1 && (!g_botSeen || tgtD>12.0f)))){   // a trap: the one it waits by (none to shoot within 12 m), or one going off
+        float dx=look.x-g_pos.x, dz=look.z-g_pos.z, hz=sqrtf(dx*dx+dz*dz), d=atan2f(dx,dz)-g_yaw;
+        while (d>PI) d-=2*PI; while (d<-PI) d+=2*PI;
+        g_yaw+=d*k; g_pitch+=(atan2f(look.y-g_pos.y,fmaxf(hz,0.3f))-g_pitch)*k; }
+    else if (g_botTgt>=0 && g_botSeen && g_enemies[g_botTgt].state==1){ Vector3 c=BotAimAt(&g_enemies[g_botTgt]);
+        float dx=c.x-g_pos.x, dz=c.z-g_pos.z, hz=sqrtf(dx*dx+dz*dz), d=atan2f(dx,dz)-g_yaw;
+        while (d>PI) d-=2*PI; while (d<-PI) d+=2*PI;
+        g_yaw+=d*k; g_pitch+=(atan2f(c.y-g_pos.y,fmaxf(hz,0.3f))-g_pitch)*k; }
+    else { float d=atan2f(go.x,go.z)-g_yaw; while (d>PI) d-=2*PI; while (d<-PI) d+=2*PI; g_yaw+=d*fminf(1.0f,dt*3.0f); g_pitch+=(-0.05f-g_pitch)*fminf(1.0f,dt*3.0f); }
+    if (g_pitch>1.2f) g_pitch=1.2f; if (g_pitch<-1.2f) g_pitch=-1.2f;
+}
 static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     if (g_fireCd>0) g_fireCd-=dt;
     if (g_recoil>0) g_recoil=fmaxf(0.0f, g_recoil - dt*7.0f);   // recoil settles in ~0.14s
@@ -4011,7 +4257,8 @@ static void WeaponTrigger(float dt, Vector3 fwd, int held, int pressed){
     if (g_hitMark>0) g_hitMark-=dt;
     if (g_killMark>0) g_killMark-=dt;
     int af=g_autoFire && !g_mineMode;                              // (no gun in the hand while it holds a claymore, mines.h)
-    if (af && g_recPath){                                          // filmed (--record): shoot like a player -- only at an enemy ahead and in range,
+    if (af && g_bot) af=BotWantsFire(dt,fwd);                      // --bot: only at what it has in its sights, can see and can reach
+    else if (af && g_recPath){                                     // filmed (--record): shoot like a player -- only at an enemy ahead and in range,
         static float hold=0; hold-=dt;                             // and ease off the minigun before its 5 s overheat lock
         Vector3 ff=Vector3Normalize((Vector3){fwd.x,0,fwd.z});
         for (int k=0;k<MAX_ENEMIES;k++) if (g_enemies[k].state==1){
@@ -4440,6 +4687,11 @@ static void Update(void) {
     // DIED" overlay. After a short beat, ENTER or a click respawns you at spawn.
     if (g_dead){
         g_deadT += dt;
+        { static float end=-2.0f, again=-2.0f;                     // dev (a filmed run): this many seconds after a death the game ends, as a player would quit
+          if (end<-1.0f){ const char *e=getenv("CHERNOBYL_DEATH_END"); end=(e && *e)?(float)atof(e):-1.0f;           // (CHERNOBYL_DEATH_END) -- or plays again from
+              e=getenv("CHERNOBYL_DEATH_AGAIN"); again=(e && *e)?(float)atof(e):-1.0f; }                               // wave 1, as ENTER does (CHERNOBYL_DEATH_AGAIN)
+          if (end>=0.0f && g_deadT>=end && !g_quit){ g_quit=1; DebugLog("runend","\"why\":\"death\",\"run_t\":%.1f,\"wave\":%d", g_runT, g_wave); }
+          if (again>=0.0f && g_deadT>=again && !g_quit && !g_returnToMenu){ g_returnToMenu=1; DebugLog("runagain","\"run_t\":%.1f,\"wave\":%d,\"kills\":%d", g_runT, g_wave, g_kills); return; } }
         if (g_hurt>0) g_hurt=fmaxf(0.0f, g_hurt-dt*1.2f);
         if (g_deadT>1.0f && LbDeadUpdate()){            // initials / posting first; then ENTER or a click plays again
             if (g_hasMap) g_returnToMenu=1;            // a death ENDS the run -> reload the arena, wave 1
@@ -4529,6 +4781,7 @@ static void Update(void) {
             flat=(Vector3){sinf(g_yaw),0,cosf(g_yaw)}; right=Vector3Normalize(Vector3CrossProduct(flat,(Vector3){0,1,0}));
             wish=Vector3Subtract(wish,flat); if (((int)(GetTime()/3.0))&1) wish=Vector3Add(wish,Vector3Scale(right,0.6f)); moving=1; }
     }
+    if (g_bot){ BotSteer(dt,&wish,&moving,&speed); fwd=Vector3Normalize((Vector3){ sinf(g_yaw)*cosf(g_pitch), sinf(g_pitch), cosf(g_yaw)*cosf(g_pitch) }); }   // dev autopilot that plays to survive
     if (g_layT>=0.0f){ wish=(Vector3){0,0,0}; moving=0; }   // knelt, laying a claymore (mines.h)
     g_playerMoveAmt += ((moving?1.0f:0.0f)-g_playerMoveAmt)*fminf(1.0f,dt*6.0f);   // spoils enemy hitscan aim
     Vector3 mv={0,0,0};
@@ -4634,10 +4887,19 @@ static void Update(void) {
     if (g_swallowClick && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) g_swallowClick=0;                // the button that un-paused has come up: the trigger is live again
     WeaponTrigger(dt, fwd, !g_mineMode && !g_swallowClick && IsMouseButtonDown(MOUSE_BUTTON_LEFT), !g_mineMode && !g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT));   // (the claymore in the hand: the click is its, mines.h)
 
+    { static int done=0;                                   // dev (tests/enemy-paths.sh): CHERNOBYL_ENEMY_AT="x z [type]" -- one enemy stood there at the first
+      if (!done){ done=1; const char *e=getenv("CHERNOBYL_ENEMY_AT"); float x=0, z=0; int t=EN_COOK;   // frame of play, on the floor under that spot (looked
+          if (e && sscanf(e,"%f %f %d",&x,&z,&t)>=2 && t>=0 && t<EN_NTYPES && g_hasMap && g_mapCol.ready){   // for from 3.5 m over his feet)
+              float top=g_pos.y-EYE_H+3.5f, fd=MapRayNearest((Vector3){x,top,z},(Vector3){0,-1,0},20.0f), y=(fd>0.0f)?top-fd:g_pos.y-EYE_H;
+              for (int i=0;i<MAX_ENEMIES;i++) if (g_enemies[i].state==0){ EnemyArm(i,(Vector3){x,y,z},t);
+                  DebugLog("enemyat","\"i\":%d,\"type\":\"%s\",\"at\":[%.2f,%.2f,%.2f]", i, kEnemy[t].name, x, y, z); break; } } } }
     UpdateEnemies(dt);
     TrapsUpdate(dt);
     MinesUpdate(dt);
     UpdateWaves(dt); PickupsUpdate(dt); BoltsUpdate(dt); g_runT+=dt;                       // wave director + the run clock
+    { static float end=-2.0f; static double t0=-1.0; if (end<-1.0f){ const char *e=getenv("CHERNOBYL_RUN_END"); end=(e && *e)?(float)atof(e):-1.0f; }   // dev (a filmed run): it ends
+      if (t0<0.0) t0=GetTime();                                                                                  // this many seconds (wall clock: the film's length) after play
+      if (end>0.0f && GetTime()-t0>=end && !g_quit){ g_quit=1; DebugLog("runend","\"why\":\"time\",\"run_t\":%.1f,\"wave\":%d", g_runT, g_wave); } }   // first began, across runs
     UpdateSmoke(dt);
     UpdateGrenades(dt);
 
@@ -6459,6 +6721,11 @@ static void StartSelectedMap(void){
         if (g_lookSet){ g_yaw=g_lookYaw*0.01745329252f; g_pitch=g_lookPitch*0.01745329252f; }  // dev: aim camera
         else if (!haveCustom){ g_yaw=PickOpenYaw(g_pos);          // face the most open direction, not a wall
             DebugLog("spawnface","\"yaw\":%.1f", g_yaw*57.29578f); }
+        g_trapsFromMap=0; TrapsSync();                // the map's traps, afresh (a new run: none armed, running or cooling from the life before
+                                                      // -- they were read once, and came into every run as the last left them; tests/run-again.sh),
+                                                      // and first: the route grid goes round their solid parts (TrapBlocked)
+        { int busy=0; for (int k=0;k<g_nTraps;k++) busy+=(g_traps[k].state!=0);    // (debug log: how many start the run other than idle -- tests/run-again.sh)
+          DebugLog("runtraps","\"traps\":%d,\"busy\":%d", g_nTraps, busy); }
         MapNavBuild(g_pos);                           // flood the walkable nav grid from the start point
         { const char *at=getenv("CHERNOBYL_AT"); float ax=0, az=0;                                     // dev: stand here instead (metres, map x z) -- map stills
           if (at && sscanf(at,"%f %f",&ax,&az)==2){ g_pos.x=ax; g_pos.z=az; g_noEnemies=!getenv("CHERNOBYL_AT_PLAY"); } }   // (CHERNOBYL_AT_PLAY=1: stand there AND keep the enemies -- tests of how they reach a spot)
@@ -6953,6 +7220,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--vm-hold") && i+1<argc) g_vmHoldDev=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--reload-at") && i+1<argc) g_reloadAt=atoi(argv[++i]);    // dev: force a reload at frame N
         else if (!strcmp(argv[i],"--kite")) g_kite=1;
+        else if (!strcmp(argv[i],"--bot")){ g_bot=1; g_autoFire=1; }
         else if (!strcmp(argv[i],"--no-intro")) g_noIntro=1;                // skip the title intro
         else if (!strcmp(argv[i],"--no-lod")) g_noLod=1;                    // always draw full-detail enemies
         else if (!strcmp(argv[i],"--viewer") && i+1<argc) g_viewA=argv[++i];        // model viewer (see viewer.h)

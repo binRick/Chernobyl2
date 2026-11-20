@@ -194,8 +194,8 @@ static void MineExplode(Mine *m){
         Vector3 vh={ v.x, 0.0f, v.z }; float lh=Vector3Length(vh); int inArc=(lh>1e-3f && Vector3DotProduct(Vector3Scale(vh,1.0f/lh),f)>cosf(MINE_ARC*DEG2RAD) && dist<MINE_KILL);
         if (inArc){ float h=MapRayNearest(c,Vector3Scale(v,1.0f/dist),dist); if (h>0.0f && h<dist-0.4f) inArc=0; }   // (behind a wall: the balls stop there)
         if (inArc || dist<1.6f){
-            g_hurtCause=HC_BLAST; g_hurtFrom=Vector3Subtract(c,Vector3Scale(f,1.5f));
-            HurtEnemy(i, e->boss ? 60.0f+300.0f*(1.0f-dist/MINE_KILL) : 99999.0f, 0, f, ch, 1); g_hurtCause=HC_BULLET; hit++; }
+            g_hurtCause=HC_BLAST; g_hurtFrom=Vector3Subtract(c,Vector3Scale(f,1.5f)); g_hurtBy=HB_MINE;
+            HurtEnemy(i, e->boss ? 60.0f+300.0f*(1.0f-dist/MINE_KILL) : 99999.0f, 0, f, ch, 1); g_hurtCause=HC_BULLET; g_hurtBy=-1; hit++; }
     }
     DynLightAdd((Vector3){c.x+f.x*0.8f,c.y+0.5f,c.z+f.z*0.8f}, (Vector3){3.4f,2.0f,0.9f}, 18.0f, 0.45f, 0);
     for (int q=0;q<18;q++) SpawnSmoke(Vector3Add(c,Vector3Scale(f,GetRandomValue(0,150)/100.0f)),1);
@@ -247,7 +247,7 @@ static void MinesUpdate(float dt){
         if (t){ float dx=t->pos.x-g_pos.x, dy=t->pos.y+0.08f-g_pos.y, dz=t->pos.z-g_pos.z; g_yaw=atan2f(dx,dz); g_pitch=atan2f(dy,sqrtf(dx*dx+dz*dz)); } }
     if (g_mineBeepT>0.0f){ g_mineBeepT-=dt; if (g_mineBeepT<=0.0f && g_hasTrapSnd) SetSoundPitch(g_trapSnd[TS_ARM],1.0f); }   // the trip's beep has played: the lever sounds as a lever again
     if (g_mineMode && g_mineVmOk && g_layT<0.0f && g_mineRaise<=0.2f && g_grounded && !g_paused && !g_menu && !g_dead && (g_mineStart || g_minesLeft>0)   // (on his feet: it is set on the floor he kneels on)
-        && (autoLay || (!g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))){ g_layT=0.0f; g_minePlaced=0; if (autoLay) autoT=autoGap; DebugLog("mine","\"lay\":1"); }
+        && (autoLay || g_mineLayReq || (!g_swallowClick && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))){ g_layT=0.0f; g_minePlaced=0; g_mineLayReq=0; if (autoLay) autoT=autoGap; DebugLog("mine","\"lay\":1"); }
     if (g_layT>=0.0f){
         g_layT+=dt;                                                  // (first: the frame the hand is drawn without it is the frame it is on the floor -- placed before this, it was in neither for one)
         if (!g_minePlaced && g_layT*g_mineFps>=(float)g_layRel){ MinePlace(); g_minePlaced=1; }

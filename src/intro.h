@@ -97,7 +97,7 @@ static int IntroWillPlay(void){
     return 0;
 #else
     char b[256];
-    int automated = (g_maxFrames>0 || g_stress || g_shotFrame>0 || g_shotEvery>0 || g_kite) && !getenv("CHERNOBYL_INTRO_FORCE");   // (FORCE: dev, to test the intro's hand-off with --shot)
+    int automated = (g_maxFrames>0 || g_stress || g_shotFrame>0 || g_shotEvery>0 || g_kite || g_bot) && !getenv("CHERNOBYL_INTRO_FORCE");   // (FORCE: dev, to test the intro's hand-off with --shot)
     return !(g_noIntro || getenv("CHERNOBYL_NO_INTRO") || automated)
         && IntroAsset("intro.mpg",b,sizeof b) && IntroAsset("intro_title.png",b,sizeof b);
 #endif

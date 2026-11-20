@@ -286,6 +286,9 @@ static int      g_mapMeshGlow[4096] = {0};  // per mesh: has a "_glow" texture (
 // the whole swarm. Reuses the collision grid's floor ray + wall test.
 #define NAV_CELL     0.8f    // grid cell size (raylib units)
 #define NAV_STEPUP   0.9f    // max climb between adjacent cells (also the connect threshold)
+#define NAV_CLIMB    0.7f    // the most an ENEMY can step up (main.c's ENEMY_STEP is this): the flow field and the steer never send him up
+                             // more. With NAV_STEPUP there it sent him straight up the 0.9 m riser of a deck, which he cannot step: he
+                             // pushed at its side for good, a player on it safe from every melee enemy (tests/enemy-paths.sh, 2026-11-19)
 #define NAV_STEPDOWN 1.6f    // max drop between adjacent cells when WALKING (stairs/ramps)
 #define NAV_MAXFALL  6.0f    // a chasing enemy will DROP off a ledge up to this tall to reach the player (~one storey). Bigger = leaps off higher places
 #define NAV_WALLR    0.50f   // wall clearance for a walkable nav cell. Tuned so enemies stand off walls by ~their visual width (no poking through thin dividers) while narrow stairs still survive (0.55 prunes them)
@@ -494,6 +497,29 @@ static int MapSphereHitsWall(Vector3 c, float radius){
     return 0;
 }
 
+// How near the nearest wall (anything steeper than a floor) comes to c, up to `radius` (radius when none is that near):
+// MapSphereHitsWall's test, as a distance, so a move can be told from another that presses further in (EnemyMoveOK).
+static float MapSphereWallDist(Vector3 c, float radius){
+    if (!g_mapCol.ready) return radius; AOGrid *g=&g_mapCol.grid; const float *tri=g_mapCol.tri;
+    int x0=(int)((c.x-radius-g->mn.x)/g->cs), x1=(int)((c.x+radius-g->mn.x)/g->cs);
+    int y0=(int)((c.y-radius-g->mn.y)/g->cs), y1=(int)((c.y+radius-g->mn.y)/g->cs);
+    int z0=(int)((c.z-radius-g->mn.z)/g->cs), z1=(int)((c.z+radius-g->mn.z)/g->cs);
+    if(x0<0)x0=0; if(y0<0)y0=0; if(z0<0)z0=0; if(x1>=g->nx)x1=g->nx-1; if(y1>=g->ny)y1=g->ny-1; if(z1>=g->nz)z1=g->nz-1;
+    float best=radius*radius;
+    for (int z=z0;z<=z1;z++)for(int y=y0;y<=y1;y++)for(int x=x0;x<=x1;x++){
+        int cell=MapCellIdx(g,x,y,z);
+        for (int e=g->start[cell]; e<g->start[cell+1]; e++){ int ti=g->items[e];
+            Vector3 A={tri[ti*9],tri[ti*9+1],tri[ti*9+2]},B={tri[ti*9+3],tri[ti*9+4],tri[ti*9+5]},C={tri[ti*9+6],tri[ti*9+7],tri[ti*9+8]};
+            Vector3 fn=Vector3Normalize(Vector3CrossProduct(Vector3Subtract(B,A),Vector3Subtract(C,A)));
+            if (fabsf(fn.y)>0.7f) continue;                // floors/ceilings are not walls
+            Vector3 v=Vector3Subtract(c,MapClosestPtTri(c,A,B,C)); float d2=Vector3DotProduct(v,v);
+            if (d2<best) best=d2;
+        }
+    }
+    return sqrtf(best);
+}
+
+static int TrapBlocked(float x, float z, float pad);   // traps.h: inside a trap's solid parts (its tank, posts, casing)
 // Build the walkable nav grid: flood-fill outward along the floor from `seed`,
 // stepping to a neighbour cell only when there's floor within step range there
 // and no wall in the way. Done once after the map+spawn are known.
@@ -557,6 +583,10 @@ static void MapNavBuild(Vector3 seed){
             if (MapSphereHitsWall((Vector3){(ox+wx)*0.5f,fmaxf(h,nh)+0.73f+NAV_WALLR,(oz+wz)*0.5f},NAV_WALLR)) continue; // wall between
             float hd=MapRayNearest((Vector3){wx,nh+0.15f,wz},(Vector3){0,1,0},NAV_CLEAR);  // ceiling / stair underside above?
             if (hd>0.0f) continue;                                                         // too little headroom: an enemy wouldn't fit
+            // A trap's solid parts (tank, posts, casing -- as they stand idle; the traps are read before the grid is built) are not
+            // a way through: the route ran straight through the coolant-spill tank by breach 2's doorway, and an enemy pushed off it
+            // to the wrong side stepped straight back in, on the spot for good (tests/enemy-paths.sh, 2026-11-19).
+            if (TrapBlocked(wx,wz,NAV_WALLR)) continue;
             int nl=g_navNL[nci]++; g_navFloor[nci*NAV_MAXL+nl]=nh; g_navQueue[tail++]=nci*NAV_MAXL+nl;
         }
     }
@@ -593,7 +623,7 @@ static void MapNavUpdate(Vector3 player){
             for (int l=0;l<g_navNL[nci];l++){                 // connect within a step, OR a ledge the enemy can DROP off down to here
                 int ni=nci*NAV_MAXL+l; if (g_navDist[ni]>=0) continue;
                 float dh=g_navFloor[ni]-h;                    // neighbour height relative to this node
-                if (dh < -NAV_STEPUP || dh > NAV_MAXFALL) continue; // can't climb up to it; CAN drop down from it (up to NAV_MAXFALL)
+                if (dh < -NAV_CLIMB || dh > NAV_MAXFALL) continue; // can't climb up to it; CAN drop down from it (up to NAV_MAXFALL)
                 g_navDist[ni]=g_navDist[node]+1; g_navQueue[tail++]=ni;
             }
         }
@@ -608,14 +638,14 @@ static void MapNavUpdate(Vector3 player){
 // player, or a high "wall" penalty for off-grid / unwalkable / off-step cells so
 // the flow field curves AWAY from walls instead of aiming straight into them.
 // Lowest-cost reachable layer in column ci as seen from sample height h: a normal
-// step (|dh|<=STEPUP) OR a ledge below that the enemy could drop onto (down to
+// step (dh<=NAV_CLIMB) OR a ledge below that the enemy could drop onto (down to
 // NAV_MAXFALL). Letting the cheaper lower floor win means the flow gradient at a
 // ledge edge points OFF the ledge toward the player, not just along the top floor.
 static int NavCostLayer(int ci, float h){
     int best=-1, bd=1<<30;
     for (int l=0;l<g_navNL[ci];l++){
         float dh=g_navFloor[ci*NAV_MAXL+l]-h;
-        if (dh>NAV_STEPUP || dh<-NAV_MAXFALL) continue;     // too high to reach / too far to drop
+        if (dh>NAV_CLIMB || dh<-NAV_MAXFALL) continue;      // too high to step up to / too far to drop
         int ni=ci*NAV_MAXL+l, d=g_navDist[ni];
         if (d>=0 && d<bd){ bd=d; best=l; }
     }
