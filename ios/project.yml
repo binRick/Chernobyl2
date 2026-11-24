@@ -65,8 +65,7 @@ targets:
       - path: raylib_ios_glcompat.h
         type: file
       - path: Assets.xcassets
-    # The phone ships the browser build's asset set (tools/web/pack_web.py -> build/web/fs): the
-    # same models with their textures re-encoded, 86 MB instead of the desktop's 600.
+    # iOS loads both the initial web pack and the deferred enemies from its local bundle.
     postBuildScripts:
       - name: Copy game assets into bundle
         script: |
@@ -74,7 +73,12 @@ targets:
           dst="$TARGET_BUILD_DIR/$WRAPPER_NAME"
           src="$SRCROOT/../build/web/fs"
           test -d "$src/assets" || { echo "run: python3 tools/web/pack_web.py"; exit 1; }
-          for d in assets maps; do rsync -a --delete "$src/$d/" "$dst/$d/"; done
+          later="$src/../later/assets"
+          for boss in headchef priest; do
+            test -s "$later/$boss.glb" || { echo "Missing $boss.glb. Run python3 tools/web/pack_web.py"; exit 1; }
+          done
+          rsync -a --delete "$src/assets/" "$later/" "$dst/assets/"
+          rsync -a --delete "$src/maps/" "$dst/maps/"
           # No title montage on the phone: its archival footage and music are not cleared for the App Store
           # (docs/LICENSES.md), so ios/C2Intro.m shows the plain title card instead. Desktop and browser keep it.
           rm -rf "$dst/intro"

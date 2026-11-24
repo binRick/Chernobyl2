@@ -54,6 +54,7 @@ float ChernobylRcoreContentScale(void) { return s_contentScale; }
     int            _backingH;
     BOOL           _gameInitialized;
 }
+- (void)pauseForInterruption;
 @end
 
 @implementation ChernobylGameViewController
@@ -121,6 +122,11 @@ float ChernobylRcoreContentScale(void) { return s_contentScale; }
     [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }
 
+- (void)pauseForInterruption
+{
+    if (_gameInitialized && _displayLink) ChernobylGamePause();
+}
+
 - (void)viewDidLayoutSubviews
 {
     [super viewDidLayoutSubviews];
@@ -176,7 +182,12 @@ float ChernobylRcoreContentScale(void) { return s_contentScale; }
     [EAGLContext setCurrentContext:_glContext];
     glBindFramebuffer(GL_FRAMEBUFFER, _defaultFbo);
 
-    ChernobylGameStep();
+    if (ChernobylGameStep()) {
+        [_displayLink invalidate];
+        _displayLink = nil;
+        C2IntroView *title = [C2IntroView introOver:self.view];
+        [title gameLoaded:^{ [self startFrames]; }];
+    }
 
     // Present the color renderbuffer that's bound to the CAEAGLLayer. The
     // game's EndDrawing already called rlDrawRenderBatchActive + glFlush
@@ -252,6 +263,12 @@ static int TouchID(UITouch *t, bool isBegin)
 @end
 
 @implementation ChernobylSceneDelegate
+
+- (void)sceneWillResignActive:(UIScene *)scene
+{
+    ChernobylGameViewController *game = (ChernobylGameViewController *)self.window.rootViewController;
+    [game pauseForInterruption];
+}
 
 - (void)scene:(UIScene *)scene
     willConnectToSession:(UISceneSession *)session

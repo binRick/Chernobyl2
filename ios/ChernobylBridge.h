@@ -31,7 +31,8 @@ void ChernobylRcoreTouchEnd(int id);
 // drives these in the sequence: Init -> Step (per CADisplayLink) -> Shutdown.
 
 void ChernobylGameInit(void);     // Equivalent of main() up to the while-loop
-void ChernobylGameStep(void);     // One tick - wraps StepFrame() + per-frame tail
+int ChernobylGameStep(void);      // Returns nonzero when the player quits to the title
+void ChernobylGamePause(void);
 void ChernobylGameShutdown(void); // Cleanup currently after the while-loop in main()
 
 // Bridge -> game: NSBundle.resourcePath for asset loads. Must be called BEFORE

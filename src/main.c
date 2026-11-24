@@ -3970,7 +3970,12 @@ static void TryReload(void){
 
 // Options/pause menu: a vertical stack of buttons centred on screen. DrawMenu and
 // the click hit-test (in Update) both call MenuRect, so the layout can't drift.
-#define MENU_N 4
+enum {
+#if !defined(C2_IOS)
+    MENU_FULLSCREEN,
+#endif
+    MENU_RESTART, MENU_RESUME, MENU_QUIT, MENU_N
+};
 static Rectangle MenuRect(int i){
     int W=GetScreenWidth(), H=GetScreenHeight();
     float bw=360, bh=54, gap=16, total=MENU_N*bh+(MENU_N-1)*gap;
@@ -4646,14 +4651,17 @@ static void Update(void) {
             Vector2 mp=GetMousePosition();
             for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))){
                 if (g_audio && g_hasMenuSelSnd){ SetSoundVolume(g_menuSelSnd,0.6f); PlaySound(g_menuSelSnd); }
-                if (i==0){                                  // Fullscreen toggle
+#if !defined(C2_IOS)
+                if (i==MENU_FULLSCREEN){
                     g_fullscreen=!g_fullscreen; ApplyFullscreen(g_fullscreen); SaveOptions();
                     EnableCursor();                         // the toggle can re-grab; keep it free for the menu
                     DebugLog("options","\"fullscreen\":%s", g_fullscreen?"true":"false");
-                } else if (i==1){ g_returnToMenu=1; g_menu=0;     // Restart Run -> reload the arena from wave 1
+                }
+#endif
+                if (i==MENU_RESTART){ g_returnToMenu=1; g_menu=0;     // Restart Run -> reload the arena from wave 1
                     DebugLog("menu","\"selectMap\":true"); }
-                else if (i==2){ g_menu=0; DisableCursor(); }      // Resume
-                else if (i==3) g_quit=1;                          // Quit
+                else if (i==MENU_RESUME){ g_menu=0; DisableCursor(); }      // Resume
+                else if (i==MENU_QUIT) g_quit=1;                          // Quit
             }
         }
         return;
@@ -5791,7 +5799,11 @@ static void DrawHUD(void) {
     // boss bar (../chernobyl interlude): wide, top-centre, names the boss
     for (int i=0;i<MAX_ENEMIES;i++){ Enemy *e=&g_enemies[i];
         if (!e->boss || e->state!=1) continue;
-        int bw=W/2, bx=W/4, by=46+HudTop(); float f=fmaxf(0.0f,e->hp/e->maxHp);
+        int bw=W/2, bx=W/4, by=46+HudTop();
+#if defined(C2_IOS)
+        by=(int)(g_lay.wpnC[0].y+g_lay.wpnR)+8;
+#endif
+        float f=fmaxf(0.0f,e->hp/e->maxHp);
         DrawRectangle(bx-3,by-3,bw+6,24,(Color){0,0,0,180});
         DrawRectangle(bx,by,(int)(bw*f),18,(Color){200,30,30,255});
         DrawRectangleLines(bx-3,by-3,bw+6,24,(Color){255,200,80,220});
@@ -5935,7 +5947,14 @@ static void DrawMenu(void){
     { int hv=-1; for (int i=0;i<MENU_N;i++) if (CheckCollisionPointRec(mp,MenuRect(i))) hv=i;      // rolled onto a new row: the tick
       if (hv>=0 && hv!=g_menuHover && g_audio && g_hasMenuSnd){ SetSoundVolume(g_menuSnd,0.5f); PlaySound(g_menuSnd); }
       g_menuHover=hv; }
-    const char *labels[MENU_N]={"FULLSCREEN","RESTART RUN","RESUME","QUIT"};
+    const char *labels[MENU_N]={
+#if !defined(C2_IOS)
+        [MENU_FULLSCREEN]="FULLSCREEN", [MENU_QUIT]="QUIT",
+#else
+        [MENU_QUIT]="QUIT TO TITLE",
+#endif
+        [MENU_RESTART]="RESTART RUN", [MENU_RESUME]="RESUME"
+    };
     for (int i=0;i<MENU_N;i++){
         Rectangle r=MenuRect(i); int hov=CheckCollisionPointRec(mp,r);
         DrawRectangleRec(r, hov?(Color){52,14,11,245}:(Color){22,20,20,235});
@@ -5943,12 +5962,17 @@ static void DrawMenu(void){
         DrawRectangle((int)r.x,(int)(r.y+r.height-1),(int)r.width,1,(Color){52,46,44,255});
         int fs=26;
         DrawText(labels[i], (int)r.x+30, (int)(r.y+r.height/2-fs/2), fs, hov?(Color){255,250,240,255}:cream);
-        if (i==0){ const char *v=g_fullscreen?"ON":"OFF"; int vw=MeasureText(v,fs);              // the value sits at the right, as a setting
+#if !defined(C2_IOS)
+        if (i==MENU_FULLSCREEN){ const char *v=g_fullscreen?"ON":"OFF"; int vw=MeasureText(v,fs);              // the value sits at the right, as a setting
             DrawText(v, (int)(r.x+r.width-24-vw), (int)(r.y+r.height/2-fs/2), fs, g_fullscreen?(Color){255,210,60,255}:dim); }
-        else if (hov){ const char *v=">"; DrawText(v, (int)(r.x+r.width-24-MeasureText(v,fs)), (int)(r.y+r.height/2-fs/2), fs, red); }
+        else
+#endif
+        if (hov){ const char *v=">"; DrawText(v, (int)(r.x+r.width-24-MeasureText(v,fs)), (int)(r.y+r.height/2-fs/2), fs, red); }
     }
+#if !defined(C2_IOS)
     DrawText("ESC", (int)first.x, (int)(last.y+last.height+22), 16, red);
     DrawText("close", (int)first.x+44, (int)(last.y+last.height+22), 16, dim);
+#endif
     { const char *v=TextFormat("WAVE %d   KILLS %d", g_wave, g_kills); DrawText(v, (int)(first.x+first.width-MeasureText(v,16)), (int)(last.y+last.height+22), 16, dim); }
 }
 
@@ -6644,8 +6668,8 @@ static void LoadingFrame(void){                        // the title, dimmed, and
         EndDrawing(); }
 #endif
 }
+static void ResetRunOnMap(void);
 static void StartSelectedMap(void){
-    StopAllSfx();                                      // a fresh run starts quiet
     if (g_mapPath){
         if (g_preMapOK && !strcmp(g_prePath,g_mapPath)){ g_map=g_preMap; g_hasMap=1; g_preMapOK=0; }
         else g_map=LoadQ3MapModel(g_mapPath,&g_hasMap);
@@ -6712,6 +6736,11 @@ static void StartSelectedMap(void){
         }
     }
 
+    ResetRunOnMap();
+}
+
+static void ResetRunOnMap(void){
+    StopAllSfx();
     if (g_hasMap){                                    // start at a map spawn point, drop to the floor
         g_pos = g_hasSpawn ? (Vector3){g_mapSpawn.x, g_mapSpawn.y+2.0f, g_mapSpawn.z} : (Vector3){0,12,0};
         g_yaw=0.0f; g_pitch=0.0f; g_vy=0.0f; g_grounded=0;
@@ -7423,9 +7452,25 @@ void ChernobylGameInit(void){
       if (e && *e){ static char buf[256]; strlcpy(buf,e,sizeof buf); for (char *t=strtok(buf," "); t && ac<15; t=strtok(NULL," ")) av[ac++]=t; av[ac]=NULL; } }
     C2Main(ac, av);
 }
-void ChernobylGameStep(void){
+int ChernobylGameStep(void){
     Frame();
-    if (g_returnToMenu){ g_returnToMenu=0; EndCurrentMap(); g_mapPath=DEFAULT_MAP; StartSelectedMap(); }   // "play again": reload in place, as in the browser
+    int showTitle=g_quit;
+    if (g_returnToMenu || showTitle){
+        g_quit=0;
+        g_returnToMenu=0;
+        g_menu=0;
+        if (g_hasMap && g_mapPath && strcmp(g_mapPath,DEFAULT_MAP)==0){
+            ResetRunOnMap();
+        } else {
+            EndCurrentMap();
+            g_mapPath=DEFAULT_MAP;
+            StartSelectedMap();
+        }
+    }
+    return showTitle;
+}
+void ChernobylGamePause(void){
+    if (!g_dead && !g_paused) g_menu=1;
 }
 void ChernobylGameShutdown(void){ if (g_audio) CloseAudioDevice(); CloseWindow(); }
 #endif
