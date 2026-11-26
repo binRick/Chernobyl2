@@ -17,6 +17,8 @@
 // ----------------------------------------------------------------------------
 
 #include "raylib.h"
+#include "playstats.h"
+#define C2_VERSION "1.0.2"   // keep in step with ios/project.yml MARKETING_VERSION (iOS reports the bundle version)
 #include "raymath.h"
 #include "rlgl.h"
 #include <stdio.h>
@@ -6419,6 +6421,7 @@ static void DrawScene(void){
 static void LoadPump(void);
 static void Frame(void) {
     static int frameNo=0;
+    PlayStatsUpdate(GetFrameTime());
     if (g_debug && frameNo>30 && g_perfN<4096) g_perfDt[g_perfN++]=GetFrameTime();
     AudioBedUpdate(GetFrameTime());
     LoadPump();                                   // (staged loading: an enemy that has finished loading joins the game)
@@ -7291,6 +7294,11 @@ int main(int argc, char **argv) {
     int bgRun = getenv("CHERNOBYL_BACKGROUND") && *getenv("CHERNOBYL_BACKGROUND") && strcmp(getenv("CHERNOBYL_BACKGROUND"),"0");
     if (bgRun) SetConfigFlags(FLAG_WINDOW_UNFOCUSED|FLAG_WINDOW_HIDDEN);
     InitWindow(1280,720,"Chernobyl 2");
+    // Anonymous play stats (sessions, play time; see playstats.h). Never from hidden test runs,
+    // screenshots, recordings, bots, soaks or the dev tools and sandboxes.
+    if (!bgRun && !g_maxFrames && !g_shotFrame && !g_shotEvery && !g_recPath && !g_viewA && !g_viewShots &&
+        !g_soundboard && !g_trapDemo && !g_mineStart && !g_bot && !g_stress && !g_cycleTest)
+        PlayStatsInit("chernobyl2", C2_VERSION, ".");
 #if defined(C2_IOS)
     g_uis=(float)C2RealH()/720.0f; if (g_uis<1.0f) g_uis=1.0f;      // the game's screen is 720 high; the phone's is what it is
 #endif
@@ -7371,7 +7379,7 @@ int main(int argc, char **argv) {
         LoadThreadFinish();
         g_introPlayed=intro;
     } else LoadGameAssets();
-    if (introQuit){ DebugLog("intro","\"quit\":true"); CloseAudioDevice(); CloseWindow(); return 0; }
+    if (introQuit){ DebugLog("intro","\"quit\":true"); PlayStatsShutdown(); CloseAudioDevice(); CloseWindow(); return 0; }
     if (!g_soundboard) SoundsApplyOff();                 // sounds switched off on the dev sound board stay off in the game
 
     if (g_soundboard){                  // --sounds: the sound board, no map, no game
@@ -7437,6 +7445,7 @@ int main(int argc, char **argv) {
                                           if (g_weapons[i].hasAuxSnd) UnloadSound(g_weapons[i].auxSnd); }
         CloseAudioDevice();
     }
+    PlayStatsShutdown();
     CloseWindow();
     return 0;
 }
@@ -7472,5 +7481,5 @@ int ChernobylGameStep(void){
 void ChernobylGamePause(void){
     if (!g_dead && !g_paused) g_menu=1;
 }
-void ChernobylGameShutdown(void){ if (g_audio) CloseAudioDevice(); CloseWindow(); }
+void ChernobylGameShutdown(void){ PlayStatsShutdown(); if (g_audio) CloseAudioDevice(); CloseWindow(); }
 #endif

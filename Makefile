@@ -4,7 +4,7 @@
 NAME    := chernobyl2
 BUILD   := build
 BIN     := $(BUILD)/$(NAME)
-SRC     := src/main.c
+SRC     := src/main.c src/playstats.c
 HDRS    := $(wildcard src/*.h)
 
 CC      ?= clang
@@ -62,11 +62,11 @@ EMCC_ENV := PATH="/opt/homebrew/bin:$$PATH" EMCC_PYTHON=/opt/homebrew/bin/python
 WEBFS    := $(BUILD)/web/fs
 WEBDIST  := $(BUILD)/web/dist
 .PHONY: web web-serve
-web: src/main.c $(HDRS) web/shell.html $(RAYLIB_DIR)/lib/libraylib.web.a
+web: src/main.c src/playstats.c $(HDRS) web/shell.html $(RAYLIB_DIR)/lib/libraylib.web.a
 	@test -d $(WEBFS)/assets || { echo "run: python3 tools/web/pack_web.py"; exit 1; }
 	@mkdir -p $(WEBDIST)
 	$(EMCC_ENV) emcc -std=gnu11 -O2 -Wall -Wno-unused-result -Wno-unused-function \
-	    -DPLATFORM_WEB -DGRAPHICS_API_OPENGL_ES3 $(INCLUDES) -o $(WEBDIST)/index.html src/main.c \
+	    -DPLATFORM_WEB -DGRAPHICS_API_OPENGL_ES3 $(INCLUDES) -o $(WEBDIST)/index.html src/main.c src/playstats.c \
 	    $(RAYLIB_DIR)/lib/libraylib.web.a \
 	    -s USE_GLFW=3 -s MIN_WEBGL_VERSION=2 -s MAX_WEBGL_VERSION=2 -s FORCE_FILESYSTEM=1 \
 	    -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=512MB -s MAXIMUM_MEMORY=2GB -s STACK_SIZE=4MB \

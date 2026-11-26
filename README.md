@@ -47,6 +47,17 @@ Chernobyl). Events: `boot`, `frame` (sampled), `fire`, `shot`, `shutdown`.
 grep '^{' /tmp/chernobyl2-debug.log | jq -c .
 ```
 
+## Play stats
+
+`src/playstats.c` (shared with the other ximg.app games) sends anonymous play
+sessions to `https://ximg.app/api/play/`: game, version, platform, a random
+install id, and play time (a beat every 60 s and at exit). The server adds a
+country from the IP and does not keep the IP. Dashboard (owner only):
+https://stats.ximg.app/games/. Hidden test runs (`CHERNOBYL_BACKGROUND`, `--frames`, `--shot`, `--shot-every`, `--record`) and the dev tools / sandboxes / bots (`--viewer`, `--sounds`, `--traps`, `--mines`, `--bot`, `--stress`, `--cycle`) never send; `PLAYSTATS_OFF=1`
+turns it off anywhere. The App Store privacy label and `ios/PrivacyInfo.xcprivacy`
+declare Product Interaction + Coarse Location, not linked, not tracking — keep
+them in step if what is sent ever changes. Keep `C2_VERSION` in `src/main.c` equal to `MARKETING_VERSION` in `ios/project.yml`.
+
 ## Next steps
 
 - Add a weapon (a low-bone-count gun model works cleanly in raylib).
