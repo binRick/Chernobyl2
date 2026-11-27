@@ -6092,6 +6092,7 @@ static RenderTexture2D PostTargetHDR(int w, int h, int *hdr){
     }
     *hdr=0; return LoadRenderTexture(w,h);
 }
+static Shader g_ppBrightBlur; static int g_ppBBDir=-1;
 static void PostInit(int w, int h){
     static const char *fsBright=GLSL_HDR
         "in vec2 fragTexCoord; uniform sampler2D texture0; out vec4 finalColor;\n"
@@ -6103,11 +6104,23 @@ static void PostInit(int w, int h){
         "  c+=(texture(texture0,fragTexCoord+dir*1.385).rgb+texture(texture0,fragTexCoord-dir*1.385).rgb)*0.316;\n"
         "  c+=(texture(texture0,fragTexCoord+dir*3.231).rgb+texture(texture0,fragTexCoord-dir*3.231).rgb)*0.070;\n"
         "  finalColor=vec4(c,1.0); }\n";
+    // iPhone: the bright pass folded into the first (horizontal) blur, read straight off the full-res scene.
+    static const char *fsBrightBlur=GLSL_HDR
+        "in vec2 fragTexCoord; uniform sampler2D texture0; uniform vec2 dir; out vec4 finalColor;\n"
+        "vec3 br(vec2 uv){ vec3 c=min(texture(texture0,uv).rgb, vec3(6.0)); float l=max(c.r,max(c.g,c.b)); return c*smoothstep(0.80,1.45,l); }\n"
+        "void main(){ vec3 c=br(fragTexCoord)*0.227;\n"
+        "  c+=(br(fragTexCoord+dir*1.385)+br(fragTexCoord-dir*1.385))*0.316;\n"
+        "  c+=(br(fragTexCoord+dir*3.231)+br(fragTexCoord-dir*3.231))*0.070;\n"
+        "  finalColor=vec4(c,1.0); }\n";
     static const char *fsComp=GLSL_HDR
         "in vec2 fragTexCoord; uniform sampler2D texture0; uniform sampler2D bloomTex; uniform sampler2D bloomWide; uniform vec4 P; uniform float time; out vec4 finalColor;\n"   // P = hurt, lowhp, shake, -
         "void main(){ vec2 uv=fragTexCoord, d=uv-0.5; float ca=0.0010+P.x*0.0060+P.z*0.0030;\n"
         "  vec3 c=vec3(texture(texture0,uv+d*ca).r, texture(texture0,uv).g, texture(texture0,uv-d*ca).b);\n"
+#if defined(PLATFORM_IOS)
+        "  c+=texture(bloomTex,uv).rgb*0.95;\n"                                         // iPhone: no wide veil pass; the one glow carries a little more
+#else
         "  c+=texture(bloomTex,uv).rgb*0.62+texture(bloomWide,uv).rgb*0.55;\n"                       // the glow, and the wide veil round a strong light
+#endif
         "  vec3 hi=max(c-0.80,0.0); c=min(c,0.80)+hi/(1.0+hi*1.6);\n"                 // highlights roll off instead of clipping
         "  c=c*1.30+0.012; c=mix(c, c*c*(3.0-2.0*c), 0.16);\n"                                         // a little contrast
         "  { float lg=dot(c,vec3(0.299,0.587,0.114)); c*=mix(vec3(0.93,1.0,1.08), vec3(1.05,1.0,0.94), smoothstep(0.04,0.60,lg)); }\n"   // the grade: shadows lean cold, the lit parts warm
@@ -6119,6 +6132,7 @@ static void PostInit(int w, int h){
     if (g_pp.ok){ UnloadRenderTexture(g_pp.scene); UnloadRenderTexture(g_pp.a); UnloadRenderTexture(g_pp.b); UnloadRenderTexture(g_pp.c); UnloadRenderTexture(g_pp.d); }
     else if (!g_pp.bright.id){
         g_pp.bright=LoadShaderFromMemory(0,fsBright); g_pp.blur=LoadShaderFromMemory(0,fsBlur); g_pp.comp=LoadShaderFromMemory(0,fsComp);
+        g_ppBrightBlur=LoadShaderFromMemory(0,fsBrightBlur); g_ppBBDir=GetShaderLocation(g_ppBrightBlur,"dir");
         g_pp.lDir=GetShaderLocation(g_pp.blur,"dir"); g_pp.lBloom=GetShaderLocation(g_pp.comp,"bloomTex"); g_pp.lBloom2=GetShaderLocation(g_pp.comp,"bloomWide");
         g_pp.lP=GetShaderLocation(g_pp.comp,"P"); g_pp.lTime=GetShaderLocation(g_pp.comp,"time");
     }
@@ -6457,6 +6471,15 @@ static void Frame(void) {
     post=post && g_pp.ok;
     if (post){
         BeginTextureMode(g_pp.scene); DrawScene(); EndTextureMode();
+#if defined(PLATFORM_IOS)
+        // iPhone: 4 render passes, not 12 -- each target switch is its own command buffer on iOS's GL-on-Metal layer
+        // (Metal System Trace 2026-11-26). Bright pass folded into the horizontal blur; one blur round; no wide veil.
+        { float dx[2]={1.0f/g_pp.a.texture.width,0}, dy[2]={0,1.0f/g_pp.a.texture.height};
+          BeginTextureMode(g_pp.b); BeginShaderMode(g_ppBrightBlur); SetShaderValue(g_ppBrightBlur,g_ppBBDir,dx,SHADER_UNIFORM_VEC2);
+              PostBlit(g_pp.scene.texture,g_pp.b.texture.width,g_pp.b.texture.height); EndShaderMode(); EndTextureMode();
+          BeginTextureMode(g_pp.a); BeginShaderMode(g_pp.blur); SetShaderValue(g_pp.blur,g_pp.lDir,dy,SHADER_UNIFORM_VEC2);
+              PostBlit(g_pp.b.texture,g_pp.a.texture.width,g_pp.a.texture.height); EndShaderMode(); EndTextureMode(); }
+#else
         BeginTextureMode(g_pp.a); BeginShaderMode(g_pp.bright); PostBlit(g_pp.scene.texture,g_pp.a.texture.width,g_pp.a.texture.height); EndShaderMode(); EndTextureMode();
         for (int it=0;it<C2_BLUR_ROUNDS;it++){    // two rounds of the 9-tap blur at quarter res: a wide, soft glow (one on iPhone)
             float dx[2]={(1.0f+it)/g_pp.a.texture.width,0}, dy[2]={0,(1.0f+it)/g_pp.a.texture.height};
@@ -6473,6 +6496,7 @@ static void Frame(void) {
             BeginTextureMode(g_pp.c); BeginShaderMode(g_pp.blur); SetShaderValue(g_pp.blur,g_pp.lDir,dy,SHADER_UNIFORM_VEC2);
                 PostBlit(g_pp.d.texture,g_pp.c.texture.width,g_pp.c.texture.height); EndShaderMode(); EndTextureMode();
         }
+#endif
     }
     BeginDrawing();
 #if defined(C2_IOS)
