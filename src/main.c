@@ -6539,6 +6539,23 @@ static void Frame(void) {
         DebugLog("shotseq","\"file\":\"%s\",\"anim\":%d,\"animName\":\"%s\",\"animT\":%.1f,\"reloading\":%d", fn, g_curAnim,
                  (g_gunAnimN>0&&g_curAnim<g_gunAnimN)?g_gunAnim[g_curAnim].name:"", g_animT, g_reloading);
     }
+    // dev: C2_FRAMEDUMP="start count tag" -- frames start..start+count-1, half size, raw RGBA appended to <tag>.rgba
+    // (Documents/ on the phone, pull it with devicectl; build/ elsewhere) plus <tag>.txt with "width height count".
+    // Raw writes cost a few ms, so the capture runs near full speed and 60 FPS-only flicker stays visible.
+    // Convert: ffmpeg -f rawvideo -pix_fmt rgba -s WxH -i tag.rgba tag_%04d.png  (see the testing-iphone-frames skill)
+    { static int s0=-1,n=0; static char tg[16]="fd"; static FILE *fo=NULL; static int fw=0,fh=0;
+      if (s0<0){ const char*e=getenv("C2_FRAMEDUMP"); s0=0; if(!(e && sscanf(e,"%d %d %15s",&s0,&n,tg)>=2 && n>0)) n=0; }
+      if (n>0 && frameNo>=s0 && frameNo<s0+n){
+#if defined(C2_IOS)
+        const char *dir=TextFormat("%s/Documents",getenv("HOME"));
+#else
+        const char *dir="build";
+#endif
+        Image im=LoadImageFromScreen(); ImageResize(&im,im.width/2,im.height/2);
+        if (!fo){ fo=fopen(TextFormat("%s/%s.rgba",dir,tg),"wb"); fw=im.width; fh=im.height; }
+        if (fo && im.width==fw && im.height==fh) fwrite(im.data,4,(size_t)fw*fh,fo);
+        UnloadImage(im);
+        if (frameNo==s0+n-1 && fo){ fclose(fo); fo=NULL; FILE *ft=fopen(TextFormat("%s/%s.txt",dir,tg),"w"); if (ft){ fprintf(ft,"%d %d %d\n",fw,fh,n); fclose(ft); } } } }
     if (g_shotFrame>0 && frameNo==g_shotFrame){
         TakeScreenshot("chernobyl2-shot.png");
         DebugLog("shot","\"file\":\"chernobyl2-shot.png\",\"frame\":%d", frameNo);
