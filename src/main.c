@@ -159,6 +159,14 @@ void MacSetDockIcon(const char *path);   // macicon.m: Dock / Cmd-Tab icon (SetW
   #define ANIM_APPLY(m,a,f)  UpdateModelAnimation((m),(a),(int)(f))
 #endif
 
+// Bloom blur rounds per level. iPhone: 1. Every render-target switch is its own command buffer on
+// iOS's GL-on-Metal layer (~24 per frame, 575/s at 24 FPS in a Metal System Trace, 2026-11-26) while the
+// GPU sat ~35% busy: halving the blur passes is the cheapest cut.
+#if defined(PLATFORM_IOS)
+#define C2_BLUR_ROUNDS 1
+#else
+#define C2_BLUR_ROUNDS 2
+#endif
 // ---- Debug JSON logging -----------------------------------------------------
 static int   g_debug     = 0;
 static FILE *g_dbg       = NULL;
@@ -6450,7 +6458,7 @@ static void Frame(void) {
     if (post){
         BeginTextureMode(g_pp.scene); DrawScene(); EndTextureMode();
         BeginTextureMode(g_pp.a); BeginShaderMode(g_pp.bright); PostBlit(g_pp.scene.texture,g_pp.a.texture.width,g_pp.a.texture.height); EndShaderMode(); EndTextureMode();
-        for (int it=0;it<2;it++){                 // two rounds of the 9-tap blur at quarter res: a wide, soft glow
+        for (int it=0;it<C2_BLUR_ROUNDS;it++){    // two rounds of the 9-tap blur at quarter res: a wide, soft glow (one on iPhone)
             float dx[2]={(1.0f+it)/g_pp.a.texture.width,0}, dy[2]={0,(1.0f+it)/g_pp.a.texture.height};
             BeginTextureMode(g_pp.b); BeginShaderMode(g_pp.blur); SetShaderValue(g_pp.blur,g_pp.lDir,dx,SHADER_UNIFORM_VEC2);
                 PostBlit(g_pp.a.texture,g_pp.b.texture.width,g_pp.b.texture.height); EndShaderMode(); EndTextureMode();
@@ -6458,7 +6466,7 @@ static void Frame(void) {
                 PostBlit(g_pp.b.texture,g_pp.a.texture.width,g_pp.a.texture.height); EndShaderMode(); EndTextureMode();
         }
         BeginTextureMode(g_pp.c); PostBlit(g_pp.a.texture,g_pp.c.texture.width,g_pp.c.texture.height); EndTextureMode();   // ...and down again, blurred again: the wide veil
-        for (int it=0;it<2;it++){
+        for (int it=0;it<C2_BLUR_ROUNDS;it++){
             float dx[2]={(1.0f+it)/g_pp.c.texture.width,0}, dy[2]={0,(1.0f+it)/g_pp.c.texture.height};
             BeginTextureMode(g_pp.d); BeginShaderMode(g_pp.blur); SetShaderValue(g_pp.blur,g_pp.lDir,dx,SHADER_UNIFORM_VEC2);
                 PostBlit(g_pp.c.texture,g_pp.d.texture.width,g_pp.d.texture.height); EndShaderMode(); EndTextureMode();
