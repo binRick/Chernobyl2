@@ -553,7 +553,7 @@ static void TrapsDraw(void){
         rlPushMatrix(); rlTranslatef(t->c.x,t->c.y,t->c.z); rlRotatef(90.0f-t->ang*RAD2DEG,0,1,0);          // local x = tv (across), z = rv (outward)
         { float sx=kTrapSwitchX[k], sz=kTrapSwitchZ[k]; Color lamp=(t->state==0)?(Color){60,230,90,255}:(t->state==1)?(Color){255,70,50,255}:(t->state==3)?((fmodf(tm,0.5f)<0.3f)?(Color){255,190,40,255}:(Color){120,80,10,255}):(Color){90,90,90,255};   // green: can be armed; amber, blinking: armed; red: going off; grey: recharging
           if (!mp){ TrapBox((Vector3){sx,0.55f,sz},(Vector3){0.14f,1.1f,0.14f},dark); TrapBox((Vector3){sx,1.2f,sz},(Vector3){0.34f,0.3f,0.22f},(k==TR_HOSE)?red:steel); }
-          DrawSphere((Vector3){sx,1.47f,sz},0.055f,lamp); }
+          DrawSphereEx((Vector3){sx,1.47f,sz},0.055f,4,6,lamp); }   // a 5 cm lamp: 4x6 is plenty (DrawSphere's 16x16 cost every trap 500+ immediate-mode verts a frame)
         switch (k){
         case TR_STEAM: if (!mb){ TrapBox((Vector3){-3.3f,1.7f,0},(Vector3){0.16f,3.4f,0.16f},steel); TrapBox((Vector3){3.3f,1.7f,0},(Vector3){0.16f,3.4f,0.16f},steel);
             DrawCylinderEx((Vector3){-3.4f,3.3f,0},(Vector3){3.4f,3.3f,0},0.14f,0.14f,10,(Color){110,112,118,255}); } break;

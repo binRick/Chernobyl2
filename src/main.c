@@ -1671,6 +1671,21 @@ static void EnemyRigGPU(EnemyRig *rg){
 // Light an enemy for this draw: the 4 strongest arena lamps that actually reach its
 // chest (one shadow ray each, so lamps behind walls don't bleed through), plus a soft
 // fill from the player. Uploaded to the skinning shader's light uniforms.
+// Lamps never move, so whether a wall hides lamp l from a point only needs working out once per
+// 1 m cell: cache it (a ray per lamp per drawn enemy/trap per frame was ~8% of an iPhone frame).
+#define LAMPVIS_N 4096
+static struct { int x,y,z,l; unsigned char blocked, used; } g_lampVis[LAMPVIS_N];
+static int LampBlocked(Vector3 P, int l, Vector3 dl, float d){
+    static const void *mapKey=NULL; static int lampsKey=-1;                 // a new map (or its lamps): forget the old answers
+    if (mapKey!=(const void *)g_map.meshes || lampsKey!=g_nMapLights){ memset(g_lampVis,0,sizeof g_lampVis); mapKey=g_map.meshes; lampsKey=g_nMapLights; }
+    int cx=(int)floorf(P.x), cy=(int)floorf(P.y), cz=(int)floorf(P.z);
+    unsigned h=((unsigned)cx*73856093u ^ (unsigned)cy*19349663u ^ (unsigned)cz*83492791u ^ (unsigned)l*2654435761u) & (LAMPVIS_N-1);
+    if (g_lampVis[h].used && g_lampVis[h].x==cx && g_lampVis[h].y==cy && g_lampVis[h].z==cz && g_lampVis[h].l==l) return g_lampVis[h].blocked;
+    float hit=MapRayNearest(P, Vector3Scale(dl,1.0f/d), d-0.2f);
+    int b=(hit>0.0f && hit<d-0.3f);
+    g_lampVis[h].x=cx; g_lampVis[h].y=cy; g_lampVis[h].z=cz; g_lampVis[h].l=l; g_lampVis[h].blocked=(unsigned char)b; g_lampVis[h].used=1;
+    return b;
+}
 static void EnemyLightUpload(Vector3 at){
     if (g_skinReady!=1) return;
     Vector3 P=(Vector3){at.x, at.y+1.1f, at.z};
@@ -1682,10 +1697,7 @@ static void EnemyLightUpload(Vector3 at){
         float w=(1.0f-d/L->R)*(L->color.x+L->color.y+L->color.z);
         int k=-1; for (int j=0;j<4;j++) if (best[j]<0 || w>bw[j]){ k=j; break; }
         if (k<0) continue;
-        if (g_hasMap && g_mapCol.ready && d>0.3f){
-            float hit=MapRayNearest(P, Vector3Scale(dl,1.0f/d), d-0.2f);
-            if (hit>0.0f && hit<d-0.3f) continue;              // a wall between enemy and lamp
-        }
+        if (g_hasMap && g_mapCol.ready && d>0.3f && LampBlocked(P, l, dl, d)) continue;   // a wall between enemy and lamp
         for (int j=3;j>k;j--){ best[j]=best[j-1]; bw[j]=bw[j-1]; }
         best[k]=l; bw[k]=w;
     }
@@ -5294,7 +5306,12 @@ static void DrawEnemies(void){
 }
 
 static void PoseGun(void){
-    if (g_gunAnimN>0 && g_curAnim<g_gunAnimN) ANIM_APPLY(g_gun, g_gunAnim[g_curAnim], g_animT);
+    // The arms are skinned on the CPU on iPhone (11% of a frame): re-pose only when the clip or its frame changes.
+    static int lastAnim=-1; static float lastT=-1e9f; static void *lastMeshes=NULL;
+    if (g_gunAnimN>0 && g_curAnim<g_gunAnimN){
+        if (g_curAnim==lastAnim && g_gun.meshes==lastMeshes && fabsf(g_animT-lastT)<1.0f) return;
+        ANIM_APPLY(g_gun, g_gunAnim[g_curAnim], g_animT); lastAnim=g_curAnim; lastT=g_animT; lastMeshes=g_gun.meshes;
+    }
 }
 
 // INSPECT (V): gun floats ~2.5m ahead, auto-fit, spinning, in the world camera.
@@ -7372,6 +7389,11 @@ int main(int argc, char **argv) {
     g_loadMap = (g_mapPath && !g_soundboard && !g_viewA);
     int introQuit=0;
     g_stageLoad = (!g_soundboard && !g_viewA && g_forceEnemy==-1 && !g_devBoss && !g_stress && !getenv("CHERNOBYL_LOAD_ALL"));
+#if defined(PLATFORM_IOS)
+    // iPhone: no load thread, so deferred rigs were parsed and their JPEGs decoded on the main thread mid-fight
+    // (11.5% of play time in an iPhone 14 profile, 2026-11-26). Load them all behind the loading screen instead.
+    g_stageLoad = 0;
+#endif
     if (!g_soundboard && !g_viewA && LoadThreadStart()){
         int intro=IntroWillPlay();
         if (intro && !RunIntro()){ if (!g_loadFinished) exit(0); introQuit=1; }      // (window closed mid-load: nothing to save, and the loader is mid-flight)
