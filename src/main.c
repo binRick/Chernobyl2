@@ -7343,6 +7343,13 @@ int main(int argc, char **argv) {
     int bgRun = getenv("CHERNOBYL_BACKGROUND") && *getenv("CHERNOBYL_BACKGROUND") && strcmp(getenv("CHERNOBYL_BACKGROUND"),"0");
     if (bgRun) SetConfigFlags(FLAG_WINDOW_UNFOCUSED|FLAG_WINDOW_HIDDEN);
     InitWindow(1280,720,"Chernobyl 2");
+#if defined(C2_IOS)
+    // iPhone: raylib's one shape buffer is refilled at every mid-frame flush (blend/shader change) while the GPU still
+    // reads it, and Apple's GL-on-Metal then submits and waits each time, so CPU and GPU take turns (30 FPS).
+    // A ring of buffers lets each flush fill a free one. C2_BATCH_BUFFERS=1 restores the single buffer.
+    { const char *e=getenv("C2_BATCH_BUFFERS"); int nb=e?atoi(e):16;
+      if (nb>1){ static rlRenderBatch ring; ring=rlLoadRenderBatch(nb,8192); rlSetRenderBatchActive(&ring); } }
+#endif
     // Anonymous play stats (sessions, play time; see playstats.h). Never from hidden test runs,
     // screenshots, recordings, bots, soaks or the dev tools and sandboxes.
     if (!bgRun && !g_maxFrames && !g_shotFrame && !g_shotEvery && !g_recPath && !g_viewA && !g_viewShots &&
